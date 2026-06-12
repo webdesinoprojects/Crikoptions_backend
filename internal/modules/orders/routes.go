@@ -11,4 +11,8 @@ func RegisterRoutes(mux *http.ServeMux, handler *Handler, authHandler *auth.Hand
 	mux.HandleFunc("GET /api/v1/orders", authHandler.RequireAuth(handler.GetOrders))
 	mux.HandleFunc("POST /api/v1/orders", authHandler.RequireAuth(handler.CreateOrder))
 	mux.HandleFunc("PATCH /api/v1/orders/{id}/cancel", authHandler.RequireAuth(handler.CancelOrder))
+
+	// Admin-only endpoints - require both auth and admin role.
+	mux.HandleFunc("GET /api/v1/admin/orders", authHandler.RequireAuth(authHandler.RequireAdmin(handler.ListAdminOrders)))
+	mux.HandleFunc("GET /api/v1/admin/orders/{id}", authHandler.RequireAuth(authHandler.RequireAdmin(handler.GetAdminOrder)))
 }

@@ -16,9 +16,10 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/middleware"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/health"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/routes"
 )
@@ -29,96 +30,56 @@ func main() {
 		log.Fatalf("config load: %v", err)
 	}
 
-	// Try connecting to MongoDB. If it succeeds, all data-bearing modules use
-	// Mongo-backed repositories. If it fails, they fall back to in-memory.
 	mongo, err := database.ConnectMongo(context.Background(), cfg.MongoURI, cfg.MongoDB)
-	useMongo := err == nil
 	if err != nil {
-		log.Printf("WARNING: MongoDB connect error: %v. Falling back to In-Memory repositories for all data modules.", err)
-	} else {
-		defer func() { _ = mongo.Close(context.Background()) }()
+		log.Fatalf("MongoDB connection failed; no in-memory fallback is configured: %v", err)
 	}
+	defer func() { _ = mongo.Close(context.Background()) }()
+	log.Printf("MongoDB connected; no in-memory fallback enabled; using database %q", cfg.MongoDB)
 
-	// Auth (always needed).
-	var authRepo auth.UserRepository
-	if useMongo {
-		authRepo = auth.NewMongoUserRepository(mongo.DB)
-	} else {
-		authRepo = auth.NewInMemoryUserRepository()
-	}
-
+	authRepo := auth.NewMongoUserRepository(mongo.DB)
 	adminEmails := parseAdminEmails(os.Getenv("ADMIN_EMAILS"))
 	authService, err := auth.NewService(authRepo, cfg.JWTSecret, time.Duration(cfg.TokenHours)*time.Hour, adminEmails)
 	if err != nil {
 		log.Fatalf("auth service: %v", err)
 	}
-	if err := authService.EnsureIndexes(context.Background()); err != nil {
-		log.Printf("WARNING: auth indexes: %v", err)
-	}
+	mustEnsureIndexes(context.Background(), "users", authService.EnsureIndexes)
 	authHandler := auth.NewHandler(authService)
 
 	// Matches.
-	var matchesRepo matches.Repository
-	if useMongo {
-		matchesRepo = matches.NewMongoRepository(mongo.DB)
-	} else {
-		matchesRepo = matches.NewMemoryRepository()
-	}
+	matchesRepo := matches.NewMongoRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
+	seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
 	matchesService := matches.NewService(matchesRepo)
-	if useMongo {
-		if err := matchesRepo.EnsureIndexes(context.Background()); err != nil {
-			log.Printf("WARNING: matches indexes: %v", err)
-		}
-	}
 	matchesHandler := matches.NewHandler(matchesService)
 
 	// Markets.
-	var marketsRepo markets.Repository
-	if useMongo {
-		marketsRepo = markets.NewMongoRepository(mongo.DB)
-	} else {
-		marketsRepo = markets.NewMemoryRepository()
-	}
+	marketsRepo := markets.NewMongoRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "markets", marketsRepo.EnsureIndexes)
+	seedMongoDefaults(context.Background(), "markets", marketsRepo.SeedDefaults)
 	marketsService := markets.NewService(marketsRepo)
-	if useMongo {
-		if err := marketsRepo.EnsureIndexes(context.Background()); err != nil {
-			log.Printf("WARNING: markets indexes: %v", err)
-		}
-	}
 	marketsHandler := markets.NewHandler(marketsService)
 
 	// Orders.
-	var ordersRepo orders.Repository
-	if useMongo {
-		ordersRepo = orders.NewMongoRepository(mongo.DB)
-	} else {
-		ordersRepo = orders.NewMemoryRepository()
-	}
+	ordersRepo := orders.NewMongoRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "orders", ordersRepo.EnsureIndexes)
+	seedMongoDefaults(context.Background(), "orders", ordersRepo.SeedDefaults)
 	ordersService := orders.NewService(ordersRepo, marketsService)
-	if useMongo {
-		if err := ordersRepo.EnsureIndexes(context.Background()); err != nil {
-			log.Printf("WARNING: orders indexes: %v", err)
-		}
-	}
 	ordersHandler := orders.NewHandler(ordersService)
 
 	// Watchlist.
-	var watchlistRepo watchlist.Repository
-	if useMongo {
-		watchlistRepo = watchlist.NewMongoRepository(mongo.DB)
-	} else {
-		watchlistRepo = watchlist.NewMemoryRepository()
-	}
+	watchlistRepo := watchlist.NewMongoRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "watchlist", watchlistRepo.EnsureIndexes)
+	seedMongoDefaults(context.Background(), "watchlist", watchlistRepo.SeedDefaults)
 	watchlistService := watchlist.NewService(watchlistRepo, marketsService)
-	if useMongo {
-		if err := watchlistRepo.EnsureIndexes(context.Background()); err != nil {
-			log.Printf("WARNING: watchlist indexes: %v", err)
-		}
-	}
 	watchlistHandler := watchlist.NewHandler(watchlistService)
 
+	// Positions (derived from orders + markets; no own persistence).
+	positionsService := positions.NewService(ordersRepo, marketsService)
+	positionsHandler := positions.NewHandler(positionsService)
+
 	healthHandler := health.NewHandler()
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
 
 	srv := &http.Server{
@@ -153,4 +114,20 @@ func parseAdminEmails(s string) []string {
 		}
 	}
 	return out
+}
+
+func mustEnsureIndexes(ctx context.Context, collection string, ensure func(context.Context) error) {
+	if err := ensure(ctx); err != nil {
+		log.Fatalf("MongoDB index setup %s: %v", collection, err)
+	}
+}
+
+func seedMongoDefaults(ctx context.Context, collection string, seed func(context.Context) (int, error)) {
+	inserted, err := seed(ctx)
+	if err != nil {
+		log.Fatalf("MongoDB seed %s: %v", collection, err)
+	}
+	if inserted > 0 {
+		log.Printf("MongoDB seeded %s: %d documents", collection, inserted)
+	}
 }

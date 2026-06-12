@@ -28,6 +28,17 @@ func (s *Service) GetUserOrders(ctx context.Context, userID primitive.ObjectID, 
 	return s.repo.GetByUserID(ctx, userID, status, matchID)
 }
 
+func (s *Service) ListOrders(ctx context.Context, userID primitive.ObjectID, status, matchID, marketID, side string) []Order {
+	filter := OrderFilter{
+		UserID:   userID,
+		Status:   status,
+		MatchID:  matchID,
+		MarketID: marketID,
+		Side:     side,
+	}
+	return s.repo.List(ctx, filter)
+}
+
 func (s *Service) GetOrderByID(ctx context.Context, id primitive.ObjectID) (*Order, error) {
 	return s.repo.GetByID(ctx, id)
 }

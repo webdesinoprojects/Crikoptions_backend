@@ -12,12 +12,21 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+type OrderFilter struct {
+	UserID   primitive.ObjectID
+	MatchID  string
+	MarketID string
+	Side     string
+	Status   string
+}
+
 type Repository interface {
 	GetByUserID(ctx context.Context, userID primitive.ObjectID, status, matchID string) []Order
 	GetByID(ctx context.Context, id primitive.ObjectID) (*Order, error)
 	Create(ctx context.Context, order Order) (*Order, error)
 	Cancel(ctx context.Context, id primitive.ObjectID, userID primitive.ObjectID) (*Order, error)
 	GetAll(ctx context.Context) []Order
+	List(ctx context.Context, filter OrderFilter) []Order
 	EnsureIndexes(ctx context.Context) error
 }
 
@@ -108,6 +117,33 @@ func (r *MemoryRepository) GetAll(ctx context.Context) []Order {
 	return r.orders
 }
 
+func (r *MemoryRepository) List(ctx context.Context, f OrderFilter) []Order {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var out []Order
+	for i := range r.orders {
+		o := r.orders[i]
+		if !f.UserID.IsZero() && o.UserID != f.UserID {
+			continue
+		}
+		if f.MatchID != "" && o.MatchID != f.MatchID {
+			continue
+		}
+		if f.MarketID != "" && o.MarketID != f.MarketID {
+			continue
+		}
+		if f.Side != "" && o.Side != f.Side {
+			continue
+		}
+		if f.Status != "" && o.Status != f.Status {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
 func (r *MemoryRepository) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
@@ -128,6 +164,32 @@ func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
 	}
 	_, err := r.col.Indexes().CreateMany(ctx, indexes)
 	return err
+}
+
+func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	count, err := r.col.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		return 0, nil
+	}
+
+	samples := getSampleOrders()
+	docs := make([]any, 0, len(samples))
+	for _, order := range samples {
+		docs = append(docs, order)
+	}
+	if len(docs) == 0 {
+		return 0, nil
+	}
+	if _, err := r.col.InsertMany(ctx, docs); err != nil {
+		return 0, err
+	}
+	return len(docs), nil
 }
 
 func (r *MongoRepository) GetByUserID(ctx context.Context, userID primitive.ObjectID, status, matchID string) []Order {
@@ -217,6 +279,40 @@ func (r *MongoRepository) GetAll(ctx context.Context) []Order {
 	defer cancel()
 
 	cur, err := r.col.Find(ctx, bson.M{})
+	if err != nil {
+		return nil
+	}
+	defer cur.Close(ctx)
+
+	var out []Order
+	if err := cur.All(ctx, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func (r *MongoRepository) List(ctx context.Context, f OrderFilter) []Order {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	filter := bson.M{}
+	if !f.UserID.IsZero() {
+		filter["userId"] = f.UserID
+	}
+	if f.MatchID != "" {
+		filter["matchId"] = f.MatchID
+	}
+	if f.MarketID != "" {
+		filter["marketId"] = f.MarketID
+	}
+	if f.Side != "" {
+		filter["side"] = f.Side
+	}
+	if f.Status != "" {
+		filter["status"] = f.Status
+	}
+
+	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}))
 	if err != nil {
 		return nil
 	}

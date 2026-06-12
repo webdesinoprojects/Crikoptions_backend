@@ -12,6 +12,15 @@ var (
 	errMatchNotFound = errors.New("match not found")
 )
 
+var legacyMatchIDMap = map[string]string{
+	"1":  "0000000000000000000000aa",
+	"aa": "0000000000000000000000aa",
+	"2":  "0000000000000000000000bb",
+	"bb": "0000000000000000000000bb",
+	"3":  "0000000000000000000000cc",
+	"cc": "0000000000000000000000cc",
+}
+
 // Service is the matches domain service. The handler layer passes string IDs
 // (hex or legacy short form) and the service is responsible for resolving
 // them to primitive.ObjectID before hitting the repository.
@@ -77,6 +86,9 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 // legacy short IDs like "aa" continue to work for the demo seed.
 func resolveMatchID(ctx context.Context, repo Repository, id string) (primitive.ObjectID, error) {
 	id = strings.TrimSpace(id)
+	if mapped, ok := legacyMatchIDMap[id]; ok {
+		id = mapped
+	}
 	if objID, err := primitive.ObjectIDFromHex(id); err == nil {
 		return objID, nil
 	}

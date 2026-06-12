@@ -41,6 +41,75 @@ func (h *Handler) GetOrders(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ListAdminOrders lets an admin view orders across all users. Optional query
+// params: userId, status, matchId, marketId, side. userId is a 24-char hex
+// ObjectID; an invalid value returns 400.
+func (h *Handler) ListAdminOrders(w http.ResponseWriter, r *http.Request) {
+	userIDParam := r.URL.Query().Get("userId")
+	var userID primitive.ObjectID
+	if userIDParam != "" {
+		parsed, err := primitive.ObjectIDFromHex(userIDParam)
+		if err != nil {
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "Invalid userId",
+			})
+			return
+		}
+		userID = parsed
+	}
+
+	status := r.URL.Query().Get("status")
+	matchID := r.URL.Query().Get("matchId")
+	marketID := r.URL.Query().Get("marketId")
+	side := r.URL.Query().Get("side")
+
+	if side != "" && side != "buy" && side != "sell" {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "side must be 'buy' or 'sell'",
+		})
+		return
+	}
+
+	orders := h.service.ListOrders(r.Context(), userID, status, matchID, marketID, side)
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Orders fetched successfully",
+		"data":   orders,
+	})
+}
+
+// GetAdminOrder returns a single order by ID, regardless of which user owns it.
+// Used by the admin console for drilling into a specific order.
+func (h *Handler) GetAdminOrder(w http.ResponseWriter, r *http.Request) {
+	orderIDHex := r.PathValue("id")
+	orderID, err := primitive.ObjectIDFromHex(orderIDHex)
+	if err != nil {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid order ID",
+		})
+		return
+	}
+
+	order, err := h.service.GetOrderByID(r.Context(), orderID)
+	if err != nil || order == nil {
+		httpjson.Write(w, http.StatusNotFound, map[string]any{
+			"success": false,
+			"message": "Order not found",
+		})
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Order fetched successfully",
+		"data":    order,
+	})
+}
+
 func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r)
 	if !ok {

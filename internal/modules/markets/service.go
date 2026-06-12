@@ -10,6 +10,23 @@ import (
 
 var errMarketNotFound = errors.New("market not found")
 
+var legacyMarketIDMap = map[string]string{
+	"market-1": "0000000000000000000000d1",
+	"market-2": "0000000000000000000000d2",
+	"market-3": "0000000000000000000000d3",
+	"market-4": "0000000000000000000000d4",
+	"market-5": "0000000000000000000000d5",
+}
+
+var legacyMatchIDMap = map[string]string{
+	"0000000000000000000000aa": "1",
+	"aa":                       "1",
+	"0000000000000000000000bb": "2",
+	"bb":                       "2",
+	"0000000000000000000000cc": "3",
+	"cc":                       "3",
+}
+
 type Service struct {
 	repo          Repository
 	pricingConfig PricingConfig
@@ -30,7 +47,7 @@ func NewServiceWithConfig(repo Repository, cfg PricingConfig) *Service {
 }
 
 func (s *Service) GetMarketsByMatchID(ctx context.Context, matchID string) []Market {
-	return s.repo.GetByMatchID(ctx, matchID)
+	return s.repo.GetByMatchID(ctx, normalizeLegacyMatchID(matchID))
 }
 
 // GetMarketByID accepts either a full hex ObjectID or a short hex tail
@@ -45,6 +62,9 @@ func (s *Service) GetMarketByID(ctx context.Context, id string) (*Market, error)
 
 func resolveMarketID(ctx context.Context, repo Repository, id string) (primitive.ObjectID, error) {
 	id = strings.TrimSpace(id)
+	if mapped, ok := legacyMarketIDMap[id]; ok {
+		id = mapped
+	}
 	if objID, err := primitive.ObjectIDFromHex(id); err == nil {
 		return objID, nil
 	}
@@ -59,6 +79,14 @@ func resolveMarketID(ctx context.Context, repo Repository, id string) (primitive
 		}
 	}
 	return primitive.ObjectID{}, errMarketNotFound
+}
+
+func normalizeLegacyMatchID(id string) string {
+	id = strings.TrimSpace(id)
+	if mapped, ok := legacyMatchIDMap[id]; ok {
+		return mapped
+	}
+	return id
 }
 
 // CalculatePrice runs the T20 option-chain engine and returns a PriceResponse

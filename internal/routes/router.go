@@ -8,6 +8,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 )
 
@@ -18,6 +19,7 @@ func NewRouter(
 	marketsHandler *markets.Handler,
 	watchlistHandler *watchlist.Handler,
 	ordersHandler *orders.Handler,
+	positionsHandler *positions.Handler,
 ) http.Handler {
 	mux := http.NewServeMux()
 
@@ -43,6 +45,10 @@ func NewRouter(
 
 	if ordersHandler != nil {
 		orders.RegisterRoutes(mux, ordersHandler, authHandler)
+	}
+
+	if positionsHandler != nil {
+		positions.RegisterRoutes(mux, positionsHandler, authHandler)
 	}
 
 	return mux

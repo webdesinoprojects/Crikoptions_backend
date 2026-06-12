@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ type Config struct {
 
 func Load() (Config, error) {
 	_ = loadDotEnv(".env")
+	_ = loadDotEnv(filepath.Join("Backend", ".env"))
 
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {

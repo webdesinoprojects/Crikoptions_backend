@@ -82,6 +82,32 @@ func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
 	return err
 }
 
+func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	count, err := r.col.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		return 0, nil
+	}
+
+	samples := getSampleMarkets()
+	docs := make([]any, 0, len(samples))
+	for _, market := range samples {
+		docs = append(docs, market)
+	}
+	if len(docs) == 0 {
+		return 0, nil
+	}
+	if _, err := r.col.InsertMany(ctx, docs); err != nil {
+		return 0, err
+	}
+	return len(docs), nil
+}
+
 func (r *MongoRepository) GetAll(ctx context.Context) []Market {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
