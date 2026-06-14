@@ -1,0 +1,66 @@
+package wallet
+
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+const (
+	CurrencyPaperINR = "PAPER_INR"
+
+	LedgerAdminCredit = "ADMIN_CREDIT"
+	LedgerAdminDebit  = "ADMIN_DEBIT"
+
+	AccountActive = "ACTIVE"
+)
+
+type Account struct {
+	ID               primitive.ObjectID `json:"_id" bson:"_id,omitempty"`
+	UserID           primitive.ObjectID `json:"userId" bson:"userId"`
+	Currency         string             `json:"currency" bson:"currency"`
+	CashBalance      float64            `json:"cashBalance" bson:"cashBalance"`
+	ReservedBalance  float64            `json:"reservedBalance" bson:"reservedBalance"`
+	AvailableBalance float64            `json:"availableBalance" bson:"availableBalance"`
+	Status           string             `json:"status" bson:"status"`
+	CreatedAt        time.Time          `json:"createdAt" bson:"createdAt"`
+	UpdatedAt        time.Time          `json:"updatedAt" bson:"updatedAt"`
+}
+
+type LedgerEntry struct {
+	ID             primitive.ObjectID `json:"_id" bson:"_id,omitempty"`
+	WalletID       primitive.ObjectID `json:"walletId" bson:"walletId"`
+	UserID         primitive.ObjectID `json:"userId" bson:"userId"`
+	Type           string             `json:"type" bson:"type"`
+	Amount         float64            `json:"amount" bson:"amount"`
+	BalanceBefore  float64            `json:"balanceBefore" bson:"balanceBefore"`
+	BalanceAfter   float64            `json:"balanceAfter" bson:"balanceAfter"`
+	ReservedBefore float64            `json:"reservedBefore" bson:"reservedBefore"`
+	ReservedAfter  float64            `json:"reservedAfter" bson:"reservedAfter"`
+	ReferenceType  string             `json:"referenceType" bson:"referenceType"`
+	ReferenceID    string             `json:"referenceId" bson:"referenceId"`
+	Description    string             `json:"description" bson:"description"`
+	CreatedBy      primitive.ObjectID `json:"createdBy" bson:"createdBy"`
+	CreatedAt      time.Time          `json:"createdAt" bson:"createdAt"`
+}
+
+type LedgerFilter struct {
+	UserID primitive.ObjectID
+	Limit  int64
+}
+
+type Adjustment struct {
+	UserID        primitive.ObjectID
+	Delta         float64
+	Amount        float64
+	Type          string
+	ReferenceType string
+	ReferenceID   string
+	Description   string
+	CreatedBy     primitive.ObjectID
+}
+
+type AdjustmentResult struct {
+	Account     Account     `json:"wallet"`
+	LedgerEntry LedgerEntry `json:"ledgerEntry"`
+}

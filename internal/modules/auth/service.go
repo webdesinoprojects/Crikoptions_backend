@@ -10,8 +10,8 @@ import (
 )
 
 type Service struct {
-	repo       UserRepository
-	jwt        *jwt
+	repo        UserRepository
+	jwt         *jwt
 	adminEmails map[string]struct{}
 }
 
@@ -66,15 +66,15 @@ func (s *Service) Register(ctx context.Context, req registerRequest) (User, erro
 	now := time.Now().UTC()
 	rec := userRecord{
 		User: User{
-			ID:        primitive.NewObjectID(),
-			Name:      req.Name,
-			Email:     req.Email,
-			Phone:     req.Phone,
-			Tier:      "STANDARD",
-			Role:      role,
+			ID:    primitive.NewObjectID(),
+			Name:  req.Name,
+			Email: req.Email,
+			Phone: req.Phone,
+			Tier:  "STANDARD",
+			Role:  role,
 			Settings: UserSettings{
 				RiskLimits: RiskLimits{
-					MaxExposure:    10000.0,
+					MaxExposure:     10000.0,
 					DefaultLeverage: 1,
 					AutoKillSwitch:  false,
 				},
@@ -107,12 +107,13 @@ func (s *Service) Login(ctx context.Context, req loginRequest) (User, string, er
 		return User{}, "", errInvalidCreds
 	}
 
-	token, err := s.jwt.Issue(rec.ID.Hex(), rec.User.Role)
+	user := s.withEffectiveRole(rec.User)
+	token, err := s.jwt.Issue(user.ID.Hex(), user.Role)
 	if err != nil {
 		return User{}, "", errUnauthorized
 	}
 
-	return rec.User, token, nil
+	return user, token, nil
 }
 
 // ParseToken verifies a JWT and returns the authenticated user ID and role.
@@ -136,7 +137,7 @@ func (s *Service) Me(ctx context.Context, userID primitive.ObjectID) (User, erro
 	if !ok {
 		return User{}, errUserNotFound
 	}
-	return u, nil
+	return s.withEffectiveRole(u), nil
 }
 
 func (s *Service) UpdateMe(ctx context.Context, userID primitive.ObjectID, req updateMeRequest) (User, error) {
@@ -163,5 +164,16 @@ func (s *Service) UpdateMe(ctx context.Context, userID primitive.ObjectID, req u
 		return User{}, errNothingToUpdate
 	}
 
-	return s.repo.UpdateMe(ctx, userID, name, phone, req.Settings)
+	user, err := s.repo.UpdateMe(ctx, userID, name, phone, req.Settings)
+	if err != nil {
+		return User{}, err
+	}
+	return s.withEffectiveRole(user), nil
+}
+
+func (s *Service) withEffectiveRole(user User) User {
+	if s.isAdminEmail(user.Email) {
+		user.Role = "admin"
+	}
+	return user
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/routes"
 )
@@ -78,8 +79,14 @@ func main() {
 	positionsService := positions.NewService(ordersRepo, marketsService)
 	positionsHandler := positions.NewHandler(positionsService)
 
+	// Wallets.
+	walletRepo := wallet.NewMongoRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "wallet", walletRepo.EnsureIndexes)
+	walletService := wallet.NewService(walletRepo)
+	walletHandler := wallet.NewHandler(walletService)
+
 	healthHandler := health.NewHandler()
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, walletHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
 
 	srv := &http.Server{
