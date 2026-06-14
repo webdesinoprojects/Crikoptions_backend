@@ -15,6 +15,7 @@ type Position struct {
 	UserID    primitive.ObjectID `json:"userId" bson:"userId"`
 	MatchID   string             `json:"matchId" bson:"matchId"`
 	MarketID  string             `json:"marketId" bson:"marketId"`
+	Strike    float64            `json:"strike" bson:"strike"`
 	Status    string             `json:"status" bson:"status"` // "open" or "closed"
 	Lots      int                `json:"lots" bson:"lots"`     // net absolute quantity (buy - sell)
 	BuyPrice  float64            `json:"buyPrice" bson:"buyPrice"`

@@ -15,6 +15,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/middleware"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/health"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
@@ -65,7 +66,20 @@ func main() {
 	ordersRepo := orders.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "orders", ordersRepo.EnsureIndexes)
 	seedMongoDefaults(context.Background(), "orders", ordersRepo.SeedDefaults)
-	ordersService := orders.NewService(ordersRepo, marketsService)
+
+	// Executions.
+	executionsRepo := executions.NewMongoRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "executions", executionsRepo.EnsureIndexes)
+	executionsService := executions.NewService(executionsRepo)
+	executionsHandler := executions.NewHandler(executionsService)
+
+	// Wallets.
+	walletRepo := wallet.NewMongoRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "wallet", walletRepo.EnsureIndexes)
+	walletService := wallet.NewService(walletRepo)
+	walletHandler := wallet.NewHandler(walletService)
+
+	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService)
 	ordersHandler := orders.NewHandler(ordersService)
 
 	// Watchlist.
@@ -75,18 +89,12 @@ func main() {
 	watchlistService := watchlist.NewService(watchlistRepo, marketsService)
 	watchlistHandler := watchlist.NewHandler(watchlistService)
 
-	// Positions (derived from orders + markets; no own persistence).
-	positionsService := positions.NewService(ordersRepo, marketsService)
+	// Positions (derived from executions + markets).
+	positionsService := positions.NewService(executionsService, marketsService)
 	positionsHandler := positions.NewHandler(positionsService)
 
-	// Wallets.
-	walletRepo := wallet.NewMongoRepository(mongo.DB)
-	mustEnsureIndexes(context.Background(), "wallet", walletRepo.EnsureIndexes)
-	walletService := wallet.NewService(walletRepo)
-	walletHandler := wallet.NewHandler(walletService)
-
 	healthHandler := health.NewHandler()
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, walletHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, walletHandler, executionsHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
 
 	srv := &http.Server{

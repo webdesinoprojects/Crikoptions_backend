@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	errInvalidAmount     = errors.New("amount must be positive")
-	errInvalidUserID     = errors.New("invalid userId")
-	errInsufficientFunds = errors.New("insufficient available wallet balance")
+	ErrInvalidAmount     = errors.New("amount must be positive")
+	ErrInvalidUserID     = errors.New("invalid userId")
+	ErrInsufficientFunds = errors.New("insufficient available wallet balance")
 )
 
 type Service struct {
@@ -72,7 +72,7 @@ func (s *Service) AdminDebit(ctx context.Context, adminID, userID primitive.Obje
 		return nil, err
 	}
 	if account.AvailableBalance < amount {
-		return nil, errInsufficientFunds
+		return nil, ErrInsufficientFunds
 	}
 
 	result, err := s.repo.ApplyAdjustment(ctx, Adjustment{
@@ -94,7 +94,7 @@ func (s *Service) AdminDebit(ctx context.Context, adminID, userID primitive.Obje
 func ParseUserID(hex string) (primitive.ObjectID, error) {
 	id, err := primitive.ObjectIDFromHex(strings.TrimSpace(hex))
 	if err != nil || id.IsZero() {
-		return primitive.ObjectID{}, errInvalidUserID
+		return primitive.ObjectID{}, ErrInvalidUserID
 	}
 	return id, nil
 }
@@ -102,7 +102,7 @@ func ParseUserID(hex string) (primitive.ObjectID, error) {
 func validateFundingRequest(req FundingRequest) (float64, string, error) {
 	amount := round2(req.Amount)
 	if amount <= 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
-		return 0, "", errInvalidAmount
+		return 0, "", ErrInvalidAmount
 	}
 
 	reason := strings.TrimSpace(req.Reason)
@@ -117,4 +117,49 @@ func validateFundingRequest(req FundingRequest) (float64, string, error) {
 
 func round2(value float64) float64 {
 	return math.Round(value*100) / 100
+}
+
+func (s *Service) ReserveOrderMargin(ctx context.Context, userID primitive.ObjectID, amount float64, orderID, description string) (*AdjustmentResult, error) {
+	return s.repo.ReserveMargin(ctx, OrderFundsOp{
+		UserID:        userID,
+		Amount:        amount,
+		ReferenceType: "ORDER",
+		ReferenceID:   orderID,
+		Description:   description,
+		CreatedBy:     userID,
+	})
+}
+
+func (s *Service) ReleaseOrderMargin(ctx context.Context, userID primitive.ObjectID, amount float64, orderID, description string) (*AdjustmentResult, error) {
+	return s.repo.ReleaseMargin(ctx, OrderFundsOp{
+		UserID:        userID,
+		Amount:        amount,
+		ReferenceType: "ORDER",
+		ReferenceID:   orderID,
+		Description:   description,
+		CreatedBy:     userID,
+	})
+}
+
+func (s *Service) SettleBuyFill(ctx context.Context, userID primitive.ObjectID, fillCost, reserveRelease float64, orderID, description string) (*AdjustmentResult, error) {
+	return s.repo.SettleBuyFill(ctx, BuyFillOp{
+		UserID:         userID,
+		FillCost:       fillCost,
+		ReserveRelease: reserveRelease,
+		ReferenceType:  "EXECUTION",
+		ReferenceID:    orderID,
+		Description:    description,
+		CreatedBy:      userID,
+	})
+}
+
+func (s *Service) SettleSellFill(ctx context.Context, userID primitive.ObjectID, proceeds float64, orderID, description string) (*AdjustmentResult, error) {
+	return s.repo.SettleSellFill(ctx, SellFillOp{
+		UserID:        userID,
+		Proceeds:      proceeds,
+		ReferenceType: "EXECUTION",
+		ReferenceID:   orderID,
+		Description:   description,
+		CreatedBy:     userID,
+	})
 }

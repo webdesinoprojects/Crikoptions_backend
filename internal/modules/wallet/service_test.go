@@ -84,8 +84,8 @@ func TestAdminDebitRejectsInsufficientBalance(t *testing.T) {
 	if _, err := svc.AdminCredit(context.Background(), adminID, userID, FundingRequest{Amount: 100}); err != nil {
 		t.Fatalf("AdminCredit: %v", err)
 	}
-	if _, err := svc.AdminDebit(context.Background(), adminID, userID, FundingRequest{Amount: 150}); !errors.Is(err, errInsufficientFunds) {
-		t.Fatalf("AdminDebit err = %v, want errInsufficientFunds", err)
+	if _, err := svc.AdminDebit(context.Background(), adminID, userID, FundingRequest{Amount: 150}); !errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("AdminDebit err = %v, want ErrInsufficientFunds", err)
 	}
 
 	wallet, err := svc.GetWallet(context.Background(), userID)
@@ -110,8 +110,8 @@ func TestFundingRejectsInvalidAmount(t *testing.T) {
 	adminID := primitive.NewObjectID()
 
 	for _, amount := range []float64{0, -1} {
-		if _, err := svc.AdminCredit(context.Background(), adminID, userID, FundingRequest{Amount: amount}); !errors.Is(err, errInvalidAmount) {
-			t.Fatalf("AdminCredit(%v) err = %v, want errInvalidAmount", amount, err)
+		if _, err := svc.AdminCredit(context.Background(), adminID, userID, FundingRequest{Amount: amount}); !errors.Is(err, ErrInvalidAmount) {
+			t.Fatalf("AdminCredit(%v) err = %v, want ErrInvalidAmount", amount, err)
 		}
 	}
 }

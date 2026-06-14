@@ -153,28 +153,71 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Strike <= 0 {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Strike must be positive",
+		})
+		return
+	}
+
 	order, err := h.service.CreateOrder(r.Context(), userID, req)
 	if err != nil {
 		switch {
-		case errors.Is(err, errMarketNotFound):
+		case errors.Is(err, ErrMarketNotFound):
 			httpjson.Write(w, http.StatusNotFound, map[string]any{
 				"success": false,
 				"message": "Market not found",
 			})
-		case errors.Is(err, errInvalidSide):
+		case errors.Is(err, ErrMatchNotFound):
+			httpjson.Write(w, http.StatusNotFound, map[string]any{
+				"success": false,
+				"message": "Match not found",
+			})
+		case errors.Is(err, ErrMarketNotTradable):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"message": "Market is not open for trading",
+			})
+		case errors.Is(err, ErrMatchNotTradable):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"message": "Match is not live for trading",
+			})
+		case errors.Is(err, ErrInsufficientBalance):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"message": "Insufficient available wallet balance",
+			})
+		case errors.Is(err, ErrInsufficientPosition):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"message": "Insufficient position to sell",
+			})
+		case errors.Is(err, ErrStrikeNotFound):
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "Strike not found in option chain",
+			})
+		case errors.Is(err, ErrInvalidSide):
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{
 				"success": false,
 				"message": "Side must be 'buy' or 'sell'",
 			})
-		case errors.Is(err, errInvalidQuantity):
+		case errors.Is(err, ErrInvalidQuantity):
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{
 				"success": false,
 				"message": "Quantity must be positive",
 			})
-		case errors.Is(err, errInvalidPrice):
+		case errors.Is(err, ErrInvalidPrice):
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{
 				"success": false,
 				"message": "Price must be positive",
+			})
+		case errors.Is(err, ErrInvalidStrike):
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "Strike must be positive",
 			})
 		default:
 			httpjson.Write(w, http.StatusInternalServerError, map[string]any{

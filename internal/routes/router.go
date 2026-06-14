@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/health"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
@@ -22,6 +23,7 @@ func NewRouter(
 	ordersHandler *orders.Handler,
 	positionsHandler *positions.Handler,
 	walletHandler *wallet.Handler,
+	executionsHandler *executions.Handler,
 ) http.Handler {
 	mux := http.NewServeMux()
 
@@ -55,6 +57,10 @@ func NewRouter(
 
 	if walletHandler != nil {
 		wallet.RegisterRoutes(mux, walletHandler, authHandler)
+	}
+
+	if executionsHandler != nil {
+		executions.RegisterRoutes(mux, executionsHandler, authHandler)
 	}
 
 	return mux

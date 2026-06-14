@@ -9,8 +9,12 @@ import (
 const (
 	CurrencyPaperINR = "PAPER_INR"
 
-	LedgerAdminCredit = "ADMIN_CREDIT"
-	LedgerAdminDebit  = "ADMIN_DEBIT"
+	LedgerAdminCredit  = "ADMIN_CREDIT"
+	LedgerAdminDebit   = "ADMIN_DEBIT"
+	LedgerOrderReserve = "ORDER_RESERVE"
+	LedgerOrderRelease = "ORDER_RELEASE"
+	LedgerTradeDebit   = "TRADE_DEBIT"
+	LedgerTradeCredit  = "TRADE_CREDIT"
 
 	AccountActive = "ACTIVE"
 )
@@ -63,4 +67,35 @@ type Adjustment struct {
 type AdjustmentResult struct {
 	Account     Account     `json:"wallet"`
 	LedgerEntry LedgerEntry `json:"ledgerEntry"`
+}
+
+// OrderFundsOp moves margin between available and reserved balances.
+type OrderFundsOp struct {
+	UserID        primitive.ObjectID
+	Amount        float64
+	ReferenceType string
+	ReferenceID   string
+	Description   string
+	CreatedBy     primitive.ObjectID
+}
+
+// BuyFillOp settles a buy fill against reserved margin.
+type BuyFillOp struct {
+	UserID         primitive.ObjectID
+	FillCost       float64
+	ReserveRelease float64
+	ReferenceType  string
+	ReferenceID    string
+	Description    string
+	CreatedBy      primitive.ObjectID
+}
+
+// SellFillOp credits proceeds from a sell fill.
+type SellFillOp struct {
+	UserID        primitive.ObjectID
+	Proceeds      float64
+	ReferenceType string
+	ReferenceID   string
+	Description   string
+	CreatedBy     primitive.ObjectID
 }

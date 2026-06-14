@@ -23,11 +23,20 @@ type OrderFilter struct {
 type Repository interface {
 	GetByUserID(ctx context.Context, userID primitive.ObjectID, status, matchID string) []Order
 	GetByID(ctx context.Context, id primitive.ObjectID) (*Order, error)
+	FindByClientOrderID(ctx context.Context, userID primitive.ObjectID, clientOrderID string) (*Order, error)
 	Create(ctx context.Context, order Order) (*Order, error)
+	UpdateFill(ctx context.Context, id primitive.ObjectID, update FillUpdate) (*Order, error)
 	Cancel(ctx context.Context, id primitive.ObjectID, userID primitive.ObjectID) (*Order, error)
 	GetAll(ctx context.Context) []Order
 	List(ctx context.Context, filter OrderFilter) []Order
 	EnsureIndexes(ctx context.Context) error
+}
+
+type FillUpdate struct {
+	FilledQuantity    int
+	RemainingQuantity int
+	AverageFillPrice  float64
+	Status            string
 }
 
 type MemoryRepository struct {
@@ -82,7 +91,13 @@ func (r *MemoryRepository) Create(ctx context.Context, order Order) (*Order, err
 	if order.ID.IsZero() {
 		order.ID = primitive.NewObjectID()
 	}
-	order.Status = "open"
+	order.Status = StatusOpen
+	if order.Type == "" {
+		order.Type = OrderTypeLimit
+	}
+	if order.RemainingQuantity == 0 {
+		order.RemainingQuantity = order.Quantity
+	}
 	order.CreatedAt = time.Now().UTC()
 	order.UpdatedAt = order.CreatedAt
 
@@ -100,10 +115,10 @@ func (r *MemoryRepository) Cancel(ctx context.Context, id primitive.ObjectID, us
 			if r.orders[i].UserID.Hex() != uid {
 				return nil, nil
 			}
-			if r.orders[i].Status != "open" {
+			if r.orders[i].Status != StatusOpen && r.orders[i].Status != StatusPartiallyFilled {
 				return nil, nil
 			}
-			r.orders[i].Status = "cancelled"
+			r.orders[i].Status = StatusCancelled
 			r.orders[i].UpdatedAt = time.Now().UTC()
 			return &r.orders[i], nil
 		}
@@ -144,6 +159,38 @@ func (r *MemoryRepository) List(ctx context.Context, f OrderFilter) []Order {
 	return out
 }
 
+func (r *MemoryRepository) FindByClientOrderID(_ context.Context, userID primitive.ObjectID, clientOrderID string) (*Order, error) {
+	if clientOrderID == "" {
+		return nil, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for i := range r.orders {
+		if r.orders[i].UserID == userID && r.orders[i].ClientOrderID == clientOrderID {
+			out := r.orders[i]
+			return &out, nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *MemoryRepository) UpdateFill(_ context.Context, id primitive.ObjectID, update FillUpdate) (*Order, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.orders {
+		if r.orders[i].ID == id {
+			r.orders[i].FilledQuantity = update.FilledQuantity
+			r.orders[i].RemainingQuantity = update.RemainingQuantity
+			r.orders[i].AverageFillPrice = update.AverageFillPrice
+			r.orders[i].Status = update.Status
+			r.orders[i].UpdatedAt = time.Now().UTC()
+			out := r.orders[i]
+			return &out, nil
+		}
+	}
+	return nil, nil
+}
+
 func (r *MemoryRepository) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
@@ -157,9 +204,31 @@ func NewMongoRepository(db *mongo.Database) *MongoRepository {
 }
 
 func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	// Legacy seeded orders share userId with null/missing clientOrderId. Unset those
+	// fields so a partial unique index can be applied safely.
+	_, _ = r.col.UpdateMany(ctx, bson.M{
+		"$or": []bson.M{
+			{"clientOrderId": nil},
+			{"clientOrderId": ""},
+			{"clientOrderId": bson.M{"$exists": false}},
+		},
+	}, bson.M{"$unset": bson.M{"clientOrderId": ""}})
+
+	// Drop a previously attempted sparse unique index (may fail on legacy null rows).
+	_, _ = r.col.Indexes().DropOne(ctx, "userId_1_clientOrderId_1")
+
 	indexes := []mongo.IndexModel{
 		{
 			Keys: bson.D{{Key: "userId", Value: 1}, {Key: "status", Value: 1}, {Key: "matchId", Value: 1}},
+		},
+		{
+			Keys: bson.D{{Key: "userId", Value: 1}, {Key: "clientOrderId", Value: 1}},
+			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.M{
+				"clientOrderId": bson.M{"$exists": true, "$type": "string", "$gt": ""},
+			}),
 		},
 	}
 	_, err := r.col.Indexes().CreateMany(ctx, indexes)
@@ -239,12 +308,65 @@ func (r *MongoRepository) Create(ctx context.Context, order Order) (*Order, erro
 	if order.ID.IsZero() {
 		order.ID = primitive.NewObjectID()
 	}
-	order.Status = "open"
+	order.Status = StatusOpen
+	if order.Type == "" {
+		order.Type = OrderTypeLimit
+	}
+	if order.RemainingQuantity == 0 {
+		order.RemainingQuantity = order.Quantity
+	}
 	now := time.Now().UTC()
 	order.CreatedAt = now
 	order.UpdatedAt = now
 
 	if _, err := r.col.InsertOne(ctx, order); err != nil {
+		return nil, err
+	}
+	return &order, nil
+}
+
+func (r *MongoRepository) FindByClientOrderID(ctx context.Context, userID primitive.ObjectID, clientOrderID string) (*Order, error) {
+	if clientOrderID == "" {
+		return nil, nil
+	}
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	var order Order
+	err := r.col.FindOne(ctx, bson.M{"userId": userID, "clientOrderId": clientOrderID}).Decode(&order)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &order, nil
+}
+
+func (r *MongoRepository) UpdateFill(ctx context.Context, id primitive.ObjectID, update FillUpdate) (*Order, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	res := r.col.FindOneAndUpdate(
+		ctx,
+		bson.M{"_id": id},
+		bson.M{"$set": bson.M{
+			"filledQuantity":    update.FilledQuantity,
+			"remainingQuantity": update.RemainingQuantity,
+			"averageFillPrice":  update.AverageFillPrice,
+			"status":            update.Status,
+			"updatedAt":         time.Now().UTC(),
+		}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	)
+	if err := res.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var order Order
+	if err := res.Decode(&order); err != nil {
 		return nil, err
 	}
 	return &order, nil
@@ -256,8 +378,8 @@ func (r *MongoRepository) Cancel(ctx context.Context, id primitive.ObjectID, use
 
 	res := r.col.FindOneAndUpdate(
 		ctx,
-		bson.M{"_id": id, "userId": userID, "status": "open"},
-		bson.M{"$set": bson.M{"status": "cancelled", "updatedAt": time.Now().UTC()}},
+		bson.M{"_id": id, "userId": userID, "status": bson.M{"$in": []string{StatusOpen, StatusPartiallyFilled}}},
+		bson.M{"$set": bson.M{"status": StatusCancelled, "updatedAt": time.Now().UTC()}},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	)
 	if err := res.Err(); err != nil {

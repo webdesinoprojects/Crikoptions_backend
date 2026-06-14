@@ -138,9 +138,9 @@ func (h *Handler) handleFunding(
 	result, err := fn(r.Context(), adminID, userID, req)
 	if err != nil {
 		switch {
-		case errors.Is(err, errInvalidAmount):
+		case errors.Is(err, ErrInvalidAmount):
 			writeBadRequest(w, "Amount must be positive")
-		case errors.Is(err, errInsufficientFunds):
+		case errors.Is(err, ErrInsufficientFunds):
 			httpjson.Write(w, http.StatusConflict, map[string]any{
 				"success": false,
 				"message": "Insufficient available wallet balance",

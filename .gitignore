@@ -1,0 +1,43 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Go build outputs
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test & coverage
+*.test
+*.out
+coverage/
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs & temp
+*.log
+tmp/
+temp/
+
+# Docker / local overrides (keep Dockerfile tracked)
+docker-compose.override.yml
