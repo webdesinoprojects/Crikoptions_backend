@@ -16,17 +16,18 @@ import (
 )
 
 var (
-	ErrMarketNotFound        = errors.New("market not found")
-	ErrMatchNotFound         = errors.New("match not found")
-	ErrInvalidSide           = errors.New("invalid side, must be 'buy' or 'sell'")
-	ErrInvalidQuantity       = errors.New("quantity must be positive")
-	ErrInvalidPrice          = errors.New("price must be positive")
-	ErrInvalidStrike         = errors.New("strike must be positive")
-	ErrMarketNotTradable     = errors.New("market is not open for trading")
-	ErrMatchNotTradable      = errors.New("match is not live for trading")
-	ErrInsufficientBalance   = errors.New("insufficient available wallet balance")
-	ErrInsufficientPosition  = errors.New("insufficient position to sell")
-	ErrStrikeNotFound        = errors.New("strike not found in option chain")
+	ErrMarketNotFound       = errors.New("market not found")
+	ErrMatchNotFound        = errors.New("match not found")
+	ErrInvalidSide          = errors.New("invalid side, must be 'buy' or 'sell'")
+	ErrInvalidQuantity      = errors.New("quantity must be positive")
+	ErrInvalidPrice         = errors.New("price must be positive")
+	ErrInvalidStrike        = errors.New("strike must be positive")
+	ErrMarketNotTradable    = errors.New("market is not open for trading")
+	ErrMatchNotTradable     = errors.New("match is not live for trading")
+	ErrInsufficientBalance  = errors.New("insufficient available wallet balance")
+	ErrInsufficientPosition = errors.New("insufficient position to sell")
+	ErrStrikeNotFound       = errors.New("strike not found in option chain")
+	ErrNoLiquidity          = errors.New("no executable market quote available")
 )
 
 type MatchReader interface {
@@ -52,11 +53,11 @@ type ExecutionWriter interface {
 }
 
 type Service struct {
-	repo        Repository
-	markets     MarketReader
-	matches     MatchReader
-	wallets     WalletPort
-	executions  ExecutionWriter
+	repo       Repository
+	markets    MarketReader
+	matches    MatchReader
+	wallets    WalletPort
+	executions ExecutionWriter
 }
 
 func NewService(
@@ -135,7 +136,25 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		}
 	}
 
-	reserveAmount := round2(req.Price * float64(req.Quantity))
+	orderPrice := round2(req.Price)
+	fillPrice := 0.0
+	shouldFill := false
+	switch req.Type {
+	case OrderTypeMarket:
+		var ok bool
+		fillPrice, ok = matchMarketOrder(req.Side, bid, ask)
+		if !ok {
+			return nil, ErrNoLiquidity
+		}
+		orderPrice = fillPrice
+		shouldFill = true
+	case OrderTypeLimit:
+		fillPrice, shouldFill = matchLimitOrder(req.Side, orderPrice, bid, ask)
+	default:
+		return nil, errors.New("unsupported order type")
+	}
+
+	reserveAmount := round2(orderPrice * float64(req.Quantity))
 	order := Order{
 		ClientOrderID:     req.ClientOrderID,
 		UserID:            userID,
@@ -145,7 +164,7 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		Side:              req.Side,
 		Type:              req.Type,
 		Quantity:          req.Quantity,
-		Price:             req.Price,
+		Price:             orderPrice,
 		FilledQuantity:    0,
 		RemainingQuantity: req.Quantity,
 		Status:            StatusOpen,
@@ -167,7 +186,6 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		}
 	}
 
-	fillPrice, shouldFill := matchLimitOrder(req.Side, req.Price, bid, ask)
 	if !shouldFill {
 		return created, nil
 	}
@@ -280,14 +298,14 @@ func validateCreateRequest(req CreateOrderRequest) error {
 	if req.Quantity <= 0 {
 		return ErrInvalidQuantity
 	}
-	if req.Price <= 0 {
-		return ErrInvalidPrice
-	}
 	if req.Strike <= 0 {
 		return ErrInvalidStrike
 	}
-	if req.Type != OrderTypeLimit {
-		return errors.New("only LIMIT orders are supported")
+	if req.Type != OrderTypeLimit && req.Type != OrderTypeMarket {
+		return errors.New("only LIMIT and MARKET orders are supported")
+	}
+	if req.Type == OrderTypeLimit && req.Price <= 0 {
+		return ErrInvalidPrice
 	}
 	return nil
 }
@@ -305,13 +323,29 @@ func isMatchTradable(match *matches.Match) bool {
 }
 
 func matchLimitOrder(side string, limitPrice, bid, ask float64) (fillPrice float64, ok bool) {
+	const marketableTolerance = 0.005
+
 	switch side {
 	case "buy":
-		if ask > 0 && limitPrice >= ask {
+		if ask > 0 && limitPrice+marketableTolerance >= ask {
 			return ask, true
 		}
 	case "sell":
-		if bid > 0 && limitPrice <= bid {
+		if bid > 0 && limitPrice-marketableTolerance <= bid {
+			return bid, true
+		}
+	}
+	return 0, false
+}
+
+func matchMarketOrder(side string, bid, ask float64) (fillPrice float64, ok bool) {
+	switch side {
+	case "buy":
+		if ask > 0 {
+			return ask, true
+		}
+	case "sell":
+		if bid > 0 {
 			return bid, true
 		}
 	}

@@ -37,7 +37,7 @@ func (h *Handler) GetOrders(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Orders fetched successfully",
-		"data":   orders,
+		"data":    orders,
 	})
 }
 
@@ -77,7 +77,7 @@ func (h *Handler) ListAdminOrders(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Orders fetched successfully",
-		"data":   orders,
+		"data":    orders,
 	})
 }
 
@@ -198,6 +198,11 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{
 				"success": false,
 				"message": "Strike not found in option chain",
+			})
+		case errors.Is(err, ErrNoLiquidity):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"message": "No executable market quote available",
 			})
 		case errors.Is(err, ErrInvalidSide):
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{

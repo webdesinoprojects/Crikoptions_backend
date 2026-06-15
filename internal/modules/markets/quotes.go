@@ -42,18 +42,30 @@ func (s *Service) StrikeQuote(input PriceCalculationInput, strike float64) (bid,
 		if row.Strike != strike {
 			continue
 		}
-		spread := 0.25
-		bid = round2(row.Premium - spread)
-		ask = round2(row.Premium + spread)
-		if bid < 0 {
-			bid = 0
-		}
-		if ask < bid {
-			ask = bid
-		}
+		bid, ask = quoteFromPremium(row.Premium)
 		return bid, ask, true
 	}
 	return 0, 0, false
+}
+
+func quoteFromPremium(premium float64) (bid, ask float64) {
+	spread := 0.1
+	if premium >= 20 {
+		spread = 1
+	} else if premium >= 5 {
+		spread = 0.5
+	}
+
+	halfSpread := spread / 2
+	bid = round2(premium - halfSpread)
+	ask = round2(premium + halfSpread)
+	if bid < 0 {
+		bid = 0
+	}
+	if ask < bid {
+		ask = bid
+	}
+	return bid, ask
 }
 
 func (s *Service) IsTradable(market *Market) bool {

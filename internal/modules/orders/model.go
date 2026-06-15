@@ -13,7 +13,8 @@ const (
 	StatusCancelled       = "cancelled"
 	StatusRejected        = "rejected"
 
-	OrderTypeLimit = "LIMIT"
+	OrderTypeLimit  = "LIMIT"
+	OrderTypeMarket = "MARKET"
 )
 
 type Order struct {
