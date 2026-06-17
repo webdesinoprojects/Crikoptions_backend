@@ -117,3 +117,20 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 		"data":    match,
 	})
 }
+
+func (h *Handler) RepairDemoMatches(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.RepairDemoMatches(r.Context()); err != nil {
+		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": "Failed to repair demo matches",
+		})
+		return
+	}
+
+	matches := h.service.GetHomeMatches(r.Context())
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Demo matches reset to canonical seed state",
+		"data":    matches,
+	})
+}

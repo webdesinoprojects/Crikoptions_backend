@@ -33,7 +33,11 @@ func NewService(repo Repository) *Service {
 }
 
 func (s *Service) GetHomeMatches(ctx context.Context) []Match {
-	return s.repo.GetAll(ctx)
+	all := s.repo.GetAll(ctx)
+	for i := range all {
+		all[i].Status = NormalizeStatus(all[i].Status)
+	}
+	return SortHomeMatches(all)
 }
 
 func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
@@ -41,7 +45,12 @@ func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.repo.GetByID(ctx, objID)
+	match, err := s.repo.GetByID(ctx, objID)
+	if err != nil || match == nil {
+		return match, err
+	}
+	match.Status = NormalizeStatus(match.Status)
+	return match, nil
 }
 
 func (s *Service) CreateMatch(ctx context.Context, req CreateMatchRequest) (*Match, error) {
@@ -75,9 +84,51 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 		CurrentScore: req.CurrentScore,
 		WicketsLost:  req.WicketsLost,
 		BallsLeft:    req.BallsLeft,
-		Status:       req.Status,
+		Status:       NormalizeStatus(req.Status),
+	}
+	if score.Status == "" {
+		score.Status = StatusUpcoming
 	}
 	return s.repo.UpdateScore(ctx, objID, score)
+}
+
+// EnsureSingleLiveMatch demotes extra live matches on startup. Keeps the
+// primary demo match (CSK vs MI) when it is live; otherwise keeps the most
+// recently updated live match.
+func (s *Service) EnsureSingleLiveMatch(ctx context.Context) error {
+	all := s.repo.GetAll(ctx)
+	var live []Match
+	for _, m := range all {
+		if isLiveStatus(m.Status) {
+			live = append(live, m)
+		}
+	}
+	if len(live) <= 1 {
+		return nil
+	}
+
+	keepID := live[0].ID
+	for _, m := range live {
+		if m.ID == primaryLiveMatchID {
+			keepID = m.ID
+			break
+		}
+	}
+	if keepID != primaryLiveMatchID {
+		latest := live[0]
+		for _, m := range live[1:] {
+			if m.UpdatedAt.After(latest.UpdatedAt) {
+				latest = m
+			}
+		}
+		keepID = latest.ID
+	}
+	return s.repo.DemoteOtherLiveMatches(ctx, keepID)
+}
+
+// RepairDemoMatches resets the three seeded demo fixtures to their canonical state.
+func (s *Service) RepairDemoMatches(ctx context.Context) error {
+	return s.repo.UpsertDemoMatches(ctx, getSampleMatches())
 }
 
 // resolveMatchID turns the path-supplied ID into a primitive.ObjectID. It

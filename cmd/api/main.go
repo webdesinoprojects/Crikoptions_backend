@@ -53,6 +53,13 @@ func main() {
 	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
 	seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
 	matchesService := matches.NewService(matchesRepo)
+	if err := matchesService.RepairDemoMatches(context.Background()); err != nil {
+		log.Printf("matches demo repair: %v", err)
+	} else if err := matchesService.EnsureSingleLiveMatch(context.Background()); err != nil {
+		log.Printf("matches single-live enforcement: %v", err)
+	} else {
+		log.Printf("matches demo state repaired (one live match enforced)")
+	}
 	matchesHandler := matches.NewHandler(matchesService)
 
 	// Markets.
