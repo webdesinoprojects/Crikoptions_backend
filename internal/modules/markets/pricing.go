@@ -54,29 +54,29 @@ func DefaultPricingConfig() PricingConfig {
 // Innings 1: use Score + Wickets + BallsLeft (BallsBowled = BallsTotal - BallsLeft).
 // Innings 2: use TargetScore + CurrentScore + WicketsLost + BallsBowled.
 type PricingInput struct {
-	Innings      int
-	Score        int // 1st innings: current run total. 2nd innings: chase current score.
-	Wickets      int // 0-10
-	BallsLeft    int // 1st innings only (0-120)
-	BallsBowled  int // 2nd innings only (0-120)
-	TargetScore  int // 2nd innings only
+	Innings     int
+	Score       int // 1st innings: current run total. 2nd innings: chase current score.
+	Wickets     int // 0-10
+	BallsLeft   int // 1st innings only (0-120)
+	BallsBowled int // 2nd innings only (0-120)
+	TargetScore int // 2nd innings only
 }
 
 // FirstInningsResult holds the chain + metadata for a 1st innings calc.
 type FirstInningsResult struct {
-	S0       float64
-	T        float64
-	Chain    []StrikePremium
+	S0               float64
+	T                float64
+	Chain            []StrikePremium
 	EffectiveRunRate float64
 }
 
 // SecondInningsResult holds the chain + metadata for a 2nd innings calc.
 type SecondInningsResult struct {
-	S0     float64
-	T      float64
-	Sigma  float64
-	R      float64
-	Chain  []StrikePremium
+	S0    float64
+	T     float64
+	Sigma float64
+	R     float64
+	Chain []StrikePremium
 }
 
 // CalculateFirstInnings projects the 1st innings final score S0 and prices a
@@ -88,6 +88,10 @@ func CalculateFirstInnings(in PricingInput, cfg PricingConfig) FirstInningsResul
 		return res
 	}
 	if in.Score < 0 {
+		return res
+	}
+	if in.Score == 0 {
+		res.Chain = zeroPremiumChain(cfg)
 		return res
 	}
 
@@ -156,6 +160,10 @@ func CalculateSecondInnings(in PricingInput, cfg PricingConfig) SecondInningsRes
 		return res
 	}
 	if in.BallsBowled < 0 || in.BallsBowled > cfg.BallsTotal {
+		return res
+	}
+	if in.Score == 0 {
+		res.Chain = zeroPremiumChain(cfg)
 		return res
 	}
 
@@ -281,4 +289,12 @@ func round2(v float64) float64 {
 		return 0
 	}
 	return math.Round(v*100) / 100
+}
+
+func zeroPremiumChain(cfg PricingConfig) []StrikePremium {
+	chain := make([]StrikePremium, 0, int(cfg.MaxStrike/cfg.StrikeStep))
+	for K := cfg.StrikeStep; K <= cfg.MaxStrike; K += cfg.StrikeStep {
+		chain = append(chain, StrikePremium{Strike: K, Premium: 0})
+	}
+	return chain
 }

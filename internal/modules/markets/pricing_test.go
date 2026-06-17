@@ -16,9 +16,24 @@ func TestPricingEngine(t *testing.T) {
 		if len(r.Chain) != 25 {
 			t.Errorf("expected 25 strikes (10..250 step 10), got %d", len(r.Chain))
 		}
-		// At start, lower strikes should have higher premium (more likely to be hit)
-		if r.Chain[0].Premium < r.Chain[10].Premium {
-			t.Errorf("strike 10 should have higher premium than strike 110 at start")
+		for _, sp := range r.Chain {
+			if sp.Premium != 0 {
+				t.Errorf("score zero: strike %.0f expected zero premium, got %.2f", sp.Strike, sp.Premium)
+			}
+		}
+	})
+
+	t.Run("2nd innings score zero", func(t *testing.T) {
+		r := CalculateSecondInnings(PricingInput{
+			Innings: 2, Score: 0, Wickets: 0, BallsBowled: 0, TargetScore: 180,
+		}, cfg)
+		if len(r.Chain) != 25 {
+			t.Errorf("expected 25 strikes, got %d", len(r.Chain))
+		}
+		for _, sp := range r.Chain {
+			if sp.Premium != 0 {
+				t.Errorf("score zero: strike %.0f expected zero premium, got %.2f", sp.Strike, sp.Premium)
+			}
 		}
 	})
 

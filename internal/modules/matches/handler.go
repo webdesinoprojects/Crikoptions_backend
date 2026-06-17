@@ -87,7 +87,7 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.CurrentScore < 0 || req.WicketsLost < 0 || req.BallsLeft < 0 {
+	if req.CurrentScore < 0 || req.WicketsLost < 0 || req.BallsLeft < 0 || (req.TargetScore != nil && *req.TargetScore < 0) {
 		httpjson.Write(w, http.StatusBadRequest, map[string]any{
 			"success": false,
 			"message": "Invalid score values",

@@ -15,6 +15,7 @@ func PricingInputFromMatch(match matches.Match) PriceCalculationInput {
 		Innings:      match.Innings,
 		CurrentScore: match.CurrentScore,
 		WicketsLost:  match.WicketsLost,
+		TargetScore:  match.TargetScore,
 	}
 	if match.Innings == 2 {
 		input.BallsBowled = 120 - match.BallsLeft

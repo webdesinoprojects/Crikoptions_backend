@@ -101,11 +101,17 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 		status = NormalizeStatus(req.Status)
 	}
 
+	targetScore := existing.TargetScore
+	if req.TargetScore != nil {
+		targetScore = *req.TargetScore
+	}
+
 	score := ScoreUpdate{
 		Innings:      req.Innings,
 		CurrentScore: req.CurrentScore,
 		WicketsLost:  req.WicketsLost,
 		BallsLeft:    req.BallsLeft,
+		TargetScore:  targetScore,
 		Status:       status,
 	}
 	match, err := s.repo.UpdateScore(ctx, objID, score)
@@ -142,6 +148,7 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 	currentScore := existing.CurrentScore + req.Runs
 	wicketsLost := existing.WicketsLost
 	ballsLeft := existing.BallsLeft
+	targetScore := existing.TargetScore
 
 	if req.IsWicket {
 		wicketsLost++
@@ -158,6 +165,7 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 		CurrentScore: currentScore,
 		WicketsLost:  wicketsLost,
 		BallsLeft:    ballsLeft,
+		TargetScore:  targetScore,
 		Status:       status,
 	})
 	if err != nil || match == nil {
@@ -179,6 +187,7 @@ func (s *Service) publishScore(match *Match) {
 		"currentScore": match.CurrentScore,
 		"wicketsLost":  match.WicketsLost,
 		"ballsLeft":    match.BallsLeft,
+		"targetScore":  match.TargetScore,
 		"oversText":    match.OversText,
 		"status":       NormalizeStatus(match.Status),
 	})
@@ -230,6 +239,7 @@ func (s *Service) StartMatch(ctx context.Context, id string) (*Match, error) {
 		CurrentScore: existing.CurrentScore,
 		WicketsLost:  existing.WicketsLost,
 		BallsLeft:    existing.BallsLeft,
+		TargetScore:  existing.TargetScore,
 		Status:       StatusLive,
 	})
 	if err != nil || match == nil {
@@ -261,6 +271,7 @@ func (s *Service) CompleteMatch(ctx context.Context, id string) (*Match, error) 
 		CurrentScore: existing.CurrentScore,
 		WicketsLost:  existing.WicketsLost,
 		BallsLeft:    existing.BallsLeft,
+		TargetScore:  existing.TargetScore,
 		Status:       StatusCompleted,
 	})
 	if err != nil || match == nil {

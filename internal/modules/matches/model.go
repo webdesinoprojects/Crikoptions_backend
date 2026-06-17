@@ -22,6 +22,7 @@ type Match struct {
 	CurrentScore int                `json:"currentScore" bson:"currentScore"`
 	WicketsLost  int                `json:"wicketsLost" bson:"wicketsLost"`
 	BallsLeft    int                `json:"ballsLeft" bson:"ballsLeft"`
+	TargetScore  int                `json:"targetScore,omitempty" bson:"targetScore,omitempty"`
 	OversText    string             `json:"oversText" bson:"oversText"`
 	CreatedAt    time.Time          `json:"createdAt" bson:"createdAt"`
 	UpdatedAt    time.Time          `json:"updatedAt" bson:"updatedAt"`
@@ -32,5 +33,6 @@ type ScoreUpdate struct {
 	CurrentScore int    `json:"currentScore"`
 	WicketsLost  int    `json:"wicketsLost"`
 	BallsLeft    int    `json:"ballsLeft"`
+	TargetScore  int    `json:"targetScore,omitempty"`
 	Status       string `json:"status"`
 }
