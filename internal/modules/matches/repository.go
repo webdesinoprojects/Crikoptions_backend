@@ -19,7 +19,7 @@ type Repository interface {
 	Create(ctx context.Context, match Match) (*Match, error)
 	UpdateScore(ctx context.Context, id primitive.ObjectID, score ScoreUpdate) (*Match, error)
 	DemoteOtherLiveMatches(ctx context.Context, keepID primitive.ObjectID) error
-	UpsertDemoMatches(ctx context.Context, matches []Match) error
+	NormalizeLegacyStatuses(ctx context.Context) error
 	EnsureIndexes(ctx context.Context) error
 }
 
@@ -116,25 +116,15 @@ func (r *MemoryRepository) DemoteOtherLiveMatches(_ context.Context, keepID prim
 	return nil
 }
 
-func (r *MemoryRepository) UpsertDemoMatches(_ context.Context, matches []Match) error {
+func (r *MemoryRepository) NormalizeLegacyStatuses(_ context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	byID := make(map[primitive.ObjectID]int, len(r.matches))
-	for i, m := range r.matches {
-		byID[m.ID] = i
-	}
 	now := time.Now().UTC()
-	for _, sample := range matches {
-		if idx, ok := byID[sample.ID]; ok {
-			sample.UpdatedAt = now
-			r.matches[idx] = sample
-		} else {
-			if sample.CreatedAt.IsZero() {
-				sample.CreatedAt = now
-			}
-			sample.UpdatedAt = now
-			r.matches = append(r.matches, sample)
+	for i := range r.matches {
+		normalized := NormalizeStatus(r.matches[i].Status)
+		if normalized != r.matches[i].Status {
+			r.matches[i].Status = normalized
+			r.matches[i].UpdatedAt = now
 		}
 	}
 	return nil
@@ -309,27 +299,18 @@ func (r *MongoRepository) DemoteOtherLiveMatches(ctx context.Context, keepID pri
 	return err
 }
 
-func (r *MongoRepository) UpsertDemoMatches(ctx context.Context, samples []Match) error {
+func (r *MongoRepository) NormalizeLegacyStatuses(ctx context.Context) error {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
 	now := time.Now().UTC()
-	for _, sample := range samples {
-		sample.Status = NormalizeStatus(sample.Status)
-		if sample.UpdatedAt.IsZero() {
-			sample.UpdatedAt = now
-		}
-		_, err := r.col.ReplaceOne(
-			ctx,
-			bson.M{"_id": sample.ID},
-			sample,
-			options.Replace().SetUpsert(true),
-		)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	legacy := []string{"active", "ACTIVE", "scheduled", "SCHEDULED", "lIVE"}
+	_, err := r.col.UpdateMany(
+		ctx,
+		bson.M{"status": bson.M{"$in": legacy}},
+		bson.M{"$set": bson.M{"status": StatusUpcoming, "updatedAt": now}},
+	)
+	return err
 }
 
 func timeoutCtx(parent context.Context) (context.Context, context.CancelFunc) {

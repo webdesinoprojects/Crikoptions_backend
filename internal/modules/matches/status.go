@@ -3,8 +3,6 @@ package matches
 import (
 	"sort"
 	"strings"
-
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 const (
@@ -15,16 +13,6 @@ const (
 	StatusSuspended    = "suspended"
 	StatusAbandoned    = "abandoned"
 )
-
-var primaryLiveMatchID = mustObjectID("0000000000000000000000aa")
-
-func mustObjectID(hex string) primitive.ObjectID {
-	id, err := primitive.ObjectIDFromHex(hex)
-	if err != nil {
-		panic(err)
-	}
-	return id
-}
 
 // NormalizeStatus maps legacy/frontend labels to canonical backend statuses.
 func NormalizeStatus(status string) string {

@@ -9,7 +9,10 @@ import (
 )
 
 var (
-	errMatchNotFound = errors.New("match not found")
+	errMatchNotFound     = errors.New("match not found")
+	errInvalidTransition = errors.New("invalid match status transition")
+	errMatchAlreadyLive  = errors.New("match is already live")
+	errMatchNotLive      = errors.New("match is not live")
 )
 
 var legacyMatchIDMap = map[string]string{
@@ -21,9 +24,6 @@ var legacyMatchIDMap = map[string]string{
 	"cc": "0000000000000000000000cc",
 }
 
-// Service is the matches domain service. The handler layer passes string IDs
-// (hex or legacy short form) and the service is responsible for resolving
-// them to primitive.ObjectID before hitting the repository.
 type Service struct {
 	repo Repository
 }
@@ -64,7 +64,7 @@ func (s *Service) CreateMatch(ctx context.Context, req CreateMatchRequest) (*Mat
 		TeamALogo:    req.TeamALogo,
 		TeamBLogo:    req.TeamBLogo,
 		StartTime:    req.StartTime,
-		Status:       "upcoming",
+		Status:       StatusUpcoming,
 		Innings:      1,
 		CurrentScore: 0,
 		WicketsLost:  0,
@@ -74,28 +74,105 @@ func (s *Service) CreateMatch(ctx context.Context, req CreateMatchRequest) (*Mat
 	return s.repo.Create(ctx, match)
 }
 
+// UpdateMatchScore updates innings/score fields. Status changes only when
+// status is explicitly provided in the request.
 func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateScoreRequest) (*Match, error) {
 	objID, err := resolveMatchID(ctx, s.repo, id)
 	if err != nil {
 		return nil, err
 	}
+
+	existing, err := s.repo.GetByID(ctx, objID)
+	if err != nil || existing == nil {
+		return nil, errMatchNotFound
+	}
+
+	status := NormalizeStatus(existing.Status)
+	if strings.TrimSpace(req.Status) != "" {
+		status = NormalizeStatus(req.Status)
+	}
+
 	score := ScoreUpdate{
 		Innings:      req.Innings,
 		CurrentScore: req.CurrentScore,
 		WicketsLost:  req.WicketsLost,
 		BallsLeft:    req.BallsLeft,
-		Status:       NormalizeStatus(req.Status),
-	}
-	if score.Status == "" {
-		score.Status = StatusUpcoming
+		Status:       status,
 	}
 	return s.repo.UpdateScore(ctx, objID, score)
 }
 
-// EnsureSingleLiveMatch demotes extra live matches on startup. Keeps the
-// primary demo match (CSK vs MI) when it is live; otherwise keeps the most
-// recently updated live match.
-func (s *Service) EnsureSingleLiveMatch(ctx context.Context) error {
+// StartMatch transitions upcoming → live and ensures only this match stays live.
+func (s *Service) StartMatch(ctx context.Context, id string) (*Match, error) {
+	objID, err := resolveMatchID(ctx, s.repo, id)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := s.repo.GetByID(ctx, objID)
+	if err != nil || existing == nil {
+		return nil, errMatchNotFound
+	}
+
+	status := NormalizeStatus(existing.Status)
+	switch status {
+	case StatusLive:
+		return nil, errMatchAlreadyLive
+	case StatusCompleted, StatusAbandoned:
+		return nil, errInvalidTransition
+	}
+
+	if err := s.repo.DemoteOtherLiveMatches(ctx, objID); err != nil {
+		return nil, err
+	}
+
+	return s.repo.UpdateScore(ctx, objID, ScoreUpdate{
+		Innings:      existing.Innings,
+		CurrentScore: existing.CurrentScore,
+		WicketsLost:  existing.WicketsLost,
+		BallsLeft:    existing.BallsLeft,
+		Status:       StatusLive,
+	})
+}
+
+// CompleteMatch transitions live → completed.
+func (s *Service) CompleteMatch(ctx context.Context, id string) (*Match, error) {
+	objID, err := resolveMatchID(ctx, s.repo, id)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := s.repo.GetByID(ctx, objID)
+	if err != nil || existing == nil {
+		return nil, errMatchNotFound
+	}
+
+	status := NormalizeStatus(existing.Status)
+	if status != StatusLive && status != StatusInningsBreak {
+		return nil, errMatchNotLive
+	}
+
+	return s.repo.UpdateScore(ctx, objID, ScoreUpdate{
+		Innings:      existing.Innings,
+		CurrentScore: existing.CurrentScore,
+		WicketsLost:  existing.WicketsLost,
+		BallsLeft:    existing.BallsLeft,
+		Status:       StatusCompleted,
+	})
+}
+
+// ReconcileOnStartup normalizes legacy status labels and resolves duplicate
+// live matches without resetting seed data or preferring any fixed match ID.
+func (s *Service) ReconcileOnStartup(ctx context.Context) error {
+	if err := s.repo.NormalizeLegacyStatuses(ctx); err != nil {
+		return err
+	}
+	return s.ReconcileDuplicateLiveMatches(ctx)
+}
+
+// ReconcileDuplicateLiveMatches keeps the most recently updated live match and
+// demotes any other live matches to upcoming.
+func (s *Service) ReconcileDuplicateLiveMatches(ctx context.Context) error {
 	all := s.repo.GetAll(ctx)
 	var live []Match
 	for _, m := range all {
@@ -107,34 +184,15 @@ func (s *Service) EnsureSingleLiveMatch(ctx context.Context) error {
 		return nil
 	}
 
-	keepID := live[0].ID
-	for _, m := range live {
-		if m.ID == primaryLiveMatchID {
-			keepID = m.ID
-			break
+	keep := live[0]
+	for _, m := range live[1:] {
+		if m.UpdatedAt.After(keep.UpdatedAt) {
+			keep = m
 		}
 	}
-	if keepID != primaryLiveMatchID {
-		latest := live[0]
-		for _, m := range live[1:] {
-			if m.UpdatedAt.After(latest.UpdatedAt) {
-				latest = m
-			}
-		}
-		keepID = latest.ID
-	}
-	return s.repo.DemoteOtherLiveMatches(ctx, keepID)
+	return s.repo.DemoteOtherLiveMatches(ctx, keep.ID)
 }
 
-// RepairDemoMatches resets the three seeded demo fixtures to their canonical state.
-func (s *Service) RepairDemoMatches(ctx context.Context) error {
-	return s.repo.UpsertDemoMatches(ctx, getSampleMatches())
-}
-
-// resolveMatchID turns the path-supplied ID into a primitive.ObjectID. It
-// accepts hex ObjectIDs directly and falls back to matching against either
-// the full hex or the last two characters of any seeded match's hex — so
-// legacy short IDs like "aa" continue to work for the demo seed.
 func resolveMatchID(ctx context.Context, repo Repository, id string) (primitive.ObjectID, error) {
 	id = strings.TrimSpace(id)
 	if mapped, ok := legacyMatchIDMap[id]; ok {

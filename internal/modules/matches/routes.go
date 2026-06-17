@@ -14,5 +14,6 @@ func RegisterRoutes(mux *http.ServeMux, handler *Handler, authHandler *auth.Hand
 	// Admin-only endpoints - require both auth and admin role.
 	mux.HandleFunc("POST /api/v1/admin/matches", authHandler.RequireAuth(authHandler.RequireAdmin(handler.CreateMatch)))
 	mux.HandleFunc("PATCH /api/v1/admin/matches/{id}/score", authHandler.RequireAuth(authHandler.RequireAdmin(handler.UpdateMatchScore)))
-	mux.HandleFunc("POST /api/v1/admin/matches/repair-demo", authHandler.RequireAuth(authHandler.RequireAdmin(handler.RepairDemoMatches)))
+	mux.HandleFunc("POST /api/v1/admin/matches/{id}/start", authHandler.RequireAuth(authHandler.RequireAdmin(handler.StartMatch)))
+	mux.HandleFunc("POST /api/v1/admin/matches/{id}/complete", authHandler.RequireAuth(authHandler.RequireAdmin(handler.CompleteMatch)))
 }

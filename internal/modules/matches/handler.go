@@ -2,6 +2,7 @@ package matches
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/httpjson"
@@ -103,7 +104,22 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	match, err := h.service.UpdateMatchScore(r.Context(), r.PathValue("id"), req)
-	if err != nil || match == nil {
+	if err != nil {
+		switch {
+		case errors.Is(err, errMatchNotFound):
+			httpjson.Write(w, http.StatusNotFound, map[string]any{
+				"success": false,
+				"message": "Match not found",
+			})
+		default:
+			httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+				"success": false,
+				"message": "Failed to update match score",
+			})
+		}
+		return
+	}
+	if match == nil {
 		httpjson.Write(w, http.StatusNotFound, map[string]any{
 			"success": false,
 			"message": "Match not found",
@@ -118,19 +134,58 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) RepairDemoMatches(w http.ResponseWriter, r *http.Request) {
-	if err := h.service.RepairDemoMatches(r.Context()); err != nil {
-		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
-			"success": false,
-			"message": "Failed to repair demo matches",
-		})
+func (h *Handler) StartMatch(w http.ResponseWriter, r *http.Request) {
+	match, err := h.service.StartMatch(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeMatchActionError(w, err)
 		return
 	}
-
-	matches := h.service.GetHomeMatches(r.Context())
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
-		"message": "Demo matches reset to canonical seed state",
-		"data":    matches,
+		"message": "Match started",
+		"data":    match,
 	})
+}
+
+func (h *Handler) CompleteMatch(w http.ResponseWriter, r *http.Request) {
+	match, err := h.service.CompleteMatch(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeMatchActionError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Match completed",
+		"data":    match,
+	})
+}
+
+func writeMatchActionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errMatchNotFound):
+		httpjson.Write(w, http.StatusNotFound, map[string]any{
+			"success": false,
+			"message": "Match not found",
+		})
+	case errors.Is(err, errMatchAlreadyLive):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "Match is already live",
+		})
+	case errors.Is(err, errMatchNotLive):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "Match is not live",
+		})
+	case errors.Is(err, errInvalidTransition):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "Invalid match status transition",
+		})
+	default:
+		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": "Match action failed",
+		})
+	}
 }
