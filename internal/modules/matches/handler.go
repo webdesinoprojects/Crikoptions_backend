@@ -134,6 +134,50 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) RecordBall(w http.ResponseWriter, r *http.Request) {
+	var req BallEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	match, err := h.service.RecordBall(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, errMatchNotFound):
+			httpjson.Write(w, http.StatusNotFound, map[string]any{
+				"success": false,
+				"message": "Match not found",
+			})
+		case errors.Is(err, errMatchNotLiveBall):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"message": "Match must be live to record balls",
+			})
+		case errors.Is(err, errInvalidBallEvent):
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "runs must be between 0 and 6",
+			})
+		default:
+			httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+				"success": false,
+				"message": "Failed to record ball",
+			})
+		}
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Ball recorded successfully",
+		"data":    match,
+	})
+}
+
 func (h *Handler) StartMatch(w http.ResponseWriter, r *http.Request) {
 	match, err := h.service.StartMatch(r.Context(), r.PathValue("id"))
 	if err != nil {

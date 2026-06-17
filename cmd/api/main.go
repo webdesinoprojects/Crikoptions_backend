@@ -23,6 +23,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/routes"
 )
 
@@ -52,7 +53,8 @@ func main() {
 	matchesRepo := matches.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
 	seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
-	matchesService := matches.NewService(matchesRepo)
+	realtimeHub := realtime.NewHub()
+	matchesService := matches.NewService(matchesRepo, realtimeHub)
 	if err := matchesService.ReconcileOnStartup(context.Background()); err != nil {
 		log.Printf("matches reconcile: %v", err)
 	}
@@ -97,7 +99,8 @@ func main() {
 	positionsHandler := positions.NewHandler(positionsService)
 
 	healthHandler := health.NewHandler()
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, walletHandler, executionsHandler)
+	realtimeHandler := realtime.NewHandler(realtimeHub)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, walletHandler, executionsHandler, realtimeHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
 
 	srv := &http.Server{

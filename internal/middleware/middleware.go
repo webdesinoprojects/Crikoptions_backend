@@ -1,7 +1,10 @@
 package middleware
 
 import (
+	"bufio"
+	"errors"
 	"log"
+	"net"
 	"net/http"
 	"time"
 )
@@ -32,6 +35,17 @@ type statusRecorder struct {
 func (rw *statusRecorder) WriteHeader(statusCode int) {
 	rw.status = statusCode
 	rw.ResponseWriter.WriteHeader(statusCode)
+}
+
+// Hijack lets the WebSocket upgrade take over the connection. Without this,
+// the embedded ResponseWriter interface hides the underlying Hijacker and
+// gorilla/websocket's Upgrade fails with "does not implement http.Hijacker".
+func (rw *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("underlying ResponseWriter does not implement http.Hijacker")
+	}
+	return hijacker.Hijack()
 }
 
 func Logger(next http.Handler) http.Handler {

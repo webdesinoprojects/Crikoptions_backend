@@ -16,4 +16,5 @@ func RegisterRoutes(mux *http.ServeMux, handler *Handler, authHandler *auth.Hand
 	mux.HandleFunc("PATCH /api/v1/admin/matches/{id}/score", authHandler.RequireAuth(authHandler.RequireAdmin(handler.UpdateMatchScore)))
 	mux.HandleFunc("POST /api/v1/admin/matches/{id}/start", authHandler.RequireAuth(authHandler.RequireAdmin(handler.StartMatch)))
 	mux.HandleFunc("POST /api/v1/admin/matches/{id}/complete", authHandler.RequireAuth(authHandler.RequireAdmin(handler.CompleteMatch)))
+	mux.HandleFunc("POST /api/v1/admin/matches/{id}/ball", authHandler.RequireAuth(authHandler.RequireAdmin(handler.RecordBall)))
 }

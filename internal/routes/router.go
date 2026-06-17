@@ -12,6 +12,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 )
 
 func NewRouter(
@@ -24,6 +25,7 @@ func NewRouter(
 	positionsHandler *positions.Handler,
 	walletHandler *wallet.Handler,
 	executionsHandler *executions.Handler,
+	realtimeHandler *realtime.Handler,
 ) http.Handler {
 	mux := http.NewServeMux()
 
@@ -61,6 +63,10 @@ func NewRouter(
 
 	if executionsHandler != nil {
 		executions.RegisterRoutes(mux, executionsHandler, authHandler)
+	}
+
+	if realtimeHandler != nil {
+		realtime.RegisterRoutes(mux, realtimeHandler)
 	}
 
 	return mux

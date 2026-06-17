@@ -42,3 +42,11 @@ type UpdateScoreRequest struct {
 	BallsLeft    int    `json:"ballsLeft"`
 	Status       string `json:"status"`
 }
+
+// BallEventRequest records one legal ball for "This over" commentary.
+type BallEventRequest struct {
+	Runs      int  `json:"runs"`
+	IsWicket  bool `json:"isWicket"`
+	BallNumber int `json:"ballNumber,omitempty"`
+	Description string `json:"description,omitempty"`
+}

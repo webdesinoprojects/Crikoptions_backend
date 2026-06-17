@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -13,7 +14,14 @@ var (
 	errInvalidTransition = errors.New("invalid match status transition")
 	errMatchAlreadyLive  = errors.New("match is already live")
 	errMatchNotLive      = errors.New("match is not live")
+	errMatchNotLiveBall  = errors.New("match must be live to record balls")
+	errInvalidBallEvent  = errors.New("invalid ball event")
 )
+
+// EventPublisher pushes realtime WebSocket updates.
+type EventPublisher interface {
+	Publish(topic string, data any)
+}
 
 var legacyMatchIDMap = map[string]string{
 	"1":  "0000000000000000000000aa",
@@ -25,11 +33,12 @@ var legacyMatchIDMap = map[string]string{
 }
 
 type Service struct {
-	repo Repository
+	repo      Repository
+	publisher EventPublisher
 }
 
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo Repository, publisher EventPublisher) *Service {
+	return &Service{repo: repo, publisher: publisher}
 }
 
 func (s *Service) GetHomeMatches(ctx context.Context) []Match {
@@ -99,7 +108,97 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 		BallsLeft:    req.BallsLeft,
 		Status:       status,
 	}
-	return s.repo.UpdateScore(ctx, objID, score)
+	match, err := s.repo.UpdateScore(ctx, objID, score)
+	if err != nil || match == nil {
+		return match, err
+	}
+	s.publishScore(match)
+	return match, nil
+}
+
+// RecordBall applies one ball event, updates match state, and publishes
+// separate score + commentary WebSocket topics.
+func (s *Service) RecordBall(ctx context.Context, id string, req BallEventRequest) (*Match, error) {
+	if req.Runs < 0 || req.Runs > 6 {
+		return nil, errInvalidBallEvent
+	}
+
+	objID, err := resolveMatchID(ctx, s.repo, id)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := s.repo.GetByID(ctx, objID)
+	if err != nil || existing == nil {
+		return nil, errMatchNotFound
+	}
+
+	status := NormalizeStatus(existing.Status)
+	if status != StatusLive && status != StatusInningsBreak {
+		return nil, errMatchNotLiveBall
+	}
+
+	innings := existing.Innings
+	currentScore := existing.CurrentScore + req.Runs
+	wicketsLost := existing.WicketsLost
+	ballsLeft := existing.BallsLeft
+
+	if req.IsWicket {
+		wicketsLost++
+		if wicketsLost > 10 {
+			wicketsLost = 10
+		}
+	}
+	if ballsLeft > 0 {
+		ballsLeft--
+	}
+
+	match, err := s.repo.UpdateScore(ctx, objID, ScoreUpdate{
+		Innings:      innings,
+		CurrentScore: currentScore,
+		WicketsLost:  wicketsLost,
+		BallsLeft:    ballsLeft,
+		Status:       status,
+	})
+	if err != nil || match == nil {
+		return match, err
+	}
+
+	s.publishCommentary(match.ID.Hex(), req)
+	s.publishScore(match)
+	return match, nil
+}
+
+func (s *Service) publishScore(match *Match) {
+	if s.publisher == nil || match == nil {
+		return
+	}
+	s.publisher.Publish(realtime.MatchScoreTopic(match.ID.Hex()), map[string]any{
+		"matchId":      match.ID.Hex(),
+		"innings":      match.Innings,
+		"currentScore": match.CurrentScore,
+		"wicketsLost":  match.WicketsLost,
+		"ballsLeft":    match.BallsLeft,
+		"oversText":    match.OversText,
+		"status":       NormalizeStatus(match.Status),
+	})
+}
+
+func (s *Service) publishCommentary(matchID string, req BallEventRequest) {
+	if s.publisher == nil {
+		return
+	}
+	data := map[string]any{
+		"runs":     req.Runs,
+		"isWicket": req.IsWicket,
+	}
+	if req.BallNumber > 0 {
+		data["ballNumber"] = req.BallNumber
+	}
+	if strings.TrimSpace(req.Description) != "" {
+		data["description"] = req.Description
+	}
+	s.publisher.Publish(realtime.MatchCommentaryTopic(matchID), data)
 }
 
 // StartMatch transitions upcoming → live and ensures only this match stays live.
@@ -126,13 +225,18 @@ func (s *Service) StartMatch(ctx context.Context, id string) (*Match, error) {
 		return nil, err
 	}
 
-	return s.repo.UpdateScore(ctx, objID, ScoreUpdate{
+	match, err := s.repo.UpdateScore(ctx, objID, ScoreUpdate{
 		Innings:      existing.Innings,
 		CurrentScore: existing.CurrentScore,
 		WicketsLost:  existing.WicketsLost,
 		BallsLeft:    existing.BallsLeft,
 		Status:       StatusLive,
 	})
+	if err != nil || match == nil {
+		return match, err
+	}
+	s.publishScore(match)
+	return match, nil
 }
 
 // CompleteMatch transitions live → completed.
@@ -152,13 +256,18 @@ func (s *Service) CompleteMatch(ctx context.Context, id string) (*Match, error) 
 		return nil, errMatchNotLive
 	}
 
-	return s.repo.UpdateScore(ctx, objID, ScoreUpdate{
+	match, err := s.repo.UpdateScore(ctx, objID, ScoreUpdate{
 		Innings:      existing.Innings,
 		CurrentScore: existing.CurrentScore,
 		WicketsLost:  existing.WicketsLost,
 		BallsLeft:    existing.BallsLeft,
 		Status:       StatusCompleted,
 	})
+	if err != nil || match == nil {
+		return match, err
+	}
+	s.publishScore(match)
+	return match, nil
 }
 
 // ReconcileOnStartup normalizes legacy status labels and resolves duplicate
