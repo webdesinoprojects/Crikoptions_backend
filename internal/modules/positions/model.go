@@ -18,10 +18,11 @@ type Position struct {
 	Strike    float64            `json:"strike" bson:"strike"`
 	Status    string             `json:"status" bson:"status"` // "open" or "closed"
 	Lots      int                `json:"lots" bson:"lots"`     // net absolute quantity (buy - sell)
-	BuyPrice  float64            `json:"buyPrice" bson:"buyPrice"`
-	SellPrice float64            `json:"sellPrice" bson:"sellPrice"`
-	LTP       float64            `json:"ltp" bson:"ltp"`
-	PnL       float64            `json:"pnl" bson:"pnl"`
-	CreatedAt time.Time          `json:"createdAt" bson:"createdAt"`
-	UpdatedAt time.Time          `json:"updatedAt" bson:"updatedAt"`
+	BuyPrice    float64          `json:"buyPrice" bson:"buyPrice"`
+	SellPrice   float64          `json:"sellPrice" bson:"sellPrice"`
+	LTP         float64          `json:"ltp" bson:"ltp"`
+	PnL         float64          `json:"pnl" bson:"pnl"`               // unrealized for open lots; realized for closed
+	RealizedPnL float64          `json:"realizedPnl" bson:"realizedPnl"` // realized PnL on the sold/closed slice
+	CreatedAt   time.Time        `json:"createdAt" bson:"createdAt"`
+	UpdatedAt   time.Time        `json:"updatedAt" bson:"updatedAt"`
 }

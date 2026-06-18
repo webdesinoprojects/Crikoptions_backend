@@ -13,6 +13,7 @@ import (
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
 )
 
 var errInvalidUserID = errors.New("invalid userId")
@@ -103,6 +104,47 @@ func (s *Service) GetAdminPosition(ctx context.Context, positionID string) (*Pos
 	return nil, nil
 }
 
+// PositionFor returns a snapshot for a user's (match, market, strike) position,
+// including closed positions (lots == 0). Implements orders.PositionView so the
+// orders service can broadcast position updates after a sell fill.
+func (s *Service) PositionFor(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (orders.PositionSnapshot, bool) {
+	all, err := s.computeForUser(ctx, userID)
+	if err != nil {
+		return orders.PositionSnapshot{}, false
+	}
+	for i := range all {
+		p := all[i]
+		if p.MatchID == matchID && p.MarketID == marketID && p.Strike == strike {
+			return toSnapshot(p), true
+		}
+	}
+	return orders.PositionSnapshot{}, false
+}
+
+// ResolveCloseTarget resolves a derived position id to its snapshot so the
+// orders service can build an exit order. Implements orders.PositionView.
+func (s *Service) ResolveCloseTarget(ctx context.Context, userID primitive.ObjectID, positionID string) (orders.PositionSnapshot, bool) {
+	p, err := s.GetUserPosition(ctx, userID, positionID)
+	if err != nil || p == nil {
+		return orders.PositionSnapshot{}, false
+	}
+	return toSnapshot(*p), true
+}
+
+func toSnapshot(p Position) orders.PositionSnapshot {
+	return orders.PositionSnapshot{
+		MatchID:     p.MatchID,
+		MarketID:    p.MarketID,
+		Strike:      p.Strike,
+		Lots:        p.Lots,
+		BuyPrice:    p.BuyPrice,
+		LTP:         p.LTP,
+		PnL:         p.PnL,
+		RealizedPnL: p.RealizedPnL,
+		Status:      p.Status,
+	}
+}
+
 func (s *Service) computeForUser(ctx context.Context, userID primitive.ObjectID) ([]Position, error) {
 	execs := s.executions.List(ctx, executions.Filter{UserID: userID, Limit: 1000})
 	return s.aggregate(ctx, execs), nil
@@ -149,6 +191,7 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 			p.LTP = m.LTP
 		}
 		p.PnL = computePnL(p, b.matchedQty())
+		p.RealizedPnL = computeRealized(b)
 		out = append(out, p)
 	}
 
@@ -211,6 +254,18 @@ func (b *aggregateBucket) toPosition() Position {
 		BuyPrice:  round2(avgBuy),
 		SellPrice: round2(avgSell),
 	}
+}
+
+// computeRealized returns the realized PnL on the matched (closed) slice of a
+// position: (avgSell - avgBuy) * min(buyQty, sellQty).
+func computeRealized(b *aggregateBucket) float64 {
+	matched := b.matchedQty()
+	if matched == 0 || b.buyQty == 0 || b.sellQty == 0 {
+		return 0
+	}
+	avgBuy := b.buyNotional / float64(b.buyQty)
+	avgSell := b.sellNotional / float64(b.sellQty)
+	return round2((avgSell - avgBuy) * float64(matched))
 }
 
 func computePnL(p Position, matched int) float64 {

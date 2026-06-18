@@ -15,3 +15,13 @@ func MatchCommentaryTopic(matchID string) string {
 func normalizeMatchID(matchID string) string {
 	return strings.TrimSpace(matchID)
 }
+
+// UserOrdersTopic is the per-user WebSocket topic for order state changes.
+func UserOrdersTopic(userID string) string {
+	return "user:" + strings.TrimSpace(userID) + ":orders"
+}
+
+// UserPositionsTopic is the per-user WebSocket topic for position changes.
+func UserPositionsTopic(userID string) string {
+	return "user:" + strings.TrimSpace(userID) + ":positions"
+}

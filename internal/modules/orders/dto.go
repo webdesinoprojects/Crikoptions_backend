@@ -33,3 +33,12 @@ type OrderResponse struct {
 type CancelOrderRequest struct {
 	Reason string `json:"reason"`
 }
+
+// ClosePositionRequest is the body for POST /api/v1/positions/{id}/close.
+// Quantity is optional (defaults to the full open lots). Price is required for
+// LIMIT exits.
+type ClosePositionRequest struct {
+	Type     string  `json:"type"`
+	Quantity int     `json:"quantity"`
+	Price    float64 `json:"price"`
+}

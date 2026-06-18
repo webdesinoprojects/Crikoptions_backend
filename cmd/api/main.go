@@ -84,7 +84,12 @@ func main() {
 	walletService := wallet.NewService(walletRepo)
 	walletHandler := wallet.NewHandler(walletService)
 
-	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService)
+	// Positions (derived from executions + markets). Created before orders so
+	// the order service can resolve/broadcast position state on exits.
+	positionsService := positions.NewService(executionsService, marketsService)
+	positionsHandler := positions.NewHandler(positionsService)
+
+	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService, positionsService, realtimeHub)
 	ordersHandler := orders.NewHandler(ordersService)
 
 	// Watchlist.
@@ -93,10 +98,6 @@ func main() {
 	seedMongoDefaults(context.Background(), "watchlist", watchlistRepo.SeedDefaults)
 	watchlistService := watchlist.NewService(watchlistRepo, marketsService)
 	watchlistHandler := watchlist.NewHandler(watchlistService)
-
-	// Positions (derived from executions + markets).
-	positionsService := positions.NewService(executionsService, marketsService)
-	positionsHandler := positions.NewHandler(positionsService)
 
 	healthHandler := health.NewHandler()
 	realtimeHandler := realtime.NewHandler(realtimeHub)

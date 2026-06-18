@@ -22,7 +22,7 @@ func TestWalletHTTPFundingFlow(t *testing.T) {
 	authHandler := auth.NewHandler(authSvc)
 
 	walletHandler := wallet.NewHandler(wallet.NewService(wallet.NewMemoryRepository()))
-	router := routes.NewRouter(nil, nil, authHandler, nil, nil, nil, nil, walletHandler, nil)
+	router := routes.NewRouter(nil, nil, authHandler, nil, nil, nil, nil, walletHandler, nil, nil)
 
 	userToken, userID := registerAndLogin(t, router, "trader@example.com", "Trader User")
 	adminToken, _ := registerAndLogin(t, router, "admin@example.com", "Admin User")

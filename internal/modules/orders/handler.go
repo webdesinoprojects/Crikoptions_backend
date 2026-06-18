@@ -3,6 +3,7 @@ package orders
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -163,73 +164,7 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 
 	order, err := h.service.CreateOrder(r.Context(), userID, req)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrMarketNotFound):
-			httpjson.Write(w, http.StatusNotFound, map[string]any{
-				"success": false,
-				"message": "Market not found",
-			})
-		case errors.Is(err, ErrMatchNotFound):
-			httpjson.Write(w, http.StatusNotFound, map[string]any{
-				"success": false,
-				"message": "Match not found",
-			})
-		case errors.Is(err, ErrMarketNotTradable):
-			httpjson.Write(w, http.StatusConflict, map[string]any{
-				"success": false,
-				"message": "Market is not open for trading",
-			})
-		case errors.Is(err, ErrMatchNotTradable):
-			httpjson.Write(w, http.StatusConflict, map[string]any{
-				"success": false,
-				"message": "Match is not live for trading",
-			})
-		case errors.Is(err, ErrInsufficientBalance):
-			httpjson.Write(w, http.StatusConflict, map[string]any{
-				"success": false,
-				"message": "Insufficient available wallet balance",
-			})
-		case errors.Is(err, ErrInsufficientPosition):
-			httpjson.Write(w, http.StatusConflict, map[string]any{
-				"success": false,
-				"message": "Insufficient position to sell",
-			})
-		case errors.Is(err, ErrStrikeNotFound):
-			httpjson.Write(w, http.StatusBadRequest, map[string]any{
-				"success": false,
-				"message": "Strike not found in option chain",
-			})
-		case errors.Is(err, ErrNoLiquidity):
-			httpjson.Write(w, http.StatusConflict, map[string]any{
-				"success": false,
-				"message": "No executable market quote available",
-			})
-		case errors.Is(err, ErrInvalidSide):
-			httpjson.Write(w, http.StatusBadRequest, map[string]any{
-				"success": false,
-				"message": "Side must be 'buy' or 'sell'",
-			})
-		case errors.Is(err, ErrInvalidQuantity):
-			httpjson.Write(w, http.StatusBadRequest, map[string]any{
-				"success": false,
-				"message": "Quantity must be positive",
-			})
-		case errors.Is(err, ErrInvalidPrice):
-			httpjson.Write(w, http.StatusBadRequest, map[string]any{
-				"success": false,
-				"message": "Price must be positive",
-			})
-		case errors.Is(err, ErrInvalidStrike):
-			httpjson.Write(w, http.StatusBadRequest, map[string]any{
-				"success": false,
-				"message": "Strike must be positive",
-			})
-		default:
-			httpjson.Write(w, http.StatusInternalServerError, map[string]any{
-				"success": false,
-				"message": "Failed to create order",
-			})
-		}
+		writeOrderError(w, err)
 		return
 	}
 
@@ -238,6 +173,132 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		"message": "Order created successfully",
 		"data":    order,
 	})
+}
+
+// ClosePosition exits (sells to close) a derived position by id. It reuses the
+// full SELL validation + matching via the service.
+func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r)
+	if !ok {
+		httpjson.Write(w, http.StatusUnauthorized, map[string]any{
+			"success": false,
+			"message": "Unauthorized",
+		})
+		return
+	}
+
+	positionID := r.PathValue("id")
+	if positionID == "" {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid position ID",
+		})
+		return
+	}
+
+	var req ClosePositionRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "Invalid request body",
+			})
+			return
+		}
+	}
+
+	order, err := h.service.ClosePosition(r.Context(), userID, positionID, req.Type, req.Quantity, req.Price)
+	if err != nil {
+		writeOrderError(w, err)
+		return
+	}
+
+	httpjson.Write(w, http.StatusCreated, map[string]any{
+		"success": true,
+		"message": "Position close order submitted",
+		"data":    order,
+	})
+}
+
+// writeOrderError maps service errors to the consistent JSON error contract.
+// *APIError carries an explicit status + dynamic message (used by the exit flow).
+func writeOrderError(w http.ResponseWriter, err error) {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		httpjson.Write(w, apiErr.Status, map[string]any{
+			"success": false,
+			"message": apiErr.Message,
+		})
+		return
+	}
+
+	switch {
+	case errors.Is(err, ErrMarketNotFound):
+		httpjson.Write(w, http.StatusNotFound, map[string]any{
+			"success": false,
+			"message": "Market not found",
+		})
+	case errors.Is(err, ErrMatchNotFound):
+		httpjson.Write(w, http.StatusNotFound, map[string]any{
+			"success": false,
+			"message": "Match not found",
+		})
+	case errors.Is(err, ErrMarketNotTradable):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "Market is not open for trading",
+		})
+	case errors.Is(err, ErrMatchNotTradable):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "Match is not live for trading",
+		})
+	case errors.Is(err, ErrInsufficientBalance):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "Insufficient available wallet balance",
+		})
+	case errors.Is(err, ErrInsufficientPosition):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "Insufficient position to sell",
+		})
+	case errors.Is(err, ErrStrikeNotFound):
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Strike not found in option chain",
+		})
+	case errors.Is(err, ErrNoLiquidity):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"message": "No executable market quote available",
+		})
+	case errors.Is(err, ErrInvalidSide):
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Side must be 'buy' or 'sell'",
+		})
+	case errors.Is(err, ErrInvalidQuantity):
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Quantity must be positive",
+		})
+	case errors.Is(err, ErrInvalidPrice):
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Price must be positive",
+		})
+	case errors.Is(err, ErrInvalidStrike):
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Strike must be positive",
+		})
+	default:
+		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": "Failed to create order",
+		})
+	}
 }
 
 func (h *Handler) CancelOrder(w http.ResponseWriter, r *http.Request) {

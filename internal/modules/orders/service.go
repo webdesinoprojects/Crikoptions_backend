@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -13,6 +15,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 )
 
 var (
@@ -52,12 +55,44 @@ type ExecutionWriter interface {
 	OpenLongQty(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) int
 }
 
+// EventPublisher streams realtime updates (implemented by realtime.Hub). It is
+// optional; a nil publisher disables broadcasts.
+type EventPublisher interface {
+	Publish(topic string, data any)
+}
+
+// PositionSnapshot is the post-fill view of a user's position for a strike,
+// used both for WebSocket broadcasts and the close endpoint.
+type PositionSnapshot struct {
+	MatchID     string
+	MarketID    string
+	Strike      float64
+	Lots        int
+	BuyPrice    float64
+	LTP         float64
+	PnL         float64
+	RealizedPnL float64
+	Status      string
+}
+
+// PositionView reads derived positions for a user. Implemented by
+// positions.Service. Optional; a nil view disables position broadcasts and the
+// close endpoint resolution.
+type PositionView interface {
+	PositionFor(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (PositionSnapshot, bool)
+	ResolveCloseTarget(ctx context.Context, userID primitive.ObjectID, positionID string) (PositionSnapshot, bool)
+}
+
 type Service struct {
 	repo       Repository
 	markets    MarketReader
 	matches    MatchReader
 	wallets    WalletPort
 	executions ExecutionWriter
+	positions  PositionView
+	publisher  EventPublisher
+
+	locks sync.Map // map[string]*sync.Mutex keyed by user|market|strike
 }
 
 func NewService(
@@ -66,6 +101,8 @@ func NewService(
 	matches MatchReader,
 	wallets WalletPort,
 	executions ExecutionWriter,
+	positions PositionView,
+	publisher EventPublisher,
 ) *Service {
 	return &Service{
 		repo:       repo,
@@ -73,7 +110,19 @@ func NewService(
 		matches:    matches,
 		wallets:    wallets,
 		executions: executions,
+		positions:  positions,
+		publisher:  publisher,
 	}
+}
+
+// lockFor serializes mutations for a single (user, market, strike) so two
+// concurrent sells cannot oversell the same position. Returns an unlock func.
+func (s *Service) lockFor(userID primitive.ObjectID, marketID string, strike float64) func() {
+	key := userID.Hex() + "|" + marketID + "|" + formatStrike(strike)
+	actual, _ := s.locks.LoadOrStore(key, &sync.Mutex{})
+	mu := actual.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func (s *Service) GetUserOrders(ctx context.Context, userID primitive.ObjectID, status, matchID string) []Order {
@@ -112,8 +161,17 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		return nil, ErrMarketNotFound
 	}
 	if !s.markets.IsTradable(market) {
+		// Exit path uses the explicit error contract; buy path is unchanged.
+		if req.Side == "sell" {
+			return nil, newAPIError(http.StatusBadRequest, "Market not active")
+		}
 		return nil, ErrMarketNotTradable
 	}
+
+	// Serialize mutations for this (user, market, strike) so concurrent sells
+	// cannot oversell the same position.
+	unlock := s.lockFor(userID, market.ID.Hex(), req.Strike)
+	defer unlock()
 
 	match, err := s.matches.GetMatchByID(ctx, req.MatchID)
 	if err != nil || match == nil {
@@ -131,8 +189,11 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 
 	if req.Side == "sell" {
 		openQty := s.executions.OpenLongQty(ctx, userID, req.MatchID, market.ID.Hex(), req.Strike)
-		if openQty < req.Quantity {
-			return nil, ErrInsufficientPosition
+		if openQty <= 0 {
+			return nil, newAPIError(http.StatusBadRequest, fmt.Sprintf("No open position for strike %s", formatStrike(req.Strike)))
+		}
+		if req.Quantity > openQty {
+			return nil, newAPIError(http.StatusBadRequest, fmt.Sprintf("Cannot sell %d lots; only %d open", req.Quantity, openQty))
 		}
 	}
 
@@ -144,6 +205,9 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		var ok bool
 		fillPrice, ok = matchMarketOrder(req.Side, bid, ask)
 		if !ok {
+			if req.Side == "sell" {
+				return nil, newAPIError(http.StatusBadRequest, "No bid available")
+			}
 			return nil, ErrNoLiquidity
 		}
 		orderPrice = fillPrice
@@ -187,10 +251,16 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	}
 
 	if !shouldFill {
+		s.broadcastSell(ctx, userID, created)
 		return created, nil
 	}
 
-	return s.applyFill(ctx, userID, created, fillPrice, created.RemainingQuantity)
+	filled, err := s.applyFill(ctx, userID, created, fillPrice, created.RemainingQuantity)
+	if err != nil {
+		return nil, err
+	}
+	s.broadcastSell(ctx, userID, filled)
+	return filled, nil
 }
 
 func (s *Service) CancelOrder(ctx context.Context, id, userID primitive.ObjectID) (*Order, error) {
@@ -215,7 +285,84 @@ func (s *Service) CancelOrder(ctx context.Context, id, userID primitive.ObjectID
 		}
 	}
 
-	return s.repo.Cancel(ctx, id, userID)
+	cancelled, err := s.repo.Cancel(ctx, id, userID)
+	if err != nil {
+		return nil, err
+	}
+	if cancelled != nil && cancelled.Side == "sell" {
+		// Position is unchanged on cancel, but the order state changed.
+		s.broadcastSell(ctx, userID, cancelled)
+	}
+	return cancelled, nil
+}
+
+// ClosePosition resolves a derived position by id and submits a SELL order to
+// exit it, reusing the full validation + matching of the sell path. quantity
+// defaults to the full open lots when zero.
+func (s *Service) ClosePosition(ctx context.Context, userID primitive.ObjectID, positionID, orderType string, quantity int, price float64) (*Order, error) {
+	if s.positions == nil {
+		return nil, newAPIError(http.StatusBadRequest, "Position lookup is unavailable")
+	}
+
+	target, ok := s.positions.ResolveCloseTarget(ctx, userID, positionID)
+	if !ok || target.Lots <= 0 {
+		return nil, newAPIError(http.StatusBadRequest, "No open position to close")
+	}
+
+	if quantity <= 0 {
+		quantity = target.Lots
+	}
+
+	orderType = strings.ToUpper(strings.TrimSpace(orderType))
+	if orderType == "" {
+		orderType = OrderTypeMarket
+	}
+
+	return s.CreateOrder(ctx, userID, CreateOrderRequest{
+		MatchID:  target.MatchID,
+		MarketID: target.MarketID,
+		Strike:   target.Strike,
+		Side:     "sell",
+		Type:     orderType,
+		Quantity: quantity,
+		Price:    price,
+	})
+}
+
+// broadcastSell streams order + position updates for a sell order's owner.
+func (s *Service) broadcastSell(ctx context.Context, userID primitive.ObjectID, order *Order) {
+	if s.publisher == nil || order == nil || order.Side != "sell" {
+		return
+	}
+
+	s.publisher.Publish(realtime.UserOrdersTopic(userID.Hex()), map[string]any{
+		"orderId":           order.ID.Hex(),
+		"marketId":          order.MarketID,
+		"strike":            order.Strike,
+		"side":              "SELL",
+		"status":            order.Status,
+		"filledQuantity":    order.FilledQuantity,
+		"remainingQuantity": order.RemainingQuantity,
+		"averageFillPrice":  order.AverageFillPrice,
+	})
+
+	if s.positions == nil {
+		return
+	}
+	snap, ok := s.positions.PositionFor(ctx, userID, order.MatchID, order.MarketID, order.Strike)
+	if !ok {
+		return
+	}
+	s.publisher.Publish(realtime.UserPositionsTopic(userID.Hex()), map[string]any{
+		"marketId":    snap.MarketID,
+		"strike":      snap.Strike,
+		"lots":        snap.Lots,
+		"buyPrice":    snap.BuyPrice,
+		"ltp":         snap.LTP,
+		"pnl":         snap.PnL,
+		"realizedPnl": snap.RealizedPnL,
+		"status":      snap.Status,
+	})
 }
 
 func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, order *Order, fillPrice float64, fillQty int) (*Order, error) {

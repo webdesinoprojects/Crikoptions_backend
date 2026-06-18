@@ -66,6 +66,8 @@ func TestCreateOrder_LimitBuyAtAskFills(t *testing.T) {
 		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, CurrentScore: 85, WicketsLost: 2, BallsLeft: 42}},
 		walletSvc,
 		execSvc,
+		nil,
+		nil,
 	)
 
 	order, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
@@ -116,6 +118,8 @@ func TestCreateOrder_LimitBuyBelowAskStaysOpen(t *testing.T) {
 		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, BallsLeft: 42}},
 		walletSvc,
 		executions.NewService(executions.NewMemoryRepository()),
+		nil,
+		nil,
 	)
 
 	order, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
@@ -166,6 +170,8 @@ func TestCreateOrder_MarketBuyFillsAtAsk(t *testing.T) {
 		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, CurrentScore: 85, WicketsLost: 2, BallsLeft: 42}},
 		walletSvc,
 		execSvc,
+		nil,
+		nil,
 	)
 
 	order, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
@@ -200,6 +206,8 @@ func TestCreateOrder_InsufficientBalanceRejected(t *testing.T) {
 		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, BallsLeft: 42}},
 		wallet.NewService(wallet.NewMemoryRepository()),
 		executions.NewService(executions.NewMemoryRepository()),
+		nil,
+		nil,
 	)
 
 	_, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
@@ -230,6 +238,8 @@ func TestCancelOrder_ReleasesReservedBalance(t *testing.T) {
 		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, BallsLeft: 42}},
 		walletSvc,
 		executions.NewService(executions.NewMemoryRepository()),
+		nil,
+		nil,
 	)
 
 	order, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
