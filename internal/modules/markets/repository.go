@@ -9,12 +9,15 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type Repository interface {
 	GetAll(ctx context.Context) []Market
 	GetByMatchID(ctx context.Context, matchID string) []Market
 	GetByID(ctx context.Context, id primitive.ObjectID) (*Market, error)
+	Create(ctx context.Context, market Market) (*Market, error)
+	UpdateStatus(ctx context.Context, id primitive.ObjectID, status string) (*Market, error)
 	EnsureIndexes(ctx context.Context) error
 }
 
@@ -56,6 +59,37 @@ func (r *MemoryRepository) GetByID(ctx context.Context, id primitive.ObjectID) (
 
 	for i := range r.markets {
 		if r.markets[i].ID == id {
+			return &r.markets[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (r *MemoryRepository) Create(ctx context.Context, market Market) (*Market, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if market.ID.IsZero() {
+		market.ID = primitive.NewObjectID()
+	}
+	now := time.Now().UTC()
+	if market.CreatedAt.IsZero() {
+		market.CreatedAt = now
+	}
+	market.UpdatedAt = now
+
+	r.markets = append(r.markets, market)
+	return &market, nil
+}
+
+func (r *MemoryRepository) UpdateStatus(ctx context.Context, id primitive.ObjectID, status string) (*Market, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i := range r.markets {
+		if r.markets[i].ID == id {
+			r.markets[i].Status = status
+			r.markets[i].UpdatedAt = time.Now().UTC()
 			return &r.markets[i], nil
 		}
 	}
@@ -157,6 +191,48 @@ func (r *MongoRepository) GetByID(ctx context.Context, id primitive.ObjectID) (*
 	return &market, nil
 }
 
+func (r *MongoRepository) Create(ctx context.Context, market Market) (*Market, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	if market.ID.IsZero() {
+		market.ID = primitive.NewObjectID()
+	}
+	now := time.Now().UTC()
+	if market.CreatedAt.IsZero() {
+		market.CreatedAt = now
+	}
+	market.UpdatedAt = now
+
+	if _, err := r.col.InsertOne(ctx, market); err != nil {
+		return nil, err
+	}
+	return &market, nil
+}
+
+func (r *MongoRepository) UpdateStatus(ctx context.Context, id primitive.ObjectID, status string) (*Market, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	res := r.col.FindOneAndUpdate(
+		ctx,
+		bson.M{"_id": id},
+		bson.M{"$set": bson.M{"status": status, "updatedAt": time.Now().UTC()}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	)
+	if err := res.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var market Market
+	if err := res.Decode(&market); err != nil {
+		return nil, err
+	}
+	return &market, nil
+}
+
 func timeoutCtx(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, 5*time.Second)
 }
@@ -202,6 +278,14 @@ func getSampleMarkets() []Market {
 		mk("0000000000000000000000d4", "2", "RCB vs KKR Match Depth", "match_depth", 101, 98, 105, 95, 100, 102, []LadderEntry{
 			{BuyerQty: 400, BuyerPrice: 100, SellerPrice: 101, SellerQty: 300},
 			{BuyerQty: 200, BuyerPrice: 101, SellerPrice: 102, SellerQty: 150},
+		}),
+		mk("0000000000000000000000d6", "2", "RCB vs KKR - 1st Innings Score", "future", 168, 158, 178, 150, 167, 169, []LadderEntry{
+			{BuyerQty: 220, BuyerPrice: 167, SellerPrice: 168, SellerQty: 160},
+			{BuyerQty: 120, BuyerPrice: 168, SellerPrice: 169, SellerQty: 90},
+		}),
+		mk("0000000000000000000000d7", "2", "RCB vs KKR - Wicket Fall", "technical", 52, 44, 60, 40, 51, 53, []LadderEntry{
+			{BuyerQty: 320, BuyerPrice: 51, SellerPrice: 52, SellerQty: 210},
+			{BuyerQty: 160, BuyerPrice: 52, SellerPrice: 53, SellerQty: 110},
 		}),
 		{
 			ID:          closedID,

@@ -8,7 +8,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-var errMarketNotFound = errors.New("market not found")
+var (
+	errMarketNotFound  = errors.New("market not found")
+	errInvalidMarket   = errors.New("invalid market payload")
+	errInvalidStatus   = errors.New("invalid market status")
+)
 
 var legacyMarketIDMap = map[string]string{
 	"market-1": "0000000000000000000000d1",
@@ -58,6 +62,79 @@ func (s *Service) GetMarketByID(ctx context.Context, id string) (*Market, error)
 		return nil, err
 	}
 	return s.repo.GetByID(ctx, objID)
+}
+
+// CreateMarket creates a new tradable market (option/auction chain) for a
+// match. Used by the admin console to attach markets to any match so users can
+// open its chain and place orders.
+func (s *Service) CreateMarket(ctx context.Context, req CreateMarketRequest) (*Market, error) {
+	matchID := normalizeLegacyMatchID(strings.TrimSpace(req.MatchID))
+	title := strings.TrimSpace(req.Title)
+	if matchID == "" || title == "" {
+		return nil, errInvalidMarket
+	}
+
+	mtype := strings.TrimSpace(req.Type)
+	if mtype == "" {
+		mtype = "match_depth"
+	}
+
+	status := strings.TrimSpace(req.Status)
+	if status == "" {
+		status = MarketStatusActive
+	}
+	if !isValidMarketStatus(status) {
+		return nil, errInvalidStatus
+	}
+
+	if req.BuyerPrice < 0 || req.SellerPrice < 0 || req.LTP < 0 {
+		return nil, errInvalidMarket
+	}
+
+	market := Market{
+		MatchID:        matchID,
+		Title:          title,
+		Type:           mtype,
+		Status:         status,
+		BuyerPrice:     round2(req.BuyerPrice),
+		SellerPrice:    round2(req.SellerPrice),
+		LTP:            round2(req.LTP),
+		Open:           round2(req.Open),
+		High:           round2(req.High),
+		Low:            round2(req.Low),
+		QuantityLadder: req.QuantityLadder,
+	}
+	return s.repo.Create(ctx, market)
+}
+
+// SetMarketStatus suspends/resumes/closes a market. Returns errMarketNotFound
+// when the id does not resolve.
+func (s *Service) SetMarketStatus(ctx context.Context, id, status string) (*Market, error) {
+	status = strings.TrimSpace(status)
+	if !isValidMarketStatus(status) {
+		return nil, errInvalidStatus
+	}
+	objID, err := resolveMarketID(ctx, s.repo, id)
+	if err != nil {
+		return nil, err
+	}
+	updated, err := s.repo.UpdateStatus(ctx, objID, status)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, errMarketNotFound
+	}
+	return updated, nil
+}
+
+func isValidMarketStatus(status string) bool {
+	switch status {
+	case MarketStatusActive, MarketStatusSuspended, MarketStatusClosed:
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveMarketID(ctx context.Context, repo Repository, id string) (primitive.ObjectID, error) {

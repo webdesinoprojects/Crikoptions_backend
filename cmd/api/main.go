@@ -53,8 +53,10 @@ func main() {
 	matchesRepo := matches.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
 	seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
+	matchEventsRepo := matches.NewMongoEventRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "match_events", matchEventsRepo.EnsureIndexes)
 	realtimeHub := realtime.NewHub()
-	matchesService := matches.NewService(matchesRepo, realtimeHub)
+	matchesService := matches.NewService(matchesRepo, matchEventsRepo, realtimeHub)
 	if err := matchesService.ReconcileOnStartup(context.Background()); err != nil {
 		log.Printf("matches reconcile: %v", err)
 	}

@@ -41,6 +41,7 @@ type CreateMarketRequest struct {
 	MatchID        string       `json:"matchId"`
 	Title          string       `json:"title"`
 	Type           string       `json:"type"`
+	Status         string       `json:"status"`
 	BuyerPrice     float64      `json:"buyerPrice"`
 	SellerPrice    float64      `json:"sellerPrice"`
 	LTP            float64      `json:"ltp"`

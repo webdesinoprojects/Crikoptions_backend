@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/httpjson"
 )
@@ -131,6 +133,40 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Match score updated successfully",
 		"data":    match,
+	})
+}
+
+// GetMatchEvents returns recent per-ball events for a match's current innings
+// so a late-joining client can render "This over" correctly.
+// GET /api/v1/matches/{id}/events?limit=6
+func (h *Handler) GetMatchEvents(w http.ResponseWriter, r *http.Request) {
+	limit := 6
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	events, err := h.service.GetRecentEvents(r.Context(), r.PathValue("id"), limit)
+	if err != nil {
+		if errors.Is(err, errMatchNotFound) {
+			httpjson.Write(w, http.StatusNotFound, map[string]any{
+				"success": false,
+				"message": "Match not found",
+			})
+			return
+		}
+		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": "Failed to fetch match events",
+		})
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Match events fetched successfully",
+		"data":    events,
 	})
 }
 

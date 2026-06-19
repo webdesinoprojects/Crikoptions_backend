@@ -42,7 +42,7 @@ func NewRouter(
 	}
 
 	if marketsHandler != nil {
-		markets.RegisterRoutes(mux, marketsHandler)
+		markets.RegisterRoutes(mux, marketsHandler, authHandler)
 	}
 
 	if watchlistHandler != nil {

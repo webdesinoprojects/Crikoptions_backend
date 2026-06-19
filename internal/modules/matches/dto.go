@@ -45,10 +45,23 @@ type UpdateScoreRequest struct {
 	Status       string `json:"status"`
 }
 
-// BallEventRequest records one legal ball for "This over" commentary.
+// BallEventRequest records one delivery for "This over" commentary.
+// Extra is null/"" for a legal delivery, or "wide"/"noball" for an illegal one
+// (which does not consume a legal ball).
 type BallEventRequest struct {
 	Runs        int    `json:"runs"`
 	IsWicket    bool   `json:"isWicket"`
+	Extra       string `json:"extra,omitempty"`
 	BallNumber  int    `json:"ballNumber,omitempty"`
 	Description string `json:"description,omitempty"`
+}
+
+// BallEventResponse is one item in GET /api/v1/matches/{id}/events.
+type BallEventResponse struct {
+	Innings  int     `json:"innings"`
+	Over     int     `json:"over"`
+	Ball     int     `json:"ball"`
+	Runs     int     `json:"runs"`
+	IsWicket bool    `json:"isWicket"`
+	Extra    *string `json:"extra"`
 }

@@ -75,9 +75,6 @@ func (r *MemoryRepository) UpdateScore(ctx context.Context, id primitive.ObjectI
 	score.Status = NormalizeStatus(score.Status)
 	for i := range r.matches {
 		if r.matches[i].ID == id {
-			if isLiveStatus(score.Status) {
-				r.demoteOtherLiveLocked(id)
-			}
 			r.matches[i].Innings = score.Innings
 			r.matches[i].CurrentScore = score.CurrentScore
 			r.matches[i].WicketsLost = score.WicketsLost
@@ -239,11 +236,6 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 	defer cancel()
 
 	score.Status = NormalizeStatus(score.Status)
-	if isLiveStatus(score.Status) {
-		if err := r.DemoteOtherLiveMatches(ctx, id); err != nil {
-			return nil, err
-		}
-	}
 
 	set := bson.M{
 		"innings":      score.Innings,
@@ -357,13 +349,13 @@ func getSampleMatches() []Match {
 			TeamBName:    "KKR",
 			TeamALogo:    "/assets/rcb-logo.png",
 			TeamBLogo:    "/assets/kkr-logo.png",
-			StartTime:    now.Add(2 * time.Hour),
-			Status:       "upcoming",
+			StartTime:    now.Add(-20 * time.Minute),
+			Status:       "live",
 			Innings:      1,
-			CurrentScore: 0,
-			WicketsLost:  0,
-			BallsLeft:    120,
-			OversText:    "0.0",
+			CurrentScore: 62,
+			WicketsLost:  1,
+			BallsLeft:    78,
+			OversText:    "7.0",
 			CreatedAt:    now.Add(-3 * time.Hour),
 			UpdatedAt:    now,
 		},

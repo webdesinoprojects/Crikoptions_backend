@@ -63,6 +63,89 @@ func (h *Handler) GetMarketDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// CreateMarket (admin) attaches a new tradable market to a match.
+func (h *Handler) CreateMarket(w http.ResponseWriter, r *http.Request) {
+	var req CreateMarketRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	market, err := h.service.CreateMarket(r.Context(), req)
+	if err != nil {
+		switch err {
+		case errInvalidMarket:
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "matchId and title are required and prices must be non-negative",
+			})
+		case errInvalidStatus:
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "status must be active, suspended, or closed",
+			})
+		default:
+			httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+				"success": false,
+				"message": "Failed to create market",
+			})
+		}
+		return
+	}
+
+	httpjson.Write(w, http.StatusCreated, map[string]any{
+		"success": true,
+		"message": "Market created successfully",
+		"data":    market,
+	})
+}
+
+// SuspendMarket (admin) halts trading on a market.
+func (h *Handler) SuspendMarket(w http.ResponseWriter, r *http.Request) {
+	h.setStatus(w, r, MarketStatusSuspended, "Market suspended")
+}
+
+// ResumeMarket (admin) re-enables trading on a market.
+func (h *Handler) ResumeMarket(w http.ResponseWriter, r *http.Request) {
+	h.setStatus(w, r, MarketStatusActive, "Market resumed")
+}
+
+func (h *Handler) setStatus(w http.ResponseWriter, r *http.Request, status, okMessage string) {
+	marketID := r.PathValue("id")
+	if marketID == "" {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid market ID",
+		})
+		return
+	}
+
+	market, err := h.service.SetMarketStatus(r.Context(), marketID, status)
+	if err != nil {
+		if err == errMarketNotFound {
+			httpjson.Write(w, http.StatusNotFound, map[string]any{
+				"success": false,
+				"message": "Market not found",
+			})
+			return
+		}
+		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": "Failed to update market status",
+		})
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": okMessage,
+		"data":    market,
+	})
+}
+
 func (h *Handler) CalculatePrice(w http.ResponseWriter, r *http.Request) {
 	marketID := r.PathValue("id")
 	if marketID == "" {
