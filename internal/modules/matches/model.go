@@ -24,15 +24,44 @@ type Match struct {
 	BallsLeft    int                `json:"ballsLeft" bson:"ballsLeft"`
 	TargetScore  int                `json:"targetScore,omitempty" bson:"targetScore,omitempty"`
 	OversText    string             `json:"oversText" bson:"oversText"`
+	LiveContext  *LiveMatchContext  `json:"liveContext,omitempty" bson:"liveContext,omitempty"`
 	CreatedAt    time.Time          `json:"createdAt" bson:"createdAt"`
 	UpdatedAt    time.Time          `json:"updatedAt" bson:"updatedAt"`
 }
 
 type ScoreUpdate struct {
-	Innings      int    `json:"innings"`
-	CurrentScore int    `json:"currentScore"`
-	WicketsLost  int    `json:"wicketsLost"`
-	BallsLeft    int    `json:"ballsLeft"`
-	TargetScore  int    `json:"targetScore,omitempty"`
-	Status       string `json:"status"`
+	Innings      int               `json:"innings"`
+	CurrentScore int               `json:"currentScore"`
+	WicketsLost  int               `json:"wicketsLost"`
+	BallsLeft    int               `json:"ballsLeft"`
+	TargetScore  int               `json:"targetScore,omitempty"`
+	Status       string            `json:"status"`
+	LiveContext  *LiveMatchContext `json:"-"`
+}
+
+type BatterStats struct {
+	Name  string `json:"name" bson:"name"`
+	Runs  int    `json:"runs" bson:"runs"`
+	Balls int    `json:"balls" bson:"balls"`
+}
+
+type BowlerStats struct {
+	Name            string `json:"name" bson:"name"`
+	Balls           int    `json:"balls" bson:"balls"`
+	Maidens         int    `json:"maidens" bson:"maidens"`
+	Runs            int    `json:"runs" bson:"runs"`
+	Wickets         int    `json:"wickets" bson:"wickets"`
+	CurrentOverRuns int    `json:"currentOverRuns,omitempty" bson:"currentOverRuns,omitempty"`
+}
+
+type PartnershipStats struct {
+	Runs  int `json:"runs" bson:"runs"`
+	Balls int `json:"balls" bson:"balls"`
+}
+
+type LiveMatchContext struct {
+	Striker     BatterStats      `json:"striker" bson:"striker"`
+	NonStriker  BatterStats      `json:"nonStriker" bson:"nonStriker"`
+	Bowler      BowlerStats      `json:"bowler" bson:"bowler"`
+	Partnership PartnershipStats `json:"partnership" bson:"partnership"`
 }

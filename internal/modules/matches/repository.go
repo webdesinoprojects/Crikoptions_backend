@@ -82,6 +82,10 @@ func (r *MemoryRepository) UpdateScore(ctx context.Context, id primitive.ObjectI
 			r.matches[i].TargetScore = score.TargetScore
 			r.matches[i].Status = score.Status
 			r.matches[i].OversText = calculateOvers(score.BallsLeft)
+			if score.LiveContext != nil {
+				liveContext := *score.LiveContext
+				r.matches[i].LiveContext = &liveContext
+			}
 			r.matches[i].UpdatedAt = time.Now().UTC()
 			return &r.matches[i], nil
 		}
@@ -103,6 +107,7 @@ func (r *MemoryRepository) demoteOtherLiveLocked(keepID primitive.ObjectID) {
 			r.matches[i].Innings = 1
 			r.matches[i].TargetScore = 0
 			r.matches[i].OversText = "0.0"
+			r.matches[i].LiveContext = nil
 			r.matches[i].UpdatedAt = now
 		}
 	}
@@ -247,6 +252,9 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 		"oversText":    calculateOvers(score.BallsLeft),
 		"updatedAt":    time.Now().UTC(),
 	}
+	if score.LiveContext != nil {
+		set["liveContext"] = score.LiveContext
+	}
 
 	res := r.col.FindOneAndUpdate(
 		ctx,
@@ -289,6 +297,7 @@ func (r *MongoRepository) DemoteOtherLiveMatches(ctx context.Context, keepID pri
 			"innings":      1,
 			"targetScore":  0,
 			"oversText":    "0.0",
+			"liveContext":  nil,
 			"updatedAt":    now,
 		}},
 	)
@@ -335,7 +344,7 @@ func getSampleMatches() []Match {
 			CurrentScore: 85,
 			WicketsLost:  2,
 			BallsLeft:    42,
-			OversText:    "9.6",
+			OversText:    "13.0",
 			CreatedAt:    now.Add(-2 * time.Hour),
 			UpdatedAt:    now,
 		},

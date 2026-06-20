@@ -136,6 +136,39 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) UpdateLiveContext(w http.ResponseWriter, r *http.Request) {
+	var req UpdateLiveContextRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	match, err := h.service.UpdateLiveContext(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, errMatchNotFound):
+			httpjson.Write(w, http.StatusNotFound, map[string]any{"success": false, "message": "Match not found"})
+		case errors.Is(err, errInvalidLiveContext):
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "Striker, non-striker, and bowler names are required and figures cannot be negative",
+			})
+		default:
+			httpjson.Write(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "Failed to update live match context"})
+		}
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Live match context updated",
+		"data":    match,
+	})
+}
+
 // GetMatchEvents returns recent per-ball events for a match's current innings
 // so a late-joining client can render "This over" correctly.
 // GET /api/v1/matches/{id}/events?limit=6
@@ -196,7 +229,12 @@ func (h *Handler) RecordBall(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, errInvalidBallEvent):
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{
 				"success": false,
-				"message": "runs must be between 0 and 6",
+				"message": "Invalid ball event",
+			})
+		case errors.Is(err, errNextBatterRequired):
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "Enter the incoming batter before recording a wicket",
 			})
 		default:
 			httpjson.Write(w, http.StatusInternalServerError, map[string]any{

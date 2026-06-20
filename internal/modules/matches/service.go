@@ -10,12 +10,14 @@ import (
 )
 
 var (
-	errMatchNotFound     = errors.New("match not found")
-	errInvalidTransition = errors.New("invalid match status transition")
-	errMatchAlreadyLive  = errors.New("match is already live")
-	errMatchNotLive      = errors.New("match is not live")
-	errMatchNotLiveBall  = errors.New("match must be live to record balls")
-	errInvalidBallEvent  = errors.New("invalid ball event")
+	errMatchNotFound      = errors.New("match not found")
+	errInvalidTransition  = errors.New("invalid match status transition")
+	errMatchAlreadyLive   = errors.New("match is already live")
+	errMatchNotLive       = errors.New("match is not live")
+	errMatchNotLiveBall   = errors.New("match must be live to record balls")
+	errInvalidBallEvent   = errors.New("invalid ball event")
+	errNextBatterRequired = errors.New("next batter is required for a wicket")
+	errInvalidLiveContext = errors.New("invalid live match context")
 )
 
 // EventPublisher pushes realtime WebSocket updates.
@@ -63,6 +65,7 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	all := s.repo.GetAll(ctx)
 	for i := range all {
 		all[i].Status = NormalizeStatus(all[i].Status)
+		all[i].OversText = calculateOvers(all[i].BallsLeft)
 	}
 	return SortHomeMatches(all)
 }
@@ -77,6 +80,7 @@ func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
 		return match, err
 	}
 	match.Status = NormalizeStatus(match.Status)
+	match.OversText = calculateOvers(match.BallsLeft)
 	return match, nil
 }
 
@@ -132,7 +136,51 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 		TargetScore:  targetScore,
 		Status:       status,
 	}
+	if req.CurrentScore == 0 && req.WicketsLost == 0 && req.BallsLeft == 120 && existing.LiveContext != nil {
+		score.LiveContext = resetLiveContext(existing.LiveContext)
+	}
 	match, err := s.repo.UpdateScore(ctx, objID, score)
+	if err != nil || match == nil {
+		return match, err
+	}
+	s.publishScore(match)
+	return match, nil
+}
+
+func (s *Service) UpdateLiveContext(ctx context.Context, id string, req UpdateLiveContextRequest) (*Match, error) {
+	objID, err := resolveMatchID(ctx, s.repo, id)
+	if err != nil {
+		return nil, err
+	}
+
+	existing, err := s.repo.GetByID(ctx, objID)
+	if err != nil || existing == nil {
+		return nil, errMatchNotFound
+	}
+
+	liveContext := LiveMatchContext{
+		Striker:     req.Striker,
+		NonStriker:  req.NonStriker,
+		Bowler:      req.Bowler,
+		Partnership: req.Partnership,
+	}
+	liveContext.Striker.Name = strings.TrimSpace(liveContext.Striker.Name)
+	liveContext.NonStriker.Name = strings.TrimSpace(liveContext.NonStriker.Name)
+	liveContext.Bowler.Name = strings.TrimSpace(liveContext.Bowler.Name)
+
+	if !validLiveContext(liveContext) {
+		return nil, errInvalidLiveContext
+	}
+
+	match, err := s.repo.UpdateScore(ctx, objID, ScoreUpdate{
+		Innings:      existing.Innings,
+		CurrentScore: existing.CurrentScore,
+		WicketsLost:  existing.WicketsLost,
+		BallsLeft:    existing.BallsLeft,
+		TargetScore:  existing.TargetScore,
+		Status:       existing.Status,
+		LiveContext:  &liveContext,
+	})
 	if err != nil || match == nil {
 		return match, err
 	}
@@ -144,12 +192,15 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 // match state, and publishes separate score + commentary WebSocket topics.
 // A "wide"/"noball" extra does not consume a legal delivery (ballsLeft stays).
 func (s *Service) RecordBall(ctx context.Context, id string, req BallEventRequest) (*Match, error) {
-	if req.Runs < 0 || req.Runs > 6 {
-		return nil, errInvalidBallEvent
-	}
-
 	extra, ok := normalizeExtra(req.Extra)
 	if !ok {
+		return nil, errInvalidBallEvent
+	}
+	maxRuns := 6
+	if extra != nil {
+		maxRuns = 7 // supports a six hit from a no-ball (six bat runs + one extra)
+	}
+	if req.Runs < 0 || req.Runs > maxRuns {
 		return nil, errInvalidBallEvent
 	}
 	legalBall := extra == nil
@@ -187,6 +238,10 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 	wicketsLost := existing.WicketsLost
 	ballsLeft := existing.BallsLeft
 	targetScore := existing.TargetScore
+	liveContext := cloneLiveContext(existing.LiveContext)
+	if req.IsWicket && liveContext != nil && strings.TrimSpace(req.NextBatterName) == "" {
+		return nil, errNextBatterRequired
+	}
 
 	if req.IsWicket {
 		wicketsLost++
@@ -196,6 +251,9 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 	}
 	if legalBall && ballsLeft > 0 {
 		ballsLeft--
+	}
+	if liveContext != nil {
+		applyDeliveryToLiveContext(liveContext, req, extra, legalBall, bowled)
 	}
 
 	// Persist the ball before mutating aggregate state so the history is the
@@ -222,6 +280,7 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 		BallsLeft:    ballsLeft,
 		TargetScore:  targetScore,
 		Status:       status,
+		LiveContext:  liveContext,
 	})
 	if err != nil || match == nil {
 		return match, err
@@ -282,7 +341,84 @@ func (s *Service) publishScore(match *Match) {
 		"targetScore":  match.TargetScore,
 		"oversText":    match.OversText,
 		"status":       NormalizeStatus(match.Status),
+		"liveContext":  match.LiveContext,
 	})
+}
+
+func validLiveContext(value LiveMatchContext) bool {
+	if value.Striker.Name == "" || value.NonStriker.Name == "" || value.Bowler.Name == "" {
+		return false
+	}
+	return value.Striker.Runs >= 0 && value.Striker.Balls >= 0 &&
+		value.NonStriker.Runs >= 0 && value.NonStriker.Balls >= 0 &&
+		value.Bowler.Balls >= 0 && value.Bowler.Maidens >= 0 && value.Bowler.Runs >= 0 && value.Bowler.Wickets >= 0 &&
+		value.Partnership.Runs >= 0 && value.Partnership.Balls >= 0
+}
+
+func cloneLiveContext(value *LiveMatchContext) *LiveMatchContext {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func resetLiveContext(value *LiveMatchContext) *LiveMatchContext {
+	if value == nil {
+		return nil
+	}
+	return &LiveMatchContext{
+		Striker:    BatterStats{Name: value.Striker.Name},
+		NonStriker: BatterStats{Name: value.NonStriker.Name},
+		Bowler:     BowlerStats{Name: value.Bowler.Name},
+	}
+}
+
+func applyDeliveryToLiveContext(
+	live *LiveMatchContext,
+	req BallEventRequest,
+	extra *string,
+	legalBall bool,
+	legalBallsBefore int,
+) {
+	if live == nil {
+		return
+	}
+
+	batterRuns := req.Runs
+	if extra != nil {
+		if *extra == ExtraWide {
+			batterRuns = 0
+		} else if *extra == ExtraNoBall {
+			batterRuns = max(0, req.Runs-1)
+		}
+	}
+
+	live.Striker.Runs += batterRuns
+	if legalBall {
+		live.Striker.Balls++
+		live.Bowler.Balls++
+		live.Partnership.Balls++
+	}
+	live.Bowler.Runs += req.Runs
+	live.Bowler.CurrentOverRuns += req.Runs
+	live.Partnership.Runs += req.Runs
+
+	if req.IsWicket {
+		live.Bowler.Wickets++
+		live.Striker = BatterStats{Name: strings.TrimSpace(req.NextBatterName)}
+		live.Partnership = PartnershipStats{}
+	} else if batterRuns%2 == 1 {
+		live.Striker, live.NonStriker = live.NonStriker, live.Striker
+	}
+
+	if legalBall && (legalBallsBefore+1)%6 == 0 {
+		if live.Bowler.CurrentOverRuns == 0 {
+			live.Bowler.Maidens++
+		}
+		live.Bowler.CurrentOverRuns = 0
+		live.Striker, live.NonStriker = live.NonStriker, live.Striker
+	}
 }
 
 func (s *Service) publishCommentary(matchID string, req BallEventRequest, extra *string) {
