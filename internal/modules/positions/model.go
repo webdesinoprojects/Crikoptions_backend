@@ -23,6 +23,7 @@ type Position struct {
 	LTP         float64          `json:"ltp" bson:"ltp"`
 	PnL         float64          `json:"pnl" bson:"pnl"`               // unrealized for open lots; realized for closed
 	RealizedPnL float64          `json:"realizedPnl" bson:"realizedPnl"` // realized PnL on the sold/closed slice
+	MatchedLots int              `json:"matchedLots" bson:"matchedLots"` // number of lots that have been closed/matched
 	CreatedAt   time.Time        `json:"createdAt" bson:"createdAt"`
 	UpdatedAt   time.Time        `json:"updatedAt" bson:"updatedAt"`
 }

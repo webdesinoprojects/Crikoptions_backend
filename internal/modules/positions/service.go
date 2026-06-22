@@ -249,10 +249,11 @@ func (b *aggregateBucket) toPosition() Position {
 		avgSell = b.sellNotional / float64(b.sellQty)
 	}
 	return Position{
-		Status:    status,
-		Lots:      net,
-		BuyPrice:  round2(avgBuy),
-		SellPrice: round2(avgSell),
+		Status:      status,
+		Lots:        net,
+		BuyPrice:    round2(avgBuy),
+		SellPrice:   round2(avgSell),
+		MatchedLots: b.matchedQty(),
 	}
 }
 
