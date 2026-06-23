@@ -13,6 +13,7 @@ type Client struct {
 	conn  *websocket.Conn
 	send  chan []byte
 	topics map[string]struct{}
+	userID string
 	mu     sync.RWMutex
 }
 
@@ -42,6 +43,18 @@ func (c *Client) isSubscribed(topic string) bool {
 	defer c.mu.RUnlock()
 	_, ok := c.topics[topic]
 	return ok
+}
+
+func (c *Client) setUserID(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.userID = id
+}
+
+func (c *Client) getUserID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.userID
 }
 
 func (c *Client) trySend(topic string, payload []byte) {

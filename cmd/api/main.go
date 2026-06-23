@@ -102,7 +102,13 @@ func main() {
 	watchlistHandler := watchlist.NewHandler(watchlistService)
 
 	healthHandler := health.NewHandler()
-	realtimeHandler := realtime.NewHandler(realtimeHub)
+	realtimeHandler := realtime.NewHandler(realtimeHub, func(token string) (string, error) {
+		id, _, err := authService.ParseToken(token)
+		if err != nil {
+			return "", err
+		}
+		return id.Hex(), nil
+	})
 	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, walletHandler, executionsHandler, realtimeHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
 

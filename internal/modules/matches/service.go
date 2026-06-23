@@ -256,23 +256,6 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 		applyDeliveryToLiveContext(liveContext, req, extra, legalBall, bowled)
 	}
 
-	// Persist the ball before mutating aggregate state so the history is the
-	// source of truth for "This over".
-	if s.events != nil {
-		if appendErr := s.events.AppendEvent(ctx, BallEvent{
-			MatchID:   matchID,
-			Innings:   innings,
-			Over:      over,
-			Ball:      ball,
-			LegalBall: legalBall,
-			Runs:      req.Runs,
-			IsWicket:  req.IsWicket,
-			Extra:     extra,
-		}); appendErr != nil {
-			return nil, appendErr
-		}
-	}
-
 	match, err := s.repo.UpdateScore(ctx, objID, ScoreUpdate{
 		Innings:      innings,
 		CurrentScore: currentScore,
@@ -284,6 +267,22 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 	})
 	if err != nil || match == nil {
 		return match, err
+	}
+
+	// Persist the ball AFTER mutating aggregate state so the critical match state
+	// update succeeds first. This prevents dangling history events if the score
+	// update were to fail.
+	if s.events != nil {
+		_ = s.events.AppendEvent(ctx, BallEvent{
+			MatchID:   matchID,
+			Innings:   innings,
+			Over:      over,
+			Ball:      ball,
+			LegalBall: legalBall,
+			Runs:      req.Runs,
+			IsWicket:  req.IsWicket,
+			Extra:     extra,
+		})
 	}
 
 	s.publishCommentary(match.ID.Hex(), req, extra)
@@ -387,9 +386,10 @@ func applyDeliveryToLiveContext(
 
 	batterRuns := req.Runs
 	if extra != nil {
-		if *extra == ExtraWide {
+		switch *extra {
+		case ExtraWide:
 			batterRuns = 0
-		} else if *extra == ExtraNoBall {
+		case ExtraNoBall:
 			batterRuns = max(0, req.Runs-1)
 		}
 	}

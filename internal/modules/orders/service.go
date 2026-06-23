@@ -234,20 +234,28 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		Status:            StatusOpen,
 	}
 
-	created, err := s.repo.Create(ctx, order)
-	if err != nil {
-		return nil, err
-	}
-
-	if req.Side == "buy" {
-		_, err = s.wallets.ReserveOrderMargin(ctx, userID, reserveAmount, created.ID.Hex(), fmt.Sprintf("Reserve margin for order %s", created.ID.Hex()))
-		if err != nil {
-			_, _ = s.repo.Cancel(ctx, created.ID, userID)
-			if errors.Is(err, wallet.ErrInsufficientFunds) {
-				return nil, ErrInsufficientBalance
-			}
-			return nil, err
+	var created *Order
+	err = s.repo.DoTx(ctx, func(txCtx context.Context) error {
+		var txErr error
+		created, txErr = s.repo.Create(txCtx, order)
+		if txErr != nil {
+			return txErr
 		}
+
+		if req.Side == "buy" {
+			_, txErr = s.wallets.ReserveOrderMargin(txCtx, userID, reserveAmount, created.ID.Hex(), fmt.Sprintf("Reserve margin for order %s", created.ID.Hex()))
+			if txErr != nil {
+				return txErr
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		if errors.Is(err, wallet.ErrInsufficientFunds) {
+			return nil, ErrInsufficientBalance
+		}
+		return nil, err
 	}
 
 	if !shouldFill {
@@ -278,14 +286,19 @@ func (s *Service) CancelOrder(ctx context.Context, id, userID primitive.ObjectID
 		return nil, nil
 	}
 
-	if existing.Side == "buy" && existing.ReservedAmount() > 0 {
-		_, err := s.wallets.ReleaseOrderMargin(ctx, userID, existing.ReservedAmount(), existing.ID.Hex(), fmt.Sprintf("Release margin for cancelled order %s", existing.ID.Hex()))
-		if err != nil {
-			return nil, err
+	var cancelled *Order
+	err = s.repo.DoTx(ctx, func(txCtx context.Context) error {
+		if existing.Side == "buy" && existing.ReservedAmount() > 0 {
+			_, txErr := s.wallets.ReleaseOrderMargin(txCtx, userID, existing.ReservedAmount(), existing.ID.Hex(), fmt.Sprintf("Release margin for cancelled order %s", existing.ID.Hex()))
+			if txErr != nil {
+				return txErr
+			}
 		}
-	}
 
-	cancelled, err := s.repo.Cancel(ctx, id, userID)
+		var txErr error
+		cancelled, txErr = s.repo.Cancel(txCtx, id, userID)
+		return txErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -373,49 +386,54 @@ func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, orde
 	fillCost := round2(fillPrice * float64(fillQty))
 	reserveRelease := round2(order.Price * float64(fillQty))
 
-	switch order.Side {
-	case "buy":
-		if _, err := s.wallets.SettleBuyFill(ctx, userID, fillCost, reserveRelease, order.ID.Hex(), fmt.Sprintf("Buy fill for order %s", order.ID.Hex())); err != nil {
-			return nil, err
+	var updated *Order
+	err := s.repo.DoTx(ctx, func(txCtx context.Context) error {
+		switch order.Side {
+		case "buy":
+			if _, txErr := s.wallets.SettleBuyFill(txCtx, userID, fillCost, reserveRelease, order.ID.Hex(), fmt.Sprintf("Buy fill for order %s", order.ID.Hex())); txErr != nil {
+				return txErr
+			}
+		case "sell":
+			if _, txErr := s.wallets.SettleSellFill(txCtx, userID, fillCost, order.ID.Hex(), fmt.Sprintf("Sell fill for order %s", order.ID.Hex())); txErr != nil {
+				return txErr
+			}
 		}
-	case "sell":
-		if _, err := s.wallets.SettleSellFill(ctx, userID, fillCost, order.ID.Hex(), fmt.Sprintf("Sell fill for order %s", order.ID.Hex())); err != nil {
-			return nil, err
+
+		if _, txErr := s.executions.Create(txCtx, executions.Execution{
+			UserID:          userID,
+			OrderID:         order.ID,
+			MatchID:         order.MatchID,
+			MarketID:        order.MarketID,
+			Strike:          order.Strike,
+			Side:            order.Side,
+			Price:           fillPrice,
+			Quantity:        fillQty,
+			LiquiditySource: executions.LiquiditySystemMarketMaker,
+		}); txErr != nil {
+			return txErr
 		}
-	}
 
-	if _, err := s.executions.Create(ctx, executions.Execution{
-		UserID:          userID,
-		OrderID:         order.ID,
-		MatchID:         order.MatchID,
-		MarketID:        order.MarketID,
-		Strike:          order.Strike,
-		Side:            order.Side,
-		Price:           fillPrice,
-		Quantity:        fillQty,
-		LiquiditySource: executions.LiquiditySystemMarketMaker,
-	}); err != nil {
-		return nil, err
-	}
+		newFilled := order.FilledQuantity + fillQty
+		newRemaining := order.RemainingQuantity - fillQty
+		avgFill := fillPrice
+		if newFilled > fillQty {
+			prevNotional := order.AverageFillPrice * float64(order.FilledQuantity)
+			avgFill = round2((prevNotional + fillPrice*float64(fillQty)) / float64(newFilled))
+		}
 
-	newFilled := order.FilledQuantity + fillQty
-	newRemaining := order.RemainingQuantity - fillQty
-	avgFill := fillPrice
-	if newFilled > fillQty {
-		prevNotional := order.AverageFillPrice * float64(order.FilledQuantity)
-		avgFill = round2((prevNotional + fillPrice*float64(fillQty)) / float64(newFilled))
-	}
+		status := StatusPartiallyFilled
+		if newRemaining == 0 {
+			status = StatusExecuted
+		}
 
-	status := StatusPartiallyFilled
-	if newRemaining == 0 {
-		status = StatusExecuted
-	}
-
-	updated, err := s.repo.UpdateFill(ctx, order.ID, FillUpdate{
-		FilledQuantity:    newFilled,
-		RemainingQuantity: newRemaining,
-		AverageFillPrice:  avgFill,
-		Status:            status,
+		var txErr error
+		updated, txErr = s.repo.UpdateFill(txCtx, order.ID, FillUpdate{
+			FilledQuantity:    newFilled,
+			RemainingQuantity: newRemaining,
+			AverageFillPrice:  avgFill,
+			Status:            status,
+		})
+		return txErr
 	})
 	if err != nil {
 		return nil, err

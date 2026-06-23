@@ -158,26 +158,36 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		strike   float64
 	}
 
-	groups := make(map[key]*aggregateBucket)
-	order := make([]key, 0)
+	// Executions are fetched newest-first. Reverse them to oldest-first to replay history.
+	chronological := make([]executions.Execution, len(fills))
+	for i := range fills {
+		chronological[i] = fills[len(fills)-1-i]
+	}
 
-	for _, fill := range fills {
+	activeBuckets := make(map[key]*aggregateBucket)
+	var allBuckets []*aggregateBucket
+	var bucketKeys []key
+
+	for _, fill := range chronological {
 		k := key{userID: fill.UserID, matchID: fill.MatchID, marketID: fill.MarketID, strike: fill.Strike}
-		b, ok := groups[k]
+		b, ok := activeBuckets[k]
 		if !ok {
 			b = &aggregateBucket{firstSeen: fill.CreatedAt}
-			groups[k] = b
-			order = append(order, k)
+			activeBuckets[k] = b
+			allBuckets = append(allBuckets, b)
+			bucketKeys = append(bucketKeys, k)
 		}
 		b.add(fill)
-		if fill.CreatedAt.Before(b.firstSeen) {
-			b.firstSeen = fill.CreatedAt
+
+		// Seal bucket if position is closed
+		if b.buyQty == b.sellQty {
+			delete(activeBuckets, k)
 		}
 	}
 
-	out := make([]Position, 0, len(order))
-	for _, k := range order {
-		b := groups[k]
+	out := make([]Position, 0, len(allBuckets))
+	for i, b := range allBuckets {
+		k := bucketKeys[i]
 		p := b.toPosition()
 		p.ID = derivePositionID(k.userID, k.matchID, k.marketID, k.strike, b.firstSeen)
 		p.UserID = k.userID

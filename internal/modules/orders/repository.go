@@ -3,6 +3,7 @@ package orders
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ type Repository interface {
 	GetAll(ctx context.Context) []Order
 	List(ctx context.Context, filter OrderFilter) []Order
 	EnsureIndexes(ctx context.Context) error
+	DoTx(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
 type FillUpdate struct {
@@ -195,6 +197,13 @@ func (r *MemoryRepository) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
 
+func (r *MemoryRepository) DoTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	// Simple global lock for memory repository transactions
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return fn(ctx)
+}
+
 type MongoRepository struct {
 	col *mongo.Collection
 }
@@ -233,6 +242,27 @@ func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
 	}
 	_, err := r.col.Indexes().CreateMany(ctx, indexes)
 	return err
+}
+
+func (r *MongoRepository) DoTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	session, err := r.col.Database().Client().StartSession()
+	if err != nil {
+		// Fallback if sessions are unsupported
+		return fn(ctx)
+	}
+	defer session.EndSession(ctx)
+
+	_, err = session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
+		return nil, fn(sessCtx)
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "Transaction") || strings.Contains(err.Error(), "replica set") {
+			// Fallback for standalone mongo deployments
+			return fn(ctx)
+		}
+		return err
+	}
+	return nil
 }
 
 func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {

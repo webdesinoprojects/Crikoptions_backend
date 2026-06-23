@@ -187,8 +187,8 @@ func normalizedLimit(limit int64) int64 {
 	if limit <= 0 {
 		return 100
 	}
-	if limit > 500 {
-		return 500
+	if limit > 10000 {
+		return 10000
 	}
 	return limit
 }

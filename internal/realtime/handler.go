@@ -19,18 +19,19 @@ var upgrader = websocket.Upgrader{
 			// Non-browser clients (e.g. native apps) omit Origin.
 			return true
 		}
-		// For production, also allow your real frontend domain here.
-		return strings.HasPrefix(origin, "http://localhost:") ||
-			strings.HasPrefix(origin, "https://localhost:")
+		return true // Allow all origins for the API, or configure via CORS policies
 	},
 }
 
+type AuthFunc func(token string) (userID string, err error)
+
 type Handler struct {
-	hub *Hub
+	hub      *Hub
+	authFunc AuthFunc
 }
 
-func NewHandler(hub *Hub) *Handler {
-	return &Handler{hub: hub}
+func NewHandler(hub *Hub, authFunc AuthFunc) *Handler {
+	return &Handler{hub: hub, authFunc: authFunc}
 }
 
 func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
@@ -43,12 +44,12 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	h.hub.Register(client)
 
 	go client.writePump()
-	client.readPump(h.hub)
+	client.readPump(h)
 }
 
-func (c *Client) readPump(hub *Hub) {
+func (c *Client) readPump(h *Handler) {
 	defer func() {
-		hub.Unregister(c)
+		h.hub.Unregister(c)
 		_ = c.conn.Close()
 	}()
 
@@ -64,7 +65,7 @@ func (c *Client) readPump(hub *Hub) {
 		if err != nil {
 			break
 		}
-		c.handleControlMessage(message)
+		h.handleControlMessage(c, message)
 	}
 }
 
@@ -99,9 +100,10 @@ type controlMessage struct {
 	Action string   `json:"action"`
 	Topic  string   `json:"topic"`
 	Topics []string `json:"topics"`
+	Token  string   `json:"token"`
 }
 
-func (c *Client) handleControlMessage(message []byte) {
+func (h *Handler) handleControlMessage(c *Client, message []byte) {
 	var msg controlMessage
 	if err := json.Unmarshal(message, &msg); err != nil {
 		log.Printf("ws: invalid control message: %v", err)
@@ -109,6 +111,20 @@ func (c *Client) handleControlMessage(message []byte) {
 	}
 
 	action := strings.ToLower(strings.TrimSpace(msg.Action))
+	
+	if action == "auth" {
+		if h.authFunc == nil {
+			return
+		}
+		userID, err := h.authFunc(msg.Token)
+		if err != nil {
+			log.Printf("ws auth failed: %v", err)
+			return
+		}
+		c.setUserID(userID)
+		return
+	}
+
 	topics := msg.Topics
 	if strings.TrimSpace(msg.Topic) != "" {
 		topics = append(topics, msg.Topic)
@@ -119,6 +135,12 @@ func (c *Client) handleControlMessage(message []byte) {
 		for _, topic := range topics {
 			topic = strings.TrimSpace(topic)
 			if topic != "" {
+				if strings.HasPrefix(topic, "user:") {
+					parts := strings.Split(topic, ":")
+					if len(parts) >= 2 && parts[1] != c.getUserID() {
+						continue // Unauthorized
+					}
+				}
 				c.subscribe(topic)
 			}
 		}
