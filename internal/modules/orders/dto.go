@@ -1,14 +1,17 @@
 package orders
 
+import "github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+
 type CreateOrderRequest struct {
-	ClientOrderID string  `json:"clientOrderId"`
-	MatchID       string  `json:"matchId"`
-	MarketID      string  `json:"marketId"`
-	Strike        float64 `json:"strike"`
-	Side          string  `json:"side"`
-	Type          string  `json:"type"`
-	Quantity      int     `json:"quantity"`
-	Price         float64 `json:"price"`
+	ClientOrderID   string                         `json:"clientOrderId"`
+	MatchID         string                         `json:"matchId"`
+	MarketID        string                         `json:"marketId"`
+	Strike          float64                        `json:"strike"`
+	Side            string                         `json:"side"`
+	Type            string                         `json:"type"`
+	Quantity        int                            `json:"quantity"`
+	Price           float64                        `json:"price"`
+	PricingSnapshot *markets.PriceCalculationInput `json:"pricingSnapshot,omitempty"`
 }
 
 type OrderResponse struct {

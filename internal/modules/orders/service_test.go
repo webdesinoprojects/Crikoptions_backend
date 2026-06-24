@@ -13,17 +13,21 @@ import (
 )
 
 type stubMarketSvc struct {
-	market *markets.Market
-	bid    float64
-	ask    float64
-	ok     bool
+	market     *markets.Market
+	bid        float64
+	ask        float64
+	ok         bool
+	lastInput  markets.PriceCalculationInput
+	lastStrike float64
 }
 
 func (s *stubMarketSvc) GetMarketByID(_ context.Context, _ string) (*markets.Market, error) {
 	return s.market, nil
 }
 
-func (s *stubMarketSvc) StrikeQuote(_ markets.PriceCalculationInput, _ float64) (float64, float64, bool) {
+func (s *stubMarketSvc) StrikeQuote(input markets.PriceCalculationInput, strike float64) (float64, float64, bool) {
+	s.lastInput = input
+	s.lastStrike = strike
 	return s.bid, s.ask, s.ok
 }
 
@@ -193,6 +197,70 @@ func TestCreateOrder_MarketBuyFillsAtAsk(t *testing.T) {
 	}
 	if order.FilledQuantity != 10 || order.RemainingQuantity != 0 {
 		t.Fatalf("filled/remaining = %d/%d, want 10/0", order.FilledQuantity, order.RemainingQuantity)
+	}
+}
+
+func TestCreateOrder_UsesPricingSnapshotForReplayFill(t *testing.T) {
+	userID := primitive.NewObjectID()
+	marketID := primitive.NewObjectID()
+
+	walletRepo := wallet.NewMemoryRepository()
+	walletSvc := wallet.NewService(walletRepo)
+	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{
+		Amount: 100000,
+		Reason: "seed",
+	})
+
+	marketSvc := &stubMarketSvc{
+		market: &markets.Market{ID: marketID, Status: markets.MarketStatusActive},
+		bid:    21.25,
+		ask:    21.75,
+		ok:     true,
+	}
+	orderRepo := NewMemoryRepository()
+	orderRepo.orders = nil
+
+	svc := NewService(
+		orderRepo,
+		marketSvc,
+		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, CurrentScore: 15, WicketsLost: 0, BallsLeft: 114}},
+		walletSvc,
+		executions.NewService(executions.NewMemoryRepository()),
+		nil,
+		nil,
+	)
+
+	snapshot := markets.PriceCalculationInput{
+		Innings:      2,
+		CurrentScore: 92,
+		WicketsLost:  4,
+		BallsBowled:  55,
+		TargetScore:  161,
+	}
+	order, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
+		MatchID:         "1",
+		MarketID:        marketID.Hex(),
+		Strike:          130,
+		Side:            "buy",
+		Type:            OrderTypeMarket,
+		Quantity:        3,
+		PricingSnapshot: &snapshot,
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+	if order.Status != StatusExecuted {
+		t.Fatalf("status = %q, want %q", order.Status, StatusExecuted)
+	}
+	if marketSvc.lastInput.Innings != 2 ||
+		marketSvc.lastInput.CurrentScore != 92 ||
+		marketSvc.lastInput.WicketsLost != 4 ||
+		marketSvc.lastInput.BallsBowled != 55 ||
+		marketSvc.lastInput.TargetScore != 161 {
+		t.Fatalf("pricing input = %+v, want replay snapshot", marketSvc.lastInput)
+	}
+	if marketSvc.lastStrike != 130 {
+		t.Fatalf("strike = %.2f, want 130", marketSvc.lastStrike)
 	}
 }
 

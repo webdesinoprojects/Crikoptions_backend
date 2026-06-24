@@ -182,6 +182,9 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	}
 
 	pricingInput := markets.PricingInputFromMatch(*match)
+	if req.PricingSnapshot != nil {
+		pricingInput = normalizePricingSnapshot(*req.PricingSnapshot)
+	}
 	bid, ask, ok := s.markets.StrikeQuote(pricingInput, req.Strike)
 	if !ok {
 		return nil, ErrStrikeNotFound
@@ -269,6 +272,34 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	}
 	s.broadcastSell(ctx, userID, filled)
 	return filled, nil
+}
+
+func normalizePricingSnapshot(snapshot markets.PriceCalculationInput) markets.PriceCalculationInput {
+	if snapshot.Innings != 1 && snapshot.Innings != 2 {
+		return snapshot
+	}
+	if snapshot.WicketsLost < 0 {
+		snapshot.WicketsLost = 0
+	}
+	if snapshot.WicketsLost > 10 {
+		snapshot.WicketsLost = 10
+	}
+	if snapshot.CurrentScore < 0 {
+		snapshot.CurrentScore = 0
+	}
+	if snapshot.BallsLeft < 0 {
+		snapshot.BallsLeft = 0
+	}
+	if snapshot.BallsLeft > 120 {
+		snapshot.BallsLeft = 120
+	}
+	if snapshot.BallsBowled < 0 {
+		snapshot.BallsBowled = 0
+	}
+	if snapshot.BallsBowled > 120 {
+		snapshot.BallsBowled = 120
+	}
+	return snapshot
 }
 
 func (s *Service) CancelOrder(ctx context.Context, id, userID primitive.ObjectID) (*Order, error) {

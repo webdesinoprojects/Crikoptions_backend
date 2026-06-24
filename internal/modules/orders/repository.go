@@ -198,9 +198,6 @@ func (r *MemoryRepository) EnsureIndexes(ctx context.Context) error {
 }
 
 func (r *MemoryRepository) DoTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	// Simple global lock for memory repository transactions
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	return fn(ctx)
 }
 
