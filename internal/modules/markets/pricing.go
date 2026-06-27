@@ -9,7 +9,7 @@ import (
 type PricingConfig struct {
 	// 1st innings parameters
 	Sigma1         float64 // volatility (default 0.30)
-	R1             float64 // risk-free rate (default 0.05, not 0.5)
+	R1             float64 // risk-free rate from algorithm doc (default 0.5)
 	MaxProjectedS0 float64 // ceiling on projected final score (default 260)
 	Alpha          float64 // capping factor (default 1.0)
 	DefaultRunRate float64 // fallback RR when no info (default 1.2)
@@ -90,11 +90,6 @@ func CalculateFirstInnings(in PricingInput, cfg PricingConfig) FirstInningsResul
 	if in.Score < 0 {
 		return res
 	}
-	if in.Score == 0 {
-		res.Chain = zeroPremiumChain(cfg)
-		return res
-	}
-
 	ballsBowled := cfg.BallsTotal - in.BallsLeft
 
 	// Effective run rate.
@@ -162,11 +157,6 @@ func CalculateSecondInnings(in PricingInput, cfg PricingConfig) SecondInningsRes
 	if in.BallsBowled < 0 || in.BallsBowled > cfg.BallsTotal {
 		return res
 	}
-	if in.Score == 0 {
-		res.Chain = zeroPremiumChain(cfg)
-		return res
-	}
-
 	ballsRemaining := cfg.BallsTotal - in.BallsBowled
 
 	// Project achievable score S0.
