@@ -54,13 +54,7 @@ func (s *Service) GetUserClosedPositions(ctx context.Context, userID primitive.O
 
 func (s *Service) ListUserPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, error) {
 	if s.projections != nil {
-		projected, found, err := s.projectedUserPositions(ctx, userID, filter)
-		if err != nil {
-			return nil, err
-		}
-		if found {
-			return projected, nil
-		}
+		return s.projectedUserPositions(ctx, userID, filter)
 	}
 
 	all, err := s.computeForUser(ctx, userID)
@@ -86,11 +80,7 @@ func (s *Service) GetUserPosition(ctx context.Context, userID primitive.ObjectID
 				return &positions[0], nil
 			}
 		}
-		if found, err := s.hasProjectionRows(ctx, userID); err != nil {
-			return nil, err
-		} else if found {
-			return nil, nil
-		}
+		return nil, nil
 	}
 
 	all, err := s.computeForUser(ctx, userID)
@@ -120,14 +110,7 @@ func (s *Service) ListAdminPositions(ctx context.Context, filter PositionFilter)
 		if err != nil {
 			return nil, err
 		}
-		if len(projected) > 0 {
-			return projected, nil
-		}
-		if found, err := s.hasProjectionRows(ctx, userIDFilter); err != nil {
-			return nil, err
-		} else if found {
-			return projected, nil
-		}
+		return projected, nil
 	}
 
 	execFilter := executions.Filter{Limit: 1000}
@@ -304,7 +287,7 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 	return out
 }
 
-func (s *Service) projectedUserPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, bool, error) {
+func (s *Service) projectedUserPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, error) {
 	projections, err := s.projections.List(ctx, ProjectionFilter{
 		UserID:   userID,
 		MatchID:  filter.MatchID,
@@ -312,18 +295,9 @@ func (s *Service) projectedUserPositions(ctx context.Context, userID primitive.O
 		Status:   filter.Status,
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	if len(projections) > 0 {
-		positions, err := s.positionsFromProjections(ctx, projections)
-		return positions, true, err
-	}
-
-	found, err := s.hasProjectionRows(ctx, userID)
-	if err != nil {
-		return nil, false, err
-	}
-	return []Position{}, found, nil
+	return s.positionsFromProjections(ctx, projections)
 }
 
 func (s *Service) projectedAdminPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, error) {
@@ -355,11 +329,6 @@ func (s *Service) positionsFromProjections(ctx context.Context, projections []Po
 		positions = append(positions, projection.ToPosition(ltps[projection.MarketID]))
 	}
 	return positions, nil
-}
-
-func (s *Service) hasProjectionRows(ctx context.Context, userID primitive.ObjectID) (bool, error) {
-	rows, err := s.projections.List(ctx, ProjectionFilter{UserID: userID})
-	return len(rows) > 0, err
 }
 
 func (s *Service) marketLTPs(ctx context.Context, ids []string) map[string]float64 {

@@ -309,19 +309,15 @@ func (r *MongoRepository) EnsureAccount(ctx context.Context, userID primitive.Ob
 	defer cancel()
 
 	now := time.Now().UTC()
-	_, err := r.accounts.UpdateOne(
+	res := r.accounts.FindOneAndUpdate(
 		ctx,
 		bson.M{"userId": userID, "currency": CurrencyPaperINR},
 		bson.M{"$setOnInsert": newAccount(userID, now)},
-		options.Update().SetUpsert(true),
+		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
 	)
-	if err != nil {
-		return nil, err
-	}
 
 	var account Account
-	err = r.accounts.FindOne(ctx, bson.M{"userId": userID, "currency": CurrencyPaperINR}).Decode(&account)
-	if err != nil {
+	if err := res.Decode(&account); err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, ErrAccountNotFound
 		}
@@ -399,47 +395,47 @@ func (r *MongoRepository) ApplyAdjustment(ctx context.Context, adjustment Adjust
 
 func (r *MongoRepository) ReserveMargin(ctx context.Context, op OrderFundsOp) (*AdjustmentResult, error) {
 	return r.applyBalanceMutation(ctx, balanceMutation{
-		userID:        op.UserID,
-		amount:        op.Amount,
-		reservedDelta: op.Amount,
-		availableDelta: -op.Amount,
-		ledgerType:    LedgerOrderReserve,
-		referenceType: op.ReferenceType,
-		referenceID:   op.ReferenceID,
-		description:   op.Description,
-		createdBy:     op.CreatedBy,
+		userID:              op.UserID,
+		amount:              op.Amount,
+		reservedDelta:       op.Amount,
+		availableDelta:      -op.Amount,
+		ledgerType:          LedgerOrderReserve,
+		referenceType:       op.ReferenceType,
+		referenceID:         op.ReferenceID,
+		description:         op.Description,
+		createdBy:           op.CreatedBy,
 		requireAvailableGTE: op.Amount,
 	})
 }
 
 func (r *MongoRepository) ReleaseMargin(ctx context.Context, op OrderFundsOp) (*AdjustmentResult, error) {
 	return r.applyBalanceMutation(ctx, balanceMutation{
-		userID:         op.UserID,
-		amount:         op.Amount,
-		reservedDelta:  -op.Amount,
-		availableDelta: op.Amount,
-		ledgerType:     LedgerOrderRelease,
-		referenceType:  op.ReferenceType,
-		referenceID:    op.ReferenceID,
-		description:    op.Description,
-		createdBy:      op.CreatedBy,
+		userID:             op.UserID,
+		amount:             op.Amount,
+		reservedDelta:      -op.Amount,
+		availableDelta:     op.Amount,
+		ledgerType:         LedgerOrderRelease,
+		referenceType:      op.ReferenceType,
+		referenceID:        op.ReferenceID,
+		description:        op.Description,
+		createdBy:          op.CreatedBy,
 		requireReservedGTE: op.Amount,
 	})
 }
 
 func (r *MongoRepository) SettleBuyFill(ctx context.Context, op BuyFillOp) (*AdjustmentResult, error) {
 	return r.applyBalanceMutation(ctx, balanceMutation{
-		userID:         op.UserID,
-		amount:         op.FillCost,
-		cashDelta:      -op.FillCost,
-		reservedDelta:  -op.ReserveRelease,
-		ledgerType:     LedgerTradeDebit,
-		referenceType:  op.ReferenceType,
-		referenceID:    op.ReferenceID,
-		description:    op.Description,
-		createdBy:      op.CreatedBy,
-		requireCashGTE:      op.FillCost,
-		requireReservedGTE:  op.ReserveRelease,
+		userID:             op.UserID,
+		amount:             op.FillCost,
+		cashDelta:          -op.FillCost,
+		reservedDelta:      -op.ReserveRelease,
+		ledgerType:         LedgerTradeDebit,
+		referenceType:      op.ReferenceType,
+		referenceID:        op.ReferenceID,
+		description:        op.Description,
+		createdBy:          op.CreatedBy,
+		requireCashGTE:     op.FillCost,
+		requireReservedGTE: op.ReserveRelease,
 	})
 }
 

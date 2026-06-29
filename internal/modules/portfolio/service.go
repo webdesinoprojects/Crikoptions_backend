@@ -62,17 +62,39 @@ func NewService(positions PositionReader, wallets WalletReader, markets MarketRe
 }
 
 func (s *Service) GetSummary(ctx context.Context, userID primitive.ObjectID) (*PortfolioSummary, error) {
-	all, err := s.listPositions(ctx, userID)
-	if err != nil {
-		return nil, err
+	type positionsResult struct {
+		all []positions.Position
+		err error
 	}
+	type walletResult struct {
+		account *wallet.Account
+		err     error
+	}
+
+	positionsCh := make(chan positionsResult, 1)
+	walletCh := make(chan walletResult, 1)
+	go func() {
+		all, err := s.listPositions(ctx, userID)
+		positionsCh <- positionsResult{all: all, err: err}
+	}()
+	go func() {
+		account, err := s.wallets.GetWallet(ctx, userID)
+		walletCh <- walletResult{account: account, err: err}
+	}()
+
+	positionsRes := <-positionsCh
+	walletRes := <-walletCh
+	if positionsRes.err != nil {
+		return nil, positionsRes.err
+	}
+	if walletRes.err != nil {
+		return nil, walletRes.err
+	}
+
+	all := positionsRes.all
+	account := walletRes.account
 	open := filterPositionsByStatus(all, "open")
 	closed := filterPositionsByStatus(all, "closed")
-
-	account, err := s.wallets.GetWallet(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
 
 	lookup := newLookupCache(s)
 	lookup.preload(ctx, all)
