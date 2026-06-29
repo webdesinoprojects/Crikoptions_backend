@@ -51,6 +51,15 @@ func (s *Service) GetUserClosedPositions(ctx context.Context, userID primitive.O
 	return filterClosed(all), nil
 }
 
+func (s *Service) ListUserPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, error) {
+	all, err := s.computeForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	filter.UserID = ""
+	return applyStaticFilters(all, filter), nil
+}
+
 func (s *Service) GetUserPosition(ctx context.Context, userID primitive.ObjectID, positionID string) (*Position, error) {
 	all, err := s.computeForUser(ctx, userID)
 	if err != nil {

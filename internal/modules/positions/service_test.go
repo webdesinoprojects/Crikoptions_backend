@@ -140,3 +140,32 @@ func TestAggregate_AdminList(t *testing.T) {
 		t.Errorf("expected 3 positions across all users, got %d", len(all))
 	}
 }
+
+func TestListUserPositions_FiltersByMarket(t *testing.T) {
+	uid := primitive.NewObjectID()
+	otherUser := primitive.NewObjectID()
+	now := time.Now().UTC()
+	items := []executions.Execution{
+		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "buy", Quantity: 10, Price: 100, CreatedAt: now},
+		{UserID: uid, MatchID: "1", MarketID: "m2", Strike: 140, Side: "buy", Quantity: 20, Price: 100, CreatedAt: now},
+		{UserID: otherUser, MatchID: "1", MarketID: "m2", Strike: 150, Side: "buy", Quantity: 30, Price: 100, CreatedAt: now},
+	}
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 105, "m2": 110}})
+
+	filtered, err := svc.ListUserPositions(context.Background(), uid, PositionFilter{
+		Status:   "open",
+		MarketID: "m2",
+	})
+	if err != nil {
+		t.Fatalf("ListUserPositions: %v", err)
+	}
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 filtered position, got %d", len(filtered))
+	}
+	if filtered[0].UserID != uid {
+		t.Fatalf("userID = %s, want %s", filtered[0].UserID.Hex(), uid.Hex())
+	}
+	if filtered[0].MarketID != "m2" {
+		t.Fatalf("marketID = %q, want m2", filtered[0].MarketID)
+	}
+}

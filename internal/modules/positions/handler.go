@@ -27,7 +27,11 @@ func (h *Handler) GetOpenPositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	positions, err := h.service.GetUserOpenPositions(r.Context(), userID)
+	positions, err := h.service.ListUserPositions(r.Context(), userID, PositionFilter{
+		Status:   "open",
+		MatchID:  r.URL.Query().Get("matchId"),
+		MarketID: r.URL.Query().Get("marketId"),
+	})
 	if err != nil {
 		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
 			"success": false,
@@ -39,7 +43,7 @@ func (h *Handler) GetOpenPositions(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Open positions fetched successfully",
-		"data":   positions,
+		"data":    positions,
 	})
 }
 
@@ -55,7 +59,11 @@ func (h *Handler) GetClosedPositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	positions, err := h.service.GetUserClosedPositions(r.Context(), userID)
+	positions, err := h.service.ListUserPositions(r.Context(), userID, PositionFilter{
+		Status:   "closed",
+		MatchID:  r.URL.Query().Get("matchId"),
+		MarketID: r.URL.Query().Get("marketId"),
+	})
 	if err != nil {
 		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
 			"success": false,
@@ -67,7 +75,7 @@ func (h *Handler) GetClosedPositions(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Closed positions fetched successfully",
-		"data":   positions,
+		"data":    positions,
 	})
 }
 
@@ -134,8 +142,8 @@ func (h *Handler) ListAdminPositions(w http.ResponseWriter, r *http.Request) {
 
 	filter := PositionFilter{
 		UserID:   userIDParam,
-		Status:  status,
-		MatchID: matchID,
+		Status:   status,
+		MatchID:  matchID,
 		MarketID: marketID,
 	}
 
@@ -159,7 +167,7 @@ func (h *Handler) ListAdminPositions(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Positions fetched successfully",
-		"data":   positions,
+		"data":    positions,
 	})
 }
 
