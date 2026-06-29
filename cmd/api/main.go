@@ -20,6 +20,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/portfolio"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
@@ -94,6 +95,11 @@ func main() {
 	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService, positionsService, realtimeHub)
 	ordersHandler := orders.NewHandler(ordersService)
 
+	// Portfolio aggregates wallet, positions, markets, and matches server-side so
+	// dashboard/portfolio calculations are not duplicated in frontend clients.
+	portfolioService := portfolio.NewService(positionsService, walletService, marketsService, matchesService)
+	portfolioHandler := portfolio.NewHandler(portfolioService)
+
 	// Watchlist.
 	watchlistRepo := watchlist.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "watchlist", watchlistRepo.EnsureIndexes)
@@ -109,7 +115,7 @@ func main() {
 		}
 		return id.Hex(), nil
 	})
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, walletHandler, executionsHandler, realtimeHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
 
 	srv := &http.Server{

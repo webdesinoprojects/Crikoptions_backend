@@ -44,6 +44,7 @@ type MarketReader interface {
 }
 
 type WalletPort interface {
+	GetWallet(ctx context.Context, userID primitive.ObjectID) (*wallet.Account, error)
 	ReserveOrderMargin(ctx context.Context, userID primitive.ObjectID, amount float64, orderID, description string) (*wallet.AdjustmentResult, error)
 	ReleaseOrderMargin(ctx context.Context, userID primitive.ObjectID, amount float64, orderID, description string) (*wallet.AdjustmentResult, error)
 	SettleBuyFill(ctx context.Context, userID primitive.ObjectID, fillCost, reserveRelease float64, orderID, description string) (*wallet.AdjustmentResult, error)
@@ -64,6 +65,7 @@ type EventPublisher interface {
 // PositionSnapshot is the post-fill view of a user's position for a strike,
 // used both for WebSocket broadcasts and the close endpoint.
 type PositionSnapshot struct {
+	ID          string
 	MatchID     string
 	MarketID    string
 	Strike      float64
@@ -81,6 +83,7 @@ type PositionSnapshot struct {
 type PositionView interface {
 	PositionFor(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (PositionSnapshot, bool)
 	ResolveCloseTarget(ctx context.Context, userID primitive.ObjectID, positionID string) (PositionSnapshot, bool)
+	OpenCloseTargets(ctx context.Context, userID primitive.ObjectID) ([]PositionSnapshot, error)
 }
 
 type Service struct {
@@ -141,6 +144,113 @@ func (s *Service) ListOrders(ctx context.Context, userID primitive.ObjectID, sta
 
 func (s *Service) GetOrderByID(ctx context.Context, id primitive.ObjectID) (*Order, error) {
 	return s.repo.GetByID(ctx, id)
+}
+
+func (s *Service) PreviewOrder(ctx context.Context, userID primitive.ObjectID, req CreateOrderRequest) (*OrderPreviewResponse, error) {
+	req = normalizeCreateRequest(req)
+	if err := validateCreateRequest(req); err != nil {
+		return nil, err
+	}
+
+	market, err := s.markets.GetMarketByID(ctx, req.MarketID)
+	if err != nil || market == nil {
+		return nil, ErrMarketNotFound
+	}
+	if !s.markets.IsTradable(market) {
+		if req.Side == "sell" {
+			return nil, newAPIError(http.StatusBadRequest, "Market not active")
+		}
+		return nil, ErrMarketNotTradable
+	}
+
+	match, err := s.matches.GetMatchByID(ctx, req.MatchID)
+	if err != nil || match == nil {
+		return nil, ErrMatchNotFound
+	}
+	if !isMatchTradable(match) {
+		return nil, ErrMatchNotTradable
+	}
+
+	pricingInput := markets.PricingInputFromMatch(*match)
+	if req.PricingSnapshot != nil {
+		pricingInput = normalizePricingSnapshot(*req.PricingSnapshot)
+	}
+	bid, ask, ok := s.markets.StrikeQuote(pricingInput, req.Strike)
+	if !ok {
+		return nil, ErrStrikeNotFound
+	}
+
+	if req.Side == "sell" {
+		openQty := s.executions.OpenLongQty(ctx, userID, req.MatchID, market.ID.Hex(), req.Strike)
+		if openQty <= 0 {
+			return nil, newAPIError(http.StatusBadRequest, fmt.Sprintf("No open position for strike %s", formatStrike(req.Strike)))
+		}
+		if req.Quantity > openQty {
+			return nil, newAPIError(http.StatusBadRequest, fmt.Sprintf("Cannot sell %d lots; only %d open", req.Quantity, openQty))
+		}
+	}
+
+	orderPrice := round2(req.Price)
+	fillPrice := 0.0
+	shouldFill := false
+	switch req.Type {
+	case OrderTypeMarket:
+		var ok bool
+		fillPrice, ok = matchMarketOrder(req.Side, bid, ask)
+		if !ok {
+			if req.Side == "sell" {
+				return nil, newAPIError(http.StatusBadRequest, "No bid available")
+			}
+			return nil, ErrNoLiquidity
+		}
+		orderPrice = fillPrice
+		shouldFill = true
+	case OrderTypeLimit:
+		fillPrice, shouldFill = matchLimitOrder(req.Side, orderPrice, bid, ask)
+	default:
+		return nil, errors.New("unsupported order type")
+	}
+
+	account, err := s.wallets.GetWallet(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	notional := round2(orderPrice * float64(req.Quantity))
+	marginRequired := 0.0
+	if req.Side == "buy" {
+		marginRequired = notional
+	}
+	sufficientBalance := req.Side != "buy" || account.AvailableBalance >= marginRequired
+
+	message := "Preview available"
+	if !sufficientBalance {
+		message = "Insufficient available wallet balance"
+	} else if shouldFill {
+		message = "Order is marketable at current quote"
+	} else {
+		message = "Limit order would rest on the book"
+	}
+
+	return &OrderPreviewResponse{
+		MatchID:           req.MatchID,
+		MarketID:          market.ID.Hex(),
+		Strike:            req.Strike,
+		Side:              req.Side,
+		Type:              req.Type,
+		Quantity:          req.Quantity,
+		RequestedPrice:    round2(req.Price),
+		OrderPrice:        orderPrice,
+		ExecutablePrice:   round2(fillPrice),
+		Bid:               bid,
+		Ask:               ask,
+		Notional:          notional,
+		MarginRequired:    marginRequired,
+		AvailableBalance:  round2(account.AvailableBalance),
+		SufficientBalance: sufficientBalance,
+		WillExecuteNow:    shouldFill,
+		Message:           message,
+	}, nil
 }
 
 func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, req CreateOrderRequest) (*Order, error) {
@@ -371,6 +481,73 @@ func (s *Service) ClosePosition(ctx context.Context, userID primitive.ObjectID, 
 		Quantity: quantity,
 		Price:    price,
 	})
+}
+
+// CloseAllPositions submits MARKET sell-to-close orders for every open position
+// owned by the user. Individual failures are reported without hiding successful
+// exits, since liquidity can differ by strike.
+func (s *Service) CloseAllPositions(ctx context.Context, userID primitive.ObjectID, orderType string) (*CloseAllPositionsResponse, error) {
+	if s.positions == nil {
+		return nil, newAPIError(http.StatusBadRequest, "Position lookup is unavailable")
+	}
+
+	orderType = strings.ToUpper(strings.TrimSpace(orderType))
+	if orderType == "" {
+		orderType = OrderTypeMarket
+	}
+	if orderType != OrderTypeMarket {
+		return nil, newAPIError(http.StatusBadRequest, "Exit all supports MARKET exits only")
+	}
+
+	targets, err := s.positions.OpenCloseTargets(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &CloseAllPositionsResponse{
+		Orders:   []*Order{},
+		Failures: []CloseAllPositionFailure{},
+	}
+
+	for _, target := range targets {
+		if target.Lots <= 0 || target.Status == "closed" {
+			continue
+		}
+		result.Requested++
+
+		order, err := s.CreateOrder(ctx, userID, CreateOrderRequest{
+			MatchID:  target.MatchID,
+			MarketID: target.MarketID,
+			Strike:   target.Strike,
+			Side:     "sell",
+			Type:     OrderTypeMarket,
+			Quantity: target.Lots,
+		})
+		if err != nil {
+			result.Failed++
+			result.Failures = append(result.Failures, CloseAllPositionFailure{
+				MatchID:  target.MatchID,
+				MarketID: target.MarketID,
+				Strike:   target.Strike,
+				Quantity: target.Lots,
+				Message:  serviceErrorMessage(err),
+			})
+			continue
+		}
+
+		result.Submitted++
+		result.Orders = append(result.Orders, order)
+	}
+
+	return result, nil
+}
+
+func serviceErrorMessage(err error) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Message
+	}
+	return err.Error()
 }
 
 // broadcastSell streams order + position updates for a sell order's owner.

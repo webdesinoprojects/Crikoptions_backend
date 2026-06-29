@@ -140,8 +140,25 @@ func (s *Service) ResolveCloseTarget(ctx context.Context, userID primitive.Objec
 	return toSnapshot(*p), true
 }
 
+// OpenCloseTargets returns all open user positions in the snapshot shape needed
+// by the orders service bulk exit path.
+func (s *Service) OpenCloseTargets(ctx context.Context, userID primitive.ObjectID) ([]orders.PositionSnapshot, error) {
+	open, err := s.GetUserOpenPositions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]orders.PositionSnapshot, 0, len(open))
+	for _, p := range open {
+		if p.Lots > 0 {
+			targets = append(targets, toSnapshot(p))
+		}
+	}
+	return targets, nil
+}
+
 func toSnapshot(p Position) orders.PositionSnapshot {
 	return orders.PositionSnapshot{
+		ID:          p.ID,
 		MatchID:     p.MatchID,
 		MarketID:    p.MarketID,
 		Strike:      p.Strike,

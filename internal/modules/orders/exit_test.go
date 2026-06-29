@@ -42,10 +42,11 @@ func (p *capturePublisher) last(topic string) (map[string]any, bool) {
 
 // execPositions implements PositionView by deriving live lots from executions.
 type execPositions struct {
-	exec        *executions.Service
-	ltp         float64
-	closeTarget PositionSnapshot
-	hasTarget   bool
+	exec         *executions.Service
+	ltp          float64
+	closeTarget  PositionSnapshot
+	closeTargets []PositionSnapshot
+	hasTarget    bool
 }
 
 func (p *execPositions) PositionFor(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (PositionSnapshot, bool) {
@@ -59,6 +60,10 @@ func (p *execPositions) PositionFor(ctx context.Context, userID primitive.Object
 
 func (p *execPositions) ResolveCloseTarget(_ context.Context, _ primitive.ObjectID, _ string) (PositionSnapshot, bool) {
 	return p.closeTarget, p.hasTarget
+}
+
+func (p *execPositions) OpenCloseTargets(_ context.Context, _ primitive.ObjectID) ([]PositionSnapshot, error) {
+	return p.closeTargets, nil
 }
 
 type exitFixture struct {
@@ -343,6 +348,36 @@ func TestExit_ClosePositionEndpoint(t *testing.T) {
 	}
 	if got := f.openQty(130); got != 0 {
 		t.Fatalf("open lots = %d, want 0", got)
+	}
+}
+
+func TestExit_CloseAllPositions(t *testing.T) {
+	f := newExitFixture(t, 100000)
+	f.buy(t, 130, 10)
+	f.buy(t, 140, 5)
+
+	f.market.bid = 48.78
+	f.market.ask = 49.28
+	f.posView.closeTargets = []PositionSnapshot{
+		{MatchID: "1", MarketID: f.marketID.Hex(), Strike: 130, Lots: 10, Status: "open"},
+		{MatchID: "1", MarketID: f.marketID.Hex(), Strike: 140, Lots: 5, Status: "open"},
+	}
+
+	result, err := f.svc.CloseAllPositions(context.Background(), f.userID, OrderTypeMarket)
+	if err != nil {
+		t.Fatalf("close all: %v", err)
+	}
+	if result.Requested != 2 || result.Submitted != 2 || result.Failed != 0 {
+		t.Fatalf("result = requested %d submitted %d failed %d, want 2/2/0", result.Requested, result.Submitted, result.Failed)
+	}
+	if len(result.Orders) != 2 {
+		t.Fatalf("orders = %d, want 2", len(result.Orders))
+	}
+	if got := f.openQty(130); got != 0 {
+		t.Fatalf("open lots strike 130 = %d, want 0", got)
+	}
+	if got := f.openQty(140); got != 0 {
+		t.Fatalf("open lots strike 140 = %d, want 0", got)
 	}
 }
 

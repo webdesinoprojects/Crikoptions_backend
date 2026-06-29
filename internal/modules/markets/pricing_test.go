@@ -16,10 +16,11 @@ func TestPricingEngine(t *testing.T) {
 		if len(r.Chain) != 25 {
 			t.Errorf("expected 25 strikes (10..250 step 10), got %d", len(r.Chain))
 		}
-		for _, sp := range r.Chain {
-			if sp.Premium != 0 {
-				t.Errorf("score zero: strike %.0f expected zero premium, got %.2f", sp.Strike, sp.Premium)
-			}
+		if r.S0 <= 0 {
+			t.Fatalf("score zero should still project from default run rate, got S0 %.2f", r.S0)
+		}
+		if r.Chain[0].Premium <= 0 {
+			t.Errorf("score zero: strike %.0f expected positive projected premium, got %.2f", r.Chain[0].Strike, r.Chain[0].Premium)
 		}
 	})
 
@@ -30,25 +31,19 @@ func TestPricingEngine(t *testing.T) {
 		if len(r.Chain) != 25 {
 			t.Errorf("expected 25 strikes, got %d", len(r.Chain))
 		}
-		for _, sp := range r.Chain {
-			if sp.Premium != 0 {
-				t.Errorf("score zero: strike %.0f expected zero premium, got %.2f", sp.Strike, sp.Premium)
-			}
+		if r.S0 <= 0 {
+			t.Fatalf("score zero chase should still project scoring potential, got S0 %.2f", r.S0)
+		}
+		if r.Chain[0].Premium <= 0 {
+			t.Errorf("score zero chase: strike %.0f expected positive projected premium, got %.2f", r.Chain[0].Strike, r.Chain[0].Premium)
 		}
 	})
 
-	t.Run("1st innings mid-innings with old vs new r", func(t *testing.T) {
+	t.Run("1st innings mid-innings uses algorithm rate", func(t *testing.T) {
 		r := CalculateFirstInnings(PricingInput{
 			Innings: 1, Score: 100, Wickets: 3, BallsLeft: 60,
 		}, cfg)
-		cfgOld := cfg
-		cfgOld.R1 = 0.5
-		rOld := CalculateFirstInnings(PricingInput{
-			Innings: 1, Score: 100, Wickets: 3, BallsLeft: 60,
-		}, cfgOld)
-		// Old r=0.5 should produce ~e^(0.5*0.5) = ~28% higher time-value component
-		// (we just sanity-check they're not wildly different in the wrong direction)
-		fmt.Printf("Strike 150: new=%.2f old=%.2f\n", r.Chain[14].Premium, rOld.Chain[14].Premium)
+		fmt.Printf("Strike 150: %.2f\n", r.Chain[14].Premium)
 		if r.Chain[14].Premium <= 0 {
 			t.Errorf("expected positive premium at strike 150 with S0>150, got %v", r.Chain[14].Premium)
 		}

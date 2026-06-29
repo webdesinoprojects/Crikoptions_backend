@@ -9,6 +9,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/portfolio"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
@@ -23,6 +24,7 @@ func NewRouter(
 	watchlistHandler *watchlist.Handler,
 	ordersHandler *orders.Handler,
 	positionsHandler *positions.Handler,
+	portfolioHandler *portfolio.Handler,
 	walletHandler *wallet.Handler,
 	executionsHandler *executions.Handler,
 	realtimeHandler *realtime.Handler,
@@ -55,6 +57,10 @@ func NewRouter(
 
 	if positionsHandler != nil {
 		positions.RegisterRoutes(mux, positionsHandler, authHandler)
+	}
+
+	if portfolioHandler != nil {
+		portfolio.RegisterRoutes(mux, portfolioHandler, authHandler)
 	}
 
 	if walletHandler != nil {

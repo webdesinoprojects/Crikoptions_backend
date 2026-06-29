@@ -175,6 +175,38 @@ func (h *Handler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) PreviewOrder(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r)
+	if !ok {
+		httpjson.Write(w, http.StatusUnauthorized, map[string]any{
+			"success": false,
+			"message": "Unauthorized",
+		})
+		return
+	}
+
+	var req CreateOrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	preview, err := h.service.PreviewOrder(r.Context(), userID, req)
+	if err != nil {
+		writeOrderError(w, err)
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Order preview calculated successfully",
+		"data":    preview,
+	})
+}
+
 // ClosePosition exits (sells to close) a derived position by id. It reuses the
 // full SELL validation + matching via the service.
 func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +249,46 @@ func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Position close order submitted",
 		"data":    order,
+	})
+}
+
+// CloseAllPositions exits every open position for the authenticated user.
+func (h *Handler) CloseAllPositions(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r)
+	if !ok {
+		httpjson.Write(w, http.StatusUnauthorized, map[string]any{
+			"success": false,
+			"message": "Unauthorized",
+		})
+		return
+	}
+
+	var req CloseAllPositionsRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			httpjson.Write(w, http.StatusBadRequest, map[string]any{
+				"success": false,
+				"message": "Invalid request body",
+			})
+			return
+		}
+	}
+
+	result, err := h.service.CloseAllPositions(r.Context(), userID, req.Type)
+	if err != nil {
+		writeOrderError(w, err)
+		return
+	}
+
+	status := http.StatusOK
+	if result.Submitted > 0 {
+		status = http.StatusCreated
+	}
+
+	httpjson.Write(w, status, map[string]any{
+		"success": true,
+		"message": "Exit all processed",
+		"data":    result,
 	})
 }
 

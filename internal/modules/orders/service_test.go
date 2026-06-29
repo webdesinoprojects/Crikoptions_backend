@@ -291,6 +291,50 @@ func TestCreateOrder_InsufficientBalanceRejected(t *testing.T) {
 	}
 }
 
+func TestPreviewOrder_ReturnsBackendNotionalAndBalance(t *testing.T) {
+	userID := primitive.NewObjectID()
+	marketID := primitive.NewObjectID()
+
+	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
+	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 100})
+
+	svc := NewService(
+		NewMemoryRepository(),
+		&stubMarketSvc{market: &markets.Market{ID: marketID, Status: markets.MarketStatusActive}, bid: 50, ask: 51, ok: true},
+		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, BallsLeft: 42}},
+		walletSvc,
+		executions.NewService(executions.NewMemoryRepository()),
+		nil,
+		nil,
+	)
+
+	preview, err := svc.PreviewOrder(context.Background(), userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: marketID.Hex(),
+		Strike:   130,
+		Side:     "buy",
+		Type:     OrderTypeMarket,
+		Quantity: 3,
+	})
+	if err != nil {
+		t.Fatalf("PreviewOrder: %v", err)
+	}
+	if preview.Notional != 153 || preview.MarginRequired != 153 {
+		t.Fatalf("notional/margin = %.2f/%.2f, want 153/153", preview.Notional, preview.MarginRequired)
+	}
+	if preview.AvailableBalance != 100 || preview.SufficientBalance {
+		t.Fatalf("available/sufficient = %.2f/%v, want 100/false", preview.AvailableBalance, preview.SufficientBalance)
+	}
+	if !preview.WillExecuteNow || preview.ExecutablePrice != 51 {
+		t.Fatalf("execute/price = %v/%.2f, want true/51", preview.WillExecuteNow, preview.ExecutablePrice)
+	}
+
+	account, _ := walletSvc.GetWallet(context.Background(), userID)
+	if account.ReservedBalance != 0 || account.AvailableBalance != 100 {
+		t.Fatalf("preview mutated wallet: reserved %.2f available %.2f", account.ReservedBalance, account.AvailableBalance)
+	}
+}
+
 func TestCancelOrder_ReleasesReservedBalance(t *testing.T) {
 	userID := primitive.NewObjectID()
 	marketID := primitive.NewObjectID()
