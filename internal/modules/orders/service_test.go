@@ -43,6 +43,27 @@ func (s *stubMatchSvc) GetMatchByID(_ context.Context, _ string) (*matches.Match
 	return s.match, nil
 }
 
+type capturePositionWriter struct {
+	execs []executions.Execution
+}
+
+func (c *capturePositionWriter) ApplyExecution(_ context.Context, exec executions.Execution) error {
+	c.execs = append(c.execs, exec)
+	return nil
+}
+
+func (c *capturePositionWriter) PositionFor(context.Context, primitive.ObjectID, string, string, float64) (PositionSnapshot, bool) {
+	return PositionSnapshot{}, false
+}
+
+func (c *capturePositionWriter) ResolveCloseTarget(context.Context, primitive.ObjectID, string) (PositionSnapshot, bool) {
+	return PositionSnapshot{}, false
+}
+
+func (c *capturePositionWriter) OpenCloseTargets(context.Context, primitive.ObjectID) ([]PositionSnapshot, error) {
+	return nil, nil
+}
+
 func TestCreateOrder_LimitBuyAtAskFills(t *testing.T) {
 	userID := primitive.NewObjectID()
 	marketID := primitive.NewObjectID()
@@ -104,6 +125,54 @@ func TestCreateOrder_LimitBuyAtAskFills(t *testing.T) {
 	acct, _ := walletSvc.GetWallet(context.Background(), userID)
 	if acct.ReservedBalance != 0 {
 		t.Fatalf("reserved = %.2f, want 0", acct.ReservedBalance)
+	}
+}
+
+func TestCreateOrder_ExecutedFillCallsPositionProjectionWriter(t *testing.T) {
+	userID := primitive.NewObjectID()
+	marketID := primitive.NewObjectID()
+
+	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
+	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 100000})
+
+	execSvc := executions.NewService(executions.NewMemoryRepository())
+	positionWriter := &capturePositionWriter{}
+	orderRepo := NewMemoryRepository()
+	orderRepo.orders = nil
+
+	svc := NewService(
+		orderRepo,
+		&stubMarketSvc{
+			market: &markets.Market{ID: marketID, Status: markets.MarketStatusActive},
+			bid:    54,
+			ask:    55,
+			ok:     true,
+		},
+		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, BallsLeft: 42}},
+		walletSvc,
+		execSvc,
+		positionWriter,
+		nil,
+	)
+
+	_, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: marketID.Hex(),
+		Strike:   130,
+		Side:     "buy",
+		Type:     OrderTypeMarket,
+		Quantity: 7,
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder: %v", err)
+	}
+
+	if len(positionWriter.execs) != 1 {
+		t.Fatalf("projection writer executions = %d, want 1", len(positionWriter.execs))
+	}
+	got := positionWriter.execs[0]
+	if got.UserID != userID || got.MarketID != marketID.Hex() || got.Strike != 130 || got.Quantity != 7 || got.Price != 55 {
+		t.Fatalf("projection writer exec = %+v", got)
 	}
 }
 

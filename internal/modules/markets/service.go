@@ -9,9 +9,9 @@ import (
 )
 
 var (
-	errMarketNotFound  = errors.New("market not found")
-	errInvalidMarket   = errors.New("invalid market payload")
-	errInvalidStatus   = errors.New("invalid market status")
+	errMarketNotFound = errors.New("market not found")
+	errInvalidMarket  = errors.New("invalid market payload")
+	errInvalidStatus  = errors.New("invalid market status")
 )
 
 var legacyMarketIDMap = map[string]string{
@@ -62,6 +62,44 @@ func (s *Service) GetMarketByID(ctx context.Context, id string) (*Market, error)
 		return nil, err
 	}
 	return s.repo.GetByID(ctx, objID)
+}
+
+func (s *Service) GetMarketsByIDs(ctx context.Context, ids []string) (map[string]*Market, error) {
+	out := make(map[string]*Market, len(ids))
+	objectIDs := make([]primitive.ObjectID, 0, len(ids))
+	byHex := make(map[primitive.ObjectID]string, len(ids))
+
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if mapped, ok := legacyMarketIDMap[id]; ok {
+			id = mapped
+		}
+		objID, err := primitive.ObjectIDFromHex(id)
+		if err != nil {
+			market, lookupErr := s.GetMarketByID(ctx, raw)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			out[raw] = market
+			continue
+		}
+		objectIDs = append(objectIDs, objID)
+		byHex[objID] = raw
+	}
+
+	marketsByID, err := s.repo.GetByIDs(ctx, objectIDs)
+	if err != nil {
+		return nil, err
+	}
+	for objID, market := range marketsByID {
+		marketCopy := market
+		out[byHex[objID]] = &marketCopy
+		out[objID.Hex()] = &marketCopy
+	}
+	return out, nil
 }
 
 // CreateMarket creates a new tradable market (option/auction chain) for a

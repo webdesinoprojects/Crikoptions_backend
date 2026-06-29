@@ -89,7 +89,9 @@ func main() {
 
 	// Positions (derived from executions + markets). Created before orders so
 	// the order service can resolve/broadcast position state on exits.
-	positionsService := positions.NewService(executionsService, marketsService)
+	positionsRepo := positions.NewMongoProjectionRepository(mongo.DB)
+	mustEnsureIndexes(context.Background(), "position_projections", positionsRepo.EnsureIndexes)
+	positionsService := positions.NewServiceWithProjection(executionsService, marketsService, positionsRepo)
 	positionsHandler := positions.NewHandler(positionsService)
 
 	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService, positionsService, realtimeHub)

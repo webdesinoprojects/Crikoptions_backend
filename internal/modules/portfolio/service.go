@@ -21,6 +21,10 @@ type PositionReader interface {
 	GetUserClosedPositions(ctx context.Context, userID primitive.ObjectID) ([]positions.Position, error)
 }
 
+type PositionLister interface {
+	ListUserPositions(ctx context.Context, userID primitive.ObjectID, filter positions.PositionFilter) ([]positions.Position, error)
+}
+
 type WalletReader interface {
 	GetWallet(ctx context.Context, userID primitive.ObjectID) (*wallet.Account, error)
 }
@@ -31,6 +35,14 @@ type MarketReader interface {
 
 type MatchReader interface {
 	GetMatchByID(ctx context.Context, id string) (*matches.Match, error)
+}
+
+type BatchMarketReader interface {
+	GetMarketsByIDs(ctx context.Context, ids []string) (map[string]*markets.Market, error)
+}
+
+type BatchMatchReader interface {
+	GetMatchesByIDs(ctx context.Context, ids []string) (map[string]*matches.Match, error)
 }
 
 type Service struct {
@@ -50,20 +62,20 @@ func NewService(positions PositionReader, wallets WalletReader, markets MarketRe
 }
 
 func (s *Service) GetSummary(ctx context.Context, userID primitive.ObjectID) (*PortfolioSummary, error) {
-	open, err := s.positions.GetUserOpenPositions(ctx, userID)
+	all, err := s.listPositions(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	closed, err := s.positions.GetUserClosedPositions(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
+	open := filterPositionsByStatus(all, "open")
+	closed := filterPositionsByStatus(all, "closed")
+
 	account, err := s.wallets.GetWallet(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 
 	lookup := newLookupCache(s)
+	lookup.preload(ctx, all)
 	portfolioPositions := make([]PortfolioPosition, 0, len(open))
 	for _, position := range open {
 		portfolioPositions = append(portfolioPositions, s.adaptOpenPosition(ctx, lookup, position))
@@ -131,14 +143,12 @@ func (s *Service) GetRiskSummary(ctx context.Context, userID primitive.ObjectID)
 }
 
 func (s *Service) GetMarketPnL(ctx context.Context, userID primitive.ObjectID, marketID string) (*MarketPnLResponse, error) {
-	open, err := s.positions.GetUserOpenPositions(ctx, userID)
+	all, err := s.listPositions(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	closed, err := s.positions.GetUserClosedPositions(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
+	open := filterPositionsByStatus(all, "open")
+	closed := filterPositionsByStatus(all, "closed")
 
 	openPnL := 0.0
 	for _, position := range open {
@@ -241,6 +251,43 @@ func newLookupCache(service *Service) *lookupCache {
 	}
 }
 
+func (c *lookupCache) preload(ctx context.Context, positions []positions.Position) {
+	marketIDs := make([]string, 0, len(positions))
+	matchIDs := make([]string, 0, len(positions))
+	marketSeen := make(map[string]struct{})
+	matchSeen := make(map[string]struct{})
+
+	for _, position := range positions {
+		if position.MarketID != "" {
+			if _, ok := marketSeen[position.MarketID]; !ok {
+				marketSeen[position.MarketID] = struct{}{}
+				marketIDs = append(marketIDs, position.MarketID)
+			}
+		}
+		if position.MatchID != "" {
+			if _, ok := matchSeen[position.MatchID]; !ok {
+				matchSeen[position.MatchID] = struct{}{}
+				matchIDs = append(matchIDs, position.MatchID)
+			}
+		}
+	}
+
+	if batch, ok := c.service.markets.(BatchMarketReader); ok {
+		if marketsByID, err := batch.GetMarketsByIDs(ctx, marketIDs); err == nil {
+			for id, market := range marketsByID {
+				c.markets[id] = market
+			}
+		}
+	}
+	if batch, ok := c.service.matches.(BatchMatchReader); ok {
+		if matchesByID, err := batch.GetMatchesByIDs(ctx, matchIDs); err == nil {
+			for id, match := range matchesByID {
+				c.matches[id] = match
+			}
+		}
+	}
+}
+
 func (c *lookupCache) market(ctx context.Context, id string) *markets.Market {
 	if id == "" || c.service.markets == nil {
 		return nil
@@ -271,6 +318,35 @@ func (c *lookupCache) match(ctx context.Context, id string) *matches.Match {
 	}
 	c.matches[id] = match
 	return match
+}
+
+func (s *Service) listPositions(ctx context.Context, userID primitive.ObjectID) ([]positions.Position, error) {
+	if lister, ok := s.positions.(PositionLister); ok {
+		return lister.ListUserPositions(ctx, userID, positions.PositionFilter{})
+	}
+
+	open, err := s.positions.GetUserOpenPositions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	closed, err := s.positions.GetUserClosedPositions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	all := make([]positions.Position, 0, len(open)+len(closed))
+	all = append(all, open...)
+	all = append(all, closed...)
+	return all, nil
+}
+
+func filterPositionsByStatus(in []positions.Position, status string) []positions.Position {
+	out := make([]positions.Position, 0, len(in))
+	for _, position := range in {
+		if position.Status == status {
+			out = append(out, position)
+		}
+	}
+	return out
 }
 
 func sumOpenPnL(positions []PortfolioPosition) float64 {

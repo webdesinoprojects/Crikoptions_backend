@@ -26,32 +26,43 @@ type MarketReader interface {
 	GetMarketByID(ctx context.Context, id string) (*markets.Market, error)
 }
 
+type BatchMarketReader interface {
+	GetMarketsByIDs(ctx context.Context, ids []string) (map[string]*markets.Market, error)
+}
+
 type Service struct {
-	executions ExecutionReader
-	markets    MarketReader
+	executions  ExecutionReader
+	markets     MarketReader
+	projections ProjectionRepository
 }
 
 func NewService(executions ExecutionReader, markets MarketReader) *Service {
 	return &Service{executions: executions, markets: markets}
 }
 
+func NewServiceWithProjection(executions ExecutionReader, markets MarketReader, projections ProjectionRepository) *Service {
+	return &Service{executions: executions, markets: markets, projections: projections}
+}
+
 func (s *Service) GetUserOpenPositions(ctx context.Context, userID primitive.ObjectID) ([]Position, error) {
-	all, err := s.computeForUser(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	return filterOpen(all), nil
+	return s.ListUserPositions(ctx, userID, PositionFilter{Status: "open"})
 }
 
 func (s *Service) GetUserClosedPositions(ctx context.Context, userID primitive.ObjectID) ([]Position, error) {
-	all, err := s.computeForUser(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	return filterClosed(all), nil
+	return s.ListUserPositions(ctx, userID, PositionFilter{Status: "closed"})
 }
 
 func (s *Service) ListUserPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, error) {
+	if s.projections != nil {
+		projected, found, err := s.projectedUserPositions(ctx, userID, filter)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return projected, nil
+		}
+	}
+
 	all, err := s.computeForUser(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -61,6 +72,27 @@ func (s *Service) ListUserPositions(ctx context.Context, userID primitive.Object
 }
 
 func (s *Service) GetUserPosition(ctx context.Context, userID primitive.ObjectID, positionID string) (*Position, error) {
+	if s.projections != nil {
+		projection, err := s.projections.GetByID(ctx, userID, positionID)
+		if err != nil {
+			return nil, err
+		}
+		if projection != nil {
+			positions, err := s.positionsFromProjections(ctx, []PositionProjection{*projection})
+			if err != nil {
+				return nil, err
+			}
+			if len(positions) == 1 {
+				return &positions[0], nil
+			}
+		}
+		if found, err := s.hasProjectionRows(ctx, userID); err != nil {
+			return nil, err
+		} else if found {
+			return nil, nil
+		}
+	}
+
 	all, err := s.computeForUser(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -81,6 +113,21 @@ func (s *Service) ListAdminPositions(ctx context.Context, filter PositionFilter)
 			return nil, errInvalidUserID
 		}
 		userIDFilter = parsed
+	}
+
+	if s.projections != nil {
+		projected, err := s.projectedAdminPositions(ctx, userIDFilter, filter)
+		if err != nil {
+			return nil, err
+		}
+		if len(projected) > 0 {
+			return projected, nil
+		}
+		if found, err := s.hasProjectionRows(ctx, userIDFilter); err != nil {
+			return nil, err
+		} else if found {
+			return projected, nil
+		}
 	}
 
 	execFilter := executions.Filter{Limit: 1000}
@@ -117,6 +164,16 @@ func (s *Service) GetAdminPosition(ctx context.Context, positionID string) (*Pos
 // including closed positions (lots == 0). Implements orders.PositionView so the
 // orders service can broadcast position updates after a sell fill.
 func (s *Service) PositionFor(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (orders.PositionSnapshot, bool) {
+	if s.projections != nil {
+		projection, err := s.projections.GetOpenByKey(ctx, userID, matchID, marketID, strike)
+		if err == nil && projection != nil {
+			positions, posErr := s.positionsFromProjections(ctx, []PositionProjection{*projection})
+			if posErr == nil && len(positions) == 1 {
+				return toSnapshot(positions[0]), true
+			}
+		}
+	}
+
 	all, err := s.computeForUser(ctx, userID)
 	if err != nil {
 		return orders.PositionSnapshot{}, false
@@ -154,6 +211,13 @@ func (s *Service) OpenCloseTargets(ctx context.Context, userID primitive.ObjectI
 		}
 	}
 	return targets, nil
+}
+
+func (s *Service) ApplyExecution(ctx context.Context, exec executions.Execution) error {
+	if s.projections == nil {
+		return nil
+	}
+	return s.projections.ApplyExecution(ctx, exec)
 }
 
 func toSnapshot(p Position) orders.PositionSnapshot {
@@ -211,6 +275,11 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		}
 	}
 
+	marketIDs := make([]string, 0, len(bucketKeys))
+	for _, key := range bucketKeys {
+		marketIDs = append(marketIDs, key.marketID)
+	}
+	ltps := s.marketLTPs(ctx, marketIDs)
 	out := make([]Position, 0, len(allBuckets))
 	for i, b := range allBuckets {
 		k := bucketKeys[i]
@@ -223,9 +292,7 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		p.CreatedAt = b.firstSeen
 		p.UpdatedAt = b.lastUpdated
 
-		if m, err := s.markets.GetMarketByID(ctx, k.marketID); err == nil && m != nil {
-			p.LTP = m.LTP
-		}
+		p.LTP = ltps[k.marketID]
 		p.PnL = computePnL(p, b.matchedQty())
 		p.RealizedPnL = computeRealized(b)
 		out = append(out, p)
@@ -235,6 +302,103 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		return out[i].UpdatedAt.After(out[j].UpdatedAt)
 	})
 	return out
+}
+
+func (s *Service) projectedUserPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, bool, error) {
+	projections, err := s.projections.List(ctx, ProjectionFilter{
+		UserID:   userID,
+		MatchID:  filter.MatchID,
+		MarketID: filter.MarketID,
+		Status:   filter.Status,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if len(projections) > 0 {
+		positions, err := s.positionsFromProjections(ctx, projections)
+		return positions, true, err
+	}
+
+	found, err := s.hasProjectionRows(ctx, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	return []Position{}, found, nil
+}
+
+func (s *Service) projectedAdminPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, error) {
+	return s.positionsFromProjectionFilter(ctx, ProjectionFilter{
+		UserID:   userID,
+		MatchID:  filter.MatchID,
+		MarketID: filter.MarketID,
+		Status:   filter.Status,
+	})
+}
+
+func (s *Service) positionsFromProjectionFilter(ctx context.Context, filter ProjectionFilter) ([]Position, error) {
+	projections, err := s.projections.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	return s.positionsFromProjections(ctx, projections)
+}
+
+func (s *Service) positionsFromProjections(ctx context.Context, projections []PositionProjection) ([]Position, error) {
+	marketIDs := make([]string, 0, len(projections))
+	for _, projection := range projections {
+		marketIDs = append(marketIDs, projection.MarketID)
+	}
+	ltps := s.marketLTPs(ctx, marketIDs)
+
+	positions := make([]Position, 0, len(projections))
+	for _, projection := range projections {
+		positions = append(positions, projection.ToPosition(ltps[projection.MarketID]))
+	}
+	return positions, nil
+}
+
+func (s *Service) hasProjectionRows(ctx context.Context, userID primitive.ObjectID) (bool, error) {
+	rows, err := s.projections.List(ctx, ProjectionFilter{UserID: userID})
+	return len(rows) > 0, err
+}
+
+func (s *Service) marketLTPs(ctx context.Context, ids []string) map[string]float64 {
+	marketIDs := make([]string, 0, len(ids))
+	seen := make(map[string]struct{})
+	for _, marketID := range ids {
+		if marketID == "" {
+			continue
+		}
+		if _, ok := seen[marketID]; ok {
+			continue
+		}
+		seen[marketID] = struct{}{}
+		marketIDs = append(marketIDs, marketID)
+	}
+
+	ltps := make(map[string]float64, len(marketIDs))
+	if s.markets == nil {
+		return ltps
+	}
+	if batch, ok := s.markets.(BatchMarketReader); ok {
+		marketsByID, err := batch.GetMarketsByIDs(ctx, marketIDs)
+		if err == nil {
+			for id, market := range marketsByID {
+				if market != nil {
+					ltps[id] = market.LTP
+				}
+			}
+			return ltps
+		}
+	}
+
+	for _, marketID := range marketIDs {
+		market, err := s.markets.GetMarketByID(ctx, marketID)
+		if err == nil && market != nil {
+			ltps[marketID] = market.LTP
+		}
+	}
+	return ltps
 }
 
 type aggregateBucket struct {

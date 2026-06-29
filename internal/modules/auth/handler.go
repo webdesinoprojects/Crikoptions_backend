@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/httpjson"
@@ -35,6 +37,7 @@ func (h *Handler) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		r.Header.Set("X-Crik-User-Hash", shortHash(userID.Hex()))
 		ctx := context.WithValue(r.Context(), CtxUserID, userID)
 		ctx = context.WithValue(ctx, CtxRole, role)
 		next(w, r.WithContext(ctx))
@@ -175,4 +178,9 @@ func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 		"message": "Profile updated successfully",
 		"data":    user,
 	})
+}
+
+func shortHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])[:12]
 }

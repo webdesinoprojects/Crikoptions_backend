@@ -16,6 +16,7 @@ import (
 type Repository interface {
 	GetAll(ctx context.Context) []Match
 	GetByID(ctx context.Context, id primitive.ObjectID) (*Match, error)
+	GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Match, error)
 	Create(ctx context.Context, match Match) (*Match, error)
 	UpdateScore(ctx context.Context, id primitive.ObjectID, score ScoreUpdate) (*Match, error)
 	DemoteOtherLiveMatches(ctx context.Context, keepID primitive.ObjectID) error
@@ -50,6 +51,23 @@ func (r *MemoryRepository) GetByID(ctx context.Context, id primitive.ObjectID) (
 		}
 	}
 	return nil, nil
+}
+
+func (r *MemoryRepository) GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Match, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	wanted := make(map[primitive.ObjectID]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	out := make(map[primitive.ObjectID]Match, len(ids))
+	for i := range r.matches {
+		if _, ok := wanted[r.matches[i].ID]; ok {
+			out[r.matches[i].ID] = r.matches[i]
+		}
+	}
+	return out, nil
 }
 
 func (r *MemoryRepository) Create(ctx context.Context, match Match) (*Match, error) {
@@ -215,6 +233,34 @@ func (r *MongoRepository) GetByID(ctx context.Context, id primitive.ObjectID) (*
 		return nil, err
 	}
 	return &match, nil
+}
+
+func (r *MongoRepository) GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Match, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	out := make(map[primitive.ObjectID]Match, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	cur, err := r.col.Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	for cur.Next(ctx) {
+		var match Match
+		if err := cur.Decode(&match); err != nil {
+			return nil, err
+		}
+		out[match.ID] = match
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (r *MongoRepository) Create(ctx context.Context, match Match) (*Match, error) {

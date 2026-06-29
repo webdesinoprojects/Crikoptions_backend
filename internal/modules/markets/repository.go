@@ -16,6 +16,7 @@ type Repository interface {
 	GetAll(ctx context.Context) []Market
 	GetByMatchID(ctx context.Context, matchID string) []Market
 	GetByID(ctx context.Context, id primitive.ObjectID) (*Market, error)
+	GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Market, error)
 	Create(ctx context.Context, market Market) (*Market, error)
 	UpdateStatus(ctx context.Context, id primitive.ObjectID, status string) (*Market, error)
 	EnsureIndexes(ctx context.Context) error
@@ -63,6 +64,23 @@ func (r *MemoryRepository) GetByID(ctx context.Context, id primitive.ObjectID) (
 		}
 	}
 	return nil, nil
+}
+
+func (r *MemoryRepository) GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Market, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	wanted := make(map[primitive.ObjectID]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+	out := make(map[primitive.ObjectID]Market, len(ids))
+	for i := range r.markets {
+		if _, ok := wanted[r.markets[i].ID]; ok {
+			out[r.markets[i].ID] = r.markets[i]
+		}
+	}
+	return out, nil
 }
 
 func (r *MemoryRepository) Create(ctx context.Context, market Market) (*Market, error) {
@@ -189,6 +207,34 @@ func (r *MongoRepository) GetByID(ctx context.Context, id primitive.ObjectID) (*
 		return nil, err
 	}
 	return &market, nil
+}
+
+func (r *MongoRepository) GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Market, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	out := make(map[primitive.ObjectID]Market, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	cur, err := r.col.Find(ctx, bson.M{"_id": bson.M{"$in": ids}})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	for cur.Next(ctx) {
+		var market Market
+		if err := cur.Decode(&market); err != nil {
+			return nil, err
+		}
+		out[market.ID] = market
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (r *MongoRepository) Create(ctx context.Context, market Market) (*Market, error) {

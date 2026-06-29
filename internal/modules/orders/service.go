@@ -86,14 +86,19 @@ type PositionView interface {
 	OpenCloseTargets(ctx context.Context, userID primitive.ObjectID) ([]PositionSnapshot, error)
 }
 
+type PositionProjectionWriter interface {
+	ApplyExecution(ctx context.Context, exec executions.Execution) error
+}
+
 type Service struct {
-	repo       Repository
-	markets    MarketReader
-	matches    MatchReader
-	wallets    WalletPort
-	executions ExecutionWriter
-	positions  PositionView
-	publisher  EventPublisher
+	repo           Repository
+	markets        MarketReader
+	matches        MatchReader
+	wallets        WalletPort
+	executions     ExecutionWriter
+	positions      PositionView
+	positionWriter PositionProjectionWriter
+	publisher      EventPublisher
 
 	locks sync.Map // map[string]*sync.Mutex keyed by user|market|strike
 }
@@ -107,14 +112,16 @@ func NewService(
 	positions PositionView,
 	publisher EventPublisher,
 ) *Service {
+	positionWriter, _ := positions.(PositionProjectionWriter)
 	return &Service{
-		repo:       repo,
-		markets:    markets,
-		matches:    matches,
-		wallets:    wallets,
-		executions: executions,
-		positions:  positions,
-		publisher:  publisher,
+		repo:           repo,
+		markets:        markets,
+		matches:        matches,
+		wallets:        wallets,
+		executions:     executions,
+		positions:      positions,
+		positionWriter: positionWriter,
+		publisher:      publisher,
 	}
 }
 
@@ -607,7 +614,7 @@ func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, orde
 			}
 		}
 
-		if _, txErr := s.executions.Create(txCtx, executions.Execution{
+		execution := executions.Execution{
 			UserID:          userID,
 			OrderID:         order.ID,
 			MatchID:         order.MatchID,
@@ -617,8 +624,15 @@ func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, orde
 			Price:           fillPrice,
 			Quantity:        fillQty,
 			LiquiditySource: executions.LiquiditySystemMarketMaker,
-		}); txErr != nil {
+		}
+		createdExec, txErr := s.executions.Create(txCtx, execution)
+		if txErr != nil {
 			return txErr
+		}
+		if s.positionWriter != nil && createdExec != nil {
+			if txErr := s.positionWriter.ApplyExecution(txCtx, *createdExec); txErr != nil {
+				return txErr
+			}
 		}
 
 		newFilled := order.FilledQuantity + fillQty
@@ -634,7 +648,6 @@ func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, orde
 			status = StatusExecuted
 		}
 
-		var txErr error
 		updated, txErr = s.repo.UpdateFill(txCtx, order.ID, FillUpdate{
 			FilledQuantity:    newFilled,
 			RemainingQuantity: newRemaining,

@@ -1,7 +1,10 @@
 package positions
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"time"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/httpjson"
@@ -27,16 +30,16 @@ func (h *Handler) GetOpenPositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	positions, err := h.service.ListUserPositions(r.Context(), userID, PositionFilter{
+	ctx, cancel := positionsTimeout(r.Context())
+	defer cancel()
+
+	positions, err := h.service.ListUserPositions(ctx, userID, PositionFilter{
 		Status:   "open",
 		MatchID:  r.URL.Query().Get("matchId"),
 		MarketID: r.URL.Query().Get("marketId"),
 	})
 	if err != nil {
-		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
-			"success": false,
-			"message": "Failed to fetch open positions",
-		})
+		writePositionServiceError(w, "Failed to fetch open positions", err)
 		return
 	}
 
@@ -59,16 +62,16 @@ func (h *Handler) GetClosedPositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	positions, err := h.service.ListUserPositions(r.Context(), userID, PositionFilter{
+	ctx, cancel := positionsTimeout(r.Context())
+	defer cancel()
+
+	positions, err := h.service.ListUserPositions(ctx, userID, PositionFilter{
 		Status:   "closed",
 		MatchID:  r.URL.Query().Get("matchId"),
 		MarketID: r.URL.Query().Get("marketId"),
 	})
 	if err != nil {
-		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
-			"success": false,
-			"message": "Failed to fetch closed positions",
-		})
+		writePositionServiceError(w, "Failed to fetch closed positions", err)
 		return
 	}
 
@@ -100,12 +103,12 @@ func (h *Handler) GetPositionDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	position, err := h.service.GetUserPosition(r.Context(), userID, positionID)
+	ctx, cancel := positionsTimeout(r.Context())
+	defer cancel()
+
+	position, err := h.service.GetUserPosition(ctx, userID, positionID)
 	if err != nil {
-		httpjson.Write(w, http.StatusBadRequest, map[string]any{
-			"success": false,
-			"message": "Invalid position ID",
-		})
+		writePositionServiceError(w, "Failed to fetch position", err)
 		return
 	}
 	if position == nil {
@@ -147,7 +150,10 @@ func (h *Handler) ListAdminPositions(w http.ResponseWriter, r *http.Request) {
 		MarketID: marketID,
 	}
 
-	positions, err := h.service.ListAdminPositions(r.Context(), filter)
+	ctx, cancel := positionsTimeout(r.Context())
+	defer cancel()
+
+	positions, err := h.service.ListAdminPositions(ctx, filter)
 	if err != nil {
 		switch err {
 		case errInvalidUserID:
@@ -156,10 +162,7 @@ func (h *Handler) ListAdminPositions(w http.ResponseWriter, r *http.Request) {
 				"message": "Invalid userId",
 			})
 		default:
-			httpjson.Write(w, http.StatusInternalServerError, map[string]any{
-				"success": false,
-				"message": "Failed to fetch positions",
-			})
+			writePositionServiceError(w, "Failed to fetch positions", err)
 		}
 		return
 	}
@@ -183,12 +186,12 @@ func (h *Handler) GetAdminPositionDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	position, err := h.service.GetAdminPosition(r.Context(), positionID)
+	ctx, cancel := positionsTimeout(r.Context())
+	defer cancel()
+
+	position, err := h.service.GetAdminPosition(ctx, positionID)
 	if err != nil {
-		httpjson.Write(w, http.StatusBadRequest, map[string]any{
-			"success": false,
-			"message": "Invalid position ID",
-		})
+		writePositionServiceError(w, "Failed to fetch position", err)
 		return
 	}
 	if position == nil {
@@ -204,4 +207,26 @@ func (h *Handler) GetAdminPositionDetail(w http.ResponseWriter, r *http.Request)
 		"message": "Position fetched successfully",
 		"data":    position,
 	})
+}
+
+func writePositionServiceError(w http.ResponseWriter, message string, err error) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		httpjson.Write(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false,
+			"message": message,
+			"error": map[string]any{
+				"code": "SERVICE_TIMEOUT",
+			},
+		})
+		return
+	}
+
+	httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+		"success": false,
+		"message": message,
+	})
+}
+
+func positionsTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, 2*time.Second)
 }

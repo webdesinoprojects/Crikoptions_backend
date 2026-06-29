@@ -84,6 +84,46 @@ func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
 	return match, nil
 }
 
+func (s *Service) GetMatchesByIDs(ctx context.Context, ids []string) (map[string]*Match, error) {
+	out := make(map[string]*Match, len(ids))
+	objectIDs := make([]primitive.ObjectID, 0, len(ids))
+	byHex := make(map[primitive.ObjectID]string, len(ids))
+
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if mapped, ok := legacyMatchIDMap[id]; ok {
+			id = mapped
+		}
+		objID, err := primitive.ObjectIDFromHex(id)
+		if err != nil {
+			match, lookupErr := s.GetMatchByID(ctx, raw)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			out[raw] = match
+			continue
+		}
+		objectIDs = append(objectIDs, objID)
+		byHex[objID] = raw
+	}
+
+	matchesByID, err := s.repo.GetByIDs(ctx, objectIDs)
+	if err != nil {
+		return nil, err
+	}
+	for objID, match := range matchesByID {
+		match.Status = NormalizeStatus(match.Status)
+		match.OversText = calculateOvers(match.BallsLeft)
+		matchCopy := match
+		out[byHex[objID]] = &matchCopy
+		out[objID.Hex()] = &matchCopy
+	}
+	return out, nil
+}
+
 func (s *Service) CreateMatch(ctx context.Context, req CreateMatchRequest) (*Match, error) {
 	match := Match{
 		TournamentID: req.TournamentID,

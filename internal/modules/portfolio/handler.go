@@ -1,7 +1,10 @@
 package portfolio
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"time"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/httpjson"
@@ -22,9 +25,12 @@ func (h *Handler) GetSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summary, err := h.service.GetSummary(r.Context(), userID)
+	ctx, cancel := portfolioTimeout(r.Context())
+	defer cancel()
+
+	summary, err := h.service.GetSummary(ctx, userID)
 	if err != nil {
-		writeServerError(w, "Failed to fetch portfolio summary")
+		writeServiceError(w, "Failed to fetch portfolio summary", err)
 		return
 	}
 
@@ -42,9 +48,12 @@ func (h *Handler) GetDailyPnL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	daily, err := h.service.GetDailyPnL(r.Context(), userID)
+	ctx, cancel := portfolioTimeout(r.Context())
+	defer cancel()
+
+	daily, err := h.service.GetDailyPnL(ctx, userID)
 	if err != nil {
-		writeServerError(w, "Failed to fetch daily PnL")
+		writeServiceError(w, "Failed to fetch daily PnL", err)
 		return
 	}
 
@@ -62,9 +71,12 @@ func (h *Handler) GetRiskSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	risk, err := h.service.GetRiskSummary(r.Context(), userID)
+	ctx, cancel := portfolioTimeout(r.Context())
+	defer cancel()
+
+	risk, err := h.service.GetRiskSummary(ctx, userID)
 	if err != nil {
-		writeServerError(w, "Failed to fetch risk summary")
+		writeServiceError(w, "Failed to fetch risk summary", err)
 		return
 	}
 
@@ -91,9 +103,12 @@ func (h *Handler) GetMarketPnL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pnl, err := h.service.GetMarketPnL(r.Context(), userID, marketID)
+	ctx, cancel := portfolioTimeout(r.Context())
+	defer cancel()
+
+	pnl, err := h.service.GetMarketPnL(ctx, userID, marketID)
 	if err != nil {
-		writeServerError(w, "Failed to fetch market PnL")
+		writeServiceError(w, "Failed to fetch market PnL", err)
 		return
 	}
 
@@ -111,9 +126,24 @@ func writeUnauthorized(w http.ResponseWriter) {
 	})
 }
 
-func writeServerError(w http.ResponseWriter, message string) {
+func writeServiceError(w http.ResponseWriter, message string, err error) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		httpjson.Write(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false,
+			"message": message,
+			"error": map[string]any{
+				"code": "SERVICE_TIMEOUT",
+			},
+		})
+		return
+	}
+
 	httpjson.Write(w, http.StatusInternalServerError, map[string]any{
 		"success": false,
 		"message": message,
 	})
+}
+
+func portfolioTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, 2*time.Second)
 }
