@@ -19,14 +19,29 @@ type resumePlan struct {
 
 // deriveResumePlan decides whether to fresh-start, resume, or skip based on the
 // persisted match document and ball-event counts.
-func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int) resumePlan {
+func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, autoLoop bool) resumePlan {
 	if match == nil {
 		return resumePlan{freshStart: true}
 	}
 
 	status := matches.NormalizeStatus(match.Status)
 	if status == matches.StatusCompleted {
+		if autoLoop {
+			return resumePlan{freshStart: true}
+		}
 		return resumePlan{skip: true, skipReason: "match already completed"}
+	}
+	if match.Innings == 2 && match.TargetScore > 0 && match.CurrentScore >= match.TargetScore {
+		if autoLoop {
+			return resumePlan{freshStart: true}
+		}
+		return resumePlan{skip: true, skipReason: "chase target already reached"}
+	}
+	if match.Innings == 2 && match.BallsLeft <= 0 && counts[2] > 0 {
+		if autoLoop {
+			return resumePlan{freshStart: true}
+		}
+		return resumePlan{skip: true, skipReason: "innings 2 overs complete"}
 	}
 
 	total := counts[1] + counts[2]
@@ -53,6 +68,9 @@ func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int) 
 		return resumePlan{skip: true, skipReason: "no CSV events for current innings"}
 	}
 	if cursor >= len(events) {
+		if autoLoop {
+			return resumePlan{freshStart: true}
+		}
 		return resumePlan{skip: true, skipReason: "all CSV events already applied"}
 	}
 
@@ -125,7 +143,7 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 		1: s.eventCount(ctx, matchID, 1),
 		2: s.eventCount(ctx, matchID, 2),
 	}
-	plan := deriveResumePlan(match, ds, counts)
+	plan := deriveResumePlan(match, ds, counts, s.cfg.AutoLoop)
 
 	if plan.skip {
 		log.Printf("simulator[%s]: not starting (%s)", matchID, plan.skipReason)
@@ -188,8 +206,7 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 		plan.innings, plan.cursor,
 		match.CurrentScore, match.WicketsLost, match.OversText, match.TargetScore,
 	)
-	s.workers.Store(matchID, w)
-	go w.Run()
+	s.attachWorker(matchID, ds, w)
 
 	log.Printf("simulator[%s]: resumed script=%s innings=%d cursor=%d/%d score=%d/%d",
 		matchID, scriptName, plan.innings, plan.cursor, len(ds.Events[plan.innings]),

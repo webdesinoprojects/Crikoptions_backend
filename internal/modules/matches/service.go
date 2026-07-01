@@ -18,7 +18,19 @@ var (
 	errInvalidBallEvent   = errors.New("invalid ball event")
 	errNextBatterRequired = errors.New("next batter is required for a wicket")
 	errInvalidLiveContext = errors.New("invalid live match context")
+	errInningsOver        = errors.New("innings over: no balls left")
 )
+
+// TerminalBallError reports whether a ball cannot be applied because the innings
+// or match is already finished (simulator should stop, not skip ahead).
+func TerminalBallError(err error) bool {
+	return errors.Is(err, errMatchNotLiveBall) || errors.Is(err, errInningsOver)
+}
+
+// IsInningsOver reports that all legal deliveries for the current innings are done.
+func IsInningsOver(err error) bool {
+	return errors.Is(err, errInningsOver)
+}
 
 // EventPublisher pushes realtime WebSocket updates.
 type EventPublisher interface {
@@ -261,6 +273,13 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 	}
 
 	innings := existing.Innings
+	if innings == 2 && existing.TargetScore > 0 && existing.CurrentScore >= existing.TargetScore {
+		return nil, errMatchNotLiveBall
+	}
+	if legalBall && existing.BallsLeft <= 0 {
+		return nil, errInningsOver
+	}
+
 	matchID := existing.ID.Hex()
 
 	// Ball position is derived from the persisted legal-ball count for this

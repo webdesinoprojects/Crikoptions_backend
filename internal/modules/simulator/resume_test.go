@@ -8,7 +8,7 @@ import (
 
 func TestDeriveResumePlan_freshStart(t *testing.T) {
 	match := &matches.Match{Status: matches.StatusLive, Innings: 1}
-	plan := deriveResumePlan(match, &CSVDataset{Events: map[int][]BallRow{1: {{}}, 2: {}}}, map[int]int{1: 0, 2: 0})
+	plan := deriveResumePlan(match, &CSVDataset{Events: map[int][]BallRow{1: {{}}, 2: {}}}, map[int]int{1: 0, 2: 0}, false)
 	if !plan.freshStart || plan.skip {
 		t.Fatalf("plan = %+v, want freshStart", plan)
 	}
@@ -26,7 +26,7 @@ func TestDeriveResumePlan_resumeMidInnings(t *testing.T) {
 			2: make([]BallRow, 94),
 		},
 	}
-	plan := deriveResumePlan(match, ds, map[int]int{1: 50, 2: 0})
+	plan := deriveResumePlan(match, ds, map[int]int{1: 50, 2: 0}, false)
 	if plan.freshStart || plan.skip {
 		t.Fatalf("plan = %+v, want resume at cursor 50", plan)
 	}
@@ -44,7 +44,7 @@ func TestDeriveResumePlan_innings2AfterInnings1Done(t *testing.T) {
 			2: make([]BallRow, 94),
 		},
 	}
-	plan := deriveResumePlan(match, ds, map[int]int{1: 121, 2: 10})
+	plan := deriveResumePlan(match, ds, map[int]int{1: 121, 2: 10}, false)
 	if plan.skip || plan.freshStart {
 		t.Fatalf("plan = %+v, want resume innings 2", plan)
 	}
@@ -56,9 +56,18 @@ func TestDeriveResumePlan_innings2AfterInnings1Done(t *testing.T) {
 func TestDeriveResumePlan_skipCompleted(t *testing.T) {
 	match := &matches.Match{Status: matches.StatusCompleted, Innings: 2}
 	ds := &CSVDataset{Events: map[int][]BallRow{1: make([]BallRow, 10), 2: make([]BallRow, 10)}}
-	plan := deriveResumePlan(match, ds, map[int]int{1: 10, 2: 10})
+	plan := deriveResumePlan(match, ds, map[int]int{1: 10, 2: 10}, false)
 	if !plan.skip {
 		t.Fatalf("plan = %+v, want skip for completed match", plan)
+	}
+}
+
+func TestDeriveResumePlan_autoLoopRestartsCompleted(t *testing.T) {
+	match := &matches.Match{Status: matches.StatusCompleted, Innings: 2}
+	ds := &CSVDataset{Events: map[int][]BallRow{1: make([]BallRow, 10), 2: make([]BallRow, 10)}}
+	plan := deriveResumePlan(match, ds, map[int]int{1: 10, 2: 10}, true)
+	if !plan.freshStart || plan.skip {
+		t.Fatalf("plan = %+v, want freshStart when autoLoop", plan)
 	}
 }
 
@@ -71,7 +80,7 @@ func TestDeriveResumePlan_skipAllEventsApplied(t *testing.T) {
 			2: make([]BallRow, 3),
 		},
 	}
-	plan := deriveResumePlan(match, ds, map[int]int{1: 5, 2: 3})
+	plan := deriveResumePlan(match, ds, map[int]int{1: 5, 2: 3}, false)
 	if !plan.skip {
 		t.Fatalf("plan = %+v, want skip when all events applied", plan)
 	}

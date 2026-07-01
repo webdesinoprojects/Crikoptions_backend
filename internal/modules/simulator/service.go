@@ -30,6 +30,7 @@ type Config struct {
 	DefaultIntervalSec int
 	Enabled            bool
 	AutoStart          bool
+	AutoLoop           bool // restart from 0/0 when a replay finishes
 }
 
 // AutoStartSpec pairs a match hex id with its CSV script folder.
@@ -66,7 +67,11 @@ func LoadConfig() Config {
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("SIMULATOR_AUTO_START"))); v == "false" || v == "0" {
 		autoStart = false
 	}
-	return Config{DataDir: dir, DefaultIntervalSec: interval, Enabled: enabled, AutoStart: autoStart}
+	autoLoop := enabled
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("SIMULATOR_AUTO_LOOP"))); v == "false" || v == "0" {
+		autoLoop = false
+	}
+	return Config{DataDir: dir, DefaultIntervalSec: interval, Enabled: enabled, AutoStart: autoStart, AutoLoop: autoLoop}
 }
 
 // SimStatus is returned by the status and control APIs.
@@ -130,26 +135,43 @@ func (s *Service) Start(ctx context.Context, matchID string, req StartRequest) (
 	}
 
 	// Clear historical ball events so the slate is clean.
-	if err := s.svc.ClearMatchEvents(context.Background(), matchID); err != nil {
-		log.Printf("simulator[%s]: ClearMatchEvents: %v", matchID, err)
+	if err := s.resetMatchForReplay(context.Background(), matchID, ds); err != nil {
+		return nil, err
 	}
 
-	// Reset match document to innings 1 start.
+	// Determine tick interval: request > CSV config > env default.
+	intervalSec := req.IntervalSec
+	if intervalSec <= 0 {
+		intervalSec = ds.Innings1.ReplayIntervalSec
+	}
+	if intervalSec <= 0 {
+		intervalSec = s.cfg.DefaultIntervalSec
+	}
+
+	w := newWorker(matchID, ds, s.svc, intervalSec)
+	s.attachWorker(matchID, ds, w)
+
+	return s.statusFrom(matchID, w), nil
+}
+
+// resetMatchForReplay clears ball history and sets the match to innings-1 0/0 live.
+func (s *Service) resetMatchForReplay(ctx context.Context, matchID string, ds *CSVDataset) error {
+	if err := s.svc.ClearMatchEvents(ctx, matchID); err != nil {
+		log.Printf("simulator[%s]: ClearMatchEvents: %v", matchID, err)
+	}
 	targetZero := 0
-	if _, err := s.svc.UpdateMatchScore(context.Background(), matchID, matches.UpdateScoreRequest{
+	if _, err := s.svc.UpdateMatchScore(ctx, matchID, matches.UpdateScoreRequest{
 		Innings:      1,
 		CurrentScore: 0,
 		WicketsLost:  0,
 		BallsLeft:    120,
 		TargetScore:  &targetZero,
-		Status:       "live",
+		Status:       matches.StatusLive,
 	}); err != nil {
-		return nil, fmt.Errorf("reset match score: %w", err)
+		return fmt.Errorf("reset match score: %w", err)
 	}
-
-	// Set innings 1 opening pair and first bowler.
 	i1 := ds.Innings1
-	if _, err := s.svc.UpdateLiveContext(context.Background(), matchID, matches.UpdateLiveContextRequest{
+	if _, err := s.svc.UpdateLiveContext(ctx, matchID, matches.UpdateLiveContextRequest{
 		Striker:     matches.BatterStats{Name: i1.StartStriker},
 		NonStriker:  matches.BatterStats{Name: i1.StartNonStriker},
 		Bowler:      matches.BowlerStats{Name: i1.StartBowler},
@@ -157,21 +179,16 @@ func (s *Service) Start(ctx context.Context, matchID string, req StartRequest) (
 	}); err != nil {
 		log.Printf("simulator[%s]: UpdateLiveContext innings 1: %v", matchID, err)
 	}
+	return nil
+}
 
-	// Determine tick interval: request > CSV config > env default.
-	intervalSec := req.IntervalSec
-	if intervalSec <= 0 {
-		intervalSec = i1.ReplayIntervalSec
+func (s *Service) attachWorker(matchID string, ds *CSVDataset, w *Worker) {
+	w.loopOnComplete = s.cfg.AutoLoop
+	w.onRestart = func(ctx context.Context) error {
+		return s.resetMatchForReplay(ctx, matchID, ds)
 	}
-	if intervalSec <= 0 {
-		intervalSec = s.cfg.DefaultIntervalSec
-	}
-
-	w := newWorker(matchID, ds, s.svc, intervalSec)
 	s.workers.Store(matchID, w)
 	go w.Run()
-
-	return s.statusFrom(matchID, w), nil
 }
 
 // Pause suspends the running worker (cursor is preserved).

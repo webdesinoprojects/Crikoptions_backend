@@ -57,6 +57,10 @@ type Worker struct {
 	pauseMu    sync.Mutex
 	pausedFlag bool
 	unpauseCh  chan struct{} // closed on Resume; replaced on next Pause
+
+	// auto-loop: restart from 0/0 when the replay finishes
+	loopOnComplete bool
+	onRestart      func(context.Context) error
 }
 
 func newWorker(matchID string, ds *CSVDataset, svc MatchService, intervalSec int) *Worker {
@@ -208,6 +212,16 @@ func (w *Worker) Run() {
 
 		ctx := context.Background()
 
+		// Do not bowl further if chase target already reached (innings 2).
+		if innings == 2 && w.targetScore > 0 && w.score >= w.targetScore {
+			if !w.completeMatch(ctx) {
+				return
+			}
+			lastMatch = nil
+			pendingBowlerChange = ""
+			continue
+		}
+
 		// Apply a pending bowler change from the end of the previous over.
 		if pendingBowlerChange != "" && lastMatch != nil && lastMatch.LiveContext != nil {
 			lc := *lastMatch.LiveContext
@@ -238,51 +252,148 @@ func (w *Worker) Run() {
 
 		m, err := w.svc.RecordBall(ctx, w.matchID, ballReq)
 		if err != nil {
-			log.Printf("simulator[%s] innings=%d seq=%d: RecordBall: %v (skipping)", w.matchID, innings, row.EventSeq, err)
-		} else {
-			lastMatch = m
+			log.Printf("simulator[%s] innings=%d seq=%d: RecordBall: %v", w.matchID, innings, row.EventSeq, err)
+			if matches.TerminalBallError(err) {
+				if w.handleTerminalBall(ctx, innings, err) {
+					continue
+				}
+				return
+			}
+			// Non-terminal error: skip this CSV row and continue.
 			w.mu.Lock()
-			w.score = m.CurrentScore
-			w.wickets = m.WicketsLost
-			w.oversText = m.OversText
-			w.targetScore = m.TargetScore
+			w.cursor++
 			w.mu.Unlock()
+			continue
 		}
+
+		lastMatch = m
+		w.mu.Lock()
+		w.score = m.CurrentScore
+		w.wickets = m.WicketsLost
+		w.oversText = m.OversText
+		w.targetScore = m.TargetScore
+		w.mu.Unlock()
 
 		// Queue the new bowler for the first ball of the next over.
 		if row.ChangeBowler != "" {
 			pendingBowlerChange = row.ChangeBowler
 		}
 
-		// Advance cursor.
+		// Advance cursor after a successful delivery.
 		w.mu.Lock()
 		w.cursor++
 		w.mu.Unlock()
 
 		if row.EndMatch {
 			log.Printf("simulator[%s]: CSV signalled end_match", w.matchID)
-			if _, cErr := w.svc.CompleteMatch(ctx, w.matchID); cErr != nil {
-				log.Printf("simulator[%s]: CompleteMatch: %v", w.matchID, cErr)
-			}
-			w.mu.Lock()
-			w.status = StatusCompleted
-			w.mu.Unlock()
-			return
-		}
-
-		if row.EndInnings && innings == 1 {
-			log.Printf("simulator[%s]: innings 1 complete — transitioning to innings 2", w.matchID)
-			if err := w.transitionToInnings2(ctx); err != nil {
-				log.Printf("simulator[%s]: innings transition: %v — stopping", w.matchID, err)
-				w.mu.Lock()
-				w.status = StatusStopped
-				w.mu.Unlock()
+			if !w.completeMatch(ctx) {
 				return
 			}
 			lastMatch = nil
 			pendingBowlerChange = ""
+			continue
+		}
+
+		// Chase won (target reached on this ball).
+		if innings == 2 && m.TargetScore > 0 && m.CurrentScore >= m.TargetScore {
+			log.Printf("simulator[%s]: chase target %d reached (%d/%d)", w.matchID, m.TargetScore, m.CurrentScore, m.WicketsLost)
+			if !w.completeMatch(ctx) {
+				return
+			}
+			lastMatch = nil
+			pendingBowlerChange = ""
+			continue
+		}
+
+		// Innings 1: 20 overs done — move to innings 2 (CSV flag or ballsLeft).
+		if innings == 1 && (row.EndInnings || m.BallsLeft <= 0) {
+			if w.dataset.HasInnings2 && len(w.dataset.Events[2]) > 0 {
+				log.Printf("simulator[%s]: innings 1 complete — transitioning to innings 2", w.matchID)
+				if err := w.transitionToInnings2(ctx); err != nil {
+					log.Printf("simulator[%s]: innings transition: %v — stopping", w.matchID, err)
+					w.mu.Lock()
+					w.status = StatusStopped
+					w.mu.Unlock()
+					return
+				}
+				lastMatch = nil
+				pendingBowlerChange = ""
+				continue
+			}
+			log.Printf("simulator[%s]: innings 1 overs complete — no innings 2 data", w.matchID)
+			if !w.completeMatch(ctx) {
+				return
+			}
+			lastMatch = nil
+			pendingBowlerChange = ""
+			continue
+		}
+
+		// Innings 2: 20 overs done without reaching target.
+		if innings == 2 && m.BallsLeft <= 0 {
+			log.Printf("simulator[%s]: innings 2 overs complete", w.matchID)
+			if !w.completeMatch(ctx) {
+				return
+			}
+			lastMatch = nil
+			pendingBowlerChange = ""
+			continue
 		}
 	}
+}
+
+func (w *Worker) completeMatch(ctx context.Context) bool {
+	if _, err := w.svc.CompleteMatch(ctx, w.matchID); err != nil {
+		log.Printf("simulator[%s]: CompleteMatch: %v", w.matchID, err)
+	}
+
+	if !w.loopOnComplete || w.onRestart == nil {
+		w.mu.Lock()
+		w.status = StatusCompleted
+		w.mu.Unlock()
+		return false
+	}
+
+	log.Printf("simulator[%s]: match complete — auto-restarting from 0/0", w.matchID)
+	if err := w.onRestart(ctx); err != nil {
+		log.Printf("simulator[%s]: auto-restart failed: %v", w.matchID, err)
+		w.mu.Lock()
+		w.status = StatusCompleted
+		w.mu.Unlock()
+		return false
+	}
+
+	w.mu.Lock()
+	w.innings = 1
+	w.cursor = 0
+	w.score = 0
+	w.wickets = 0
+	w.oversText = "0.0"
+	w.targetScore = 0
+	w.status = StatusRunning
+	w.mu.Unlock()
+	return true
+}
+
+// handleTerminalBall reacts to innings-over / match-not-live errors.
+// Returns true if the replay loop should continue (innings 1 → 2 transition).
+func (w *Worker) handleTerminalBall(ctx context.Context, innings int, err error) bool {
+	if matches.IsInningsOver(err) && innings == 1 && w.dataset.HasInnings2 && len(w.dataset.Events[2]) > 0 {
+		log.Printf("simulator[%s]: innings 1 overs complete — transitioning to innings 2", w.matchID)
+		if tErr := w.transitionToInnings2(ctx); tErr != nil {
+			log.Printf("simulator[%s]: innings transition: %v — stopping", w.matchID, tErr)
+			w.mu.Lock()
+			w.status = StatusStopped
+			w.mu.Unlock()
+			return false
+		}
+		return true
+	}
+	log.Printf("simulator[%s]: stopping replay (%v)", w.matchID, err)
+	if !w.completeMatch(ctx) {
+		return false
+	}
+	return true
 }
 
 // transitionToInnings2 resets the match document for the second innings and
