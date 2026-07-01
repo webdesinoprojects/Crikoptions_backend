@@ -9,12 +9,14 @@ import (
 const (
 	CurrencyPaperINR = "PAPER_INR"
 
-	LedgerAdminCredit  = "ADMIN_CREDIT"
-	LedgerAdminDebit   = "ADMIN_DEBIT"
-	LedgerOrderReserve = "ORDER_RESERVE"
-	LedgerOrderRelease = "ORDER_RELEASE"
-	LedgerTradeDebit   = "TRADE_DEBIT"
-	LedgerTradeCredit  = "TRADE_CREDIT"
+	LedgerAdminCredit   = "ADMIN_CREDIT"
+	LedgerAdminDebit    = "ADMIN_DEBIT"
+	LedgerOrderReserve  = "ORDER_RESERVE"
+	LedgerOrderRelease  = "ORDER_RELEASE"
+	LedgerTradeDebit    = "TRADE_DEBIT"
+	LedgerTradeCredit   = "TRADE_CREDIT"
+	LedgerWelcomeBonus  = "WELCOME_BONUS"
+	LedgerUserTopUp     = "USER_TOPUP"
 
 	AccountActive = "ACTIVE"
 )

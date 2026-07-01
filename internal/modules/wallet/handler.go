@@ -88,6 +88,41 @@ func (h *Handler) AdminDebit(w http.ResponseWriter, r *http.Request) {
 	h.handleFunding(w, r, h.service.AdminDebit, "Wallet debited successfully")
 }
 
+type topUpRequest struct {
+	Amount float64 `json:"amount"`
+}
+
+func (h *Handler) UserTopUp(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r)
+	if !ok {
+		writeUnauthorized(w)
+		return
+	}
+
+	var req topUpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeBadRequest(w, "Invalid request body")
+		return
+	}
+
+	result, err := h.service.UserTopUp(r.Context(), userID, req.Amount)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrTopUpAmountInvalid):
+			writeBadRequest(w, "Amount must be between ₹1 and ₹99,999")
+		default:
+			writeServerError(w, "Failed to add funds")
+		}
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Funds added successfully",
+		"data":    result,
+	})
+}
+
 func (h *Handler) AdminListLedger(w http.ResponseWriter, r *http.Request) {
 	userID := primitive.ObjectID{}
 	if raw := r.URL.Query().Get("userId"); raw != "" {

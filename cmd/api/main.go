@@ -87,6 +87,11 @@ func main() {
 	walletService := wallet.NewService(walletRepo)
 	walletHandler := wallet.NewHandler(walletService)
 
+	// Wire the welcome bonus creditor into the auth handler now that
+	// both services are constructed (avoids import cycle auth→wallet).
+	authHandler.SetWelcomeCreditor(walletService)
+
+
 	// Positions (derived from executions + markets). Created before orders so
 	// the order service can resolve/broadcast position state on exits.
 	positionsRepo := positions.NewMongoProjectionRepository(mongo.DB)

@@ -6,15 +6,30 @@ import (
 	"encoding/hex"
 	"net/http"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/httpjson"
 )
 
 type Handler struct {
-	service *Service
+	service        *Service
+	welcomeCreditor WelcomeCreditor
+}
+
+// WelcomeCreditor is implemented by the wallet service and called right after
+// a new user is created to credit the signup bonus.
+type WelcomeCreditor interface {
+	ApplyWelcomeCredit(ctx context.Context, userID primitive.ObjectID) error
 }
 
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
+}
+
+// SetWelcomeCreditor wires in the wallet service after construction (avoids
+// import cycles between auth and wallet packages).
+func (h *Handler) SetWelcomeCreditor(wc WelcomeCreditor) {
+	h.welcomeCreditor = wc
 }
 
 func (h *Handler) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -80,12 +95,25 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Credit the ₹1,00,000 welcome bonus in a background goroutine so the
+	// registration response is never delayed by the wallet write.
+	if h.welcomeCreditor != nil {
+		userID := user.ID
+		go func(id primitive.ObjectID) {
+			if credErr := h.welcomeCreditor.ApplyWelcomeCredit(context.Background(), id); credErr != nil {
+				// Log only — do not fail registration if bonus credit fails.
+				_ = credErr
+			}
+		}(userID)
+	}
+
 	httpjson.Write(w, http.StatusCreated, map[string]any{
 		"success": true,
 		"message": "User registered successfully",
 		"data":    user,
 	})
 }
+
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
