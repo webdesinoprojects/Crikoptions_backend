@@ -22,6 +22,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/portfolio"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/simulator"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
@@ -54,6 +55,9 @@ func main() {
 	matchesRepo := matches.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
 	seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
+	if err := matchesRepo.EnsureDefaultMatches(context.Background()); err != nil {
+		log.Fatalf("MongoDB ensure default matches: %v", err)
+	}
 	matchEventsRepo := matches.NewMongoEventRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "match_events", matchEventsRepo.EnsureIndexes)
 	realtimeHub := realtime.NewHub()
@@ -122,7 +126,15 @@ func main() {
 		}
 		return id.Hex(), nil
 	})
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler)
+
+	// Simulator — replay ball events from CSV datasets automatically.
+	simCfg := simulator.LoadConfig()
+	simService := simulator.NewService(simCfg, matchesService)
+	simHandler := simulator.NewHandler(simService)
+	defer simService.Shutdown()
+	simService.AutoStartOnBoot(context.Background())
+
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
 
 	srv := &http.Server{

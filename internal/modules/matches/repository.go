@@ -21,6 +21,7 @@ type Repository interface {
 	UpdateScore(ctx context.Context, id primitive.ObjectID, score ScoreUpdate) (*Match, error)
 	DemoteOtherLiveMatches(ctx context.Context, keepID primitive.ObjectID) error
 	NormalizeLegacyStatuses(ctx context.Context) error
+	EnsureDefaultMatches(ctx context.Context) error
 	EnsureIndexes(ctx context.Context) error
 }
 
@@ -152,6 +153,38 @@ func (r *MemoryRepository) NormalizeLegacyStatuses(_ context.Context) error {
 	return nil
 }
 
+func (r *MemoryRepository) EnsureDefaultMatches(_ context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now().UTC()
+	for _, sample := range getSampleMatches() {
+		found := false
+		for i := range r.matches {
+			if r.matches[i].ID == sample.ID {
+				r.matches[i].TeamAName = sample.TeamAName
+				r.matches[i].TeamBName = sample.TeamBName
+				r.matches[i].TeamAID = sample.TeamAID
+				r.matches[i].TeamBID = sample.TeamBID
+				r.matches[i].TeamALogo = sample.TeamALogo
+				r.matches[i].TeamBLogo = sample.TeamBLogo
+				r.matches[i].UpdatedAt = now
+				found = true
+				break
+			}
+		}
+		if !found {
+			copy := sample
+			if copy.CreatedAt.IsZero() {
+				copy.CreatedAt = now
+			}
+			copy.UpdatedAt = now
+			r.matches = append(r.matches, copy)
+		}
+	}
+	return nil
+}
+
 func (r *MemoryRepository) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
@@ -201,6 +234,53 @@ func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return len(docs), nil
+}
+
+// EnsureDefaultMatches upserts the built-in CSK/MI, RCB/KKR, and DC/SRH matches so
+// hex ids …aa and …bb always exist even when the collection was seeded earlier.
+func (r *MongoRepository) EnsureDefaultMatches(ctx context.Context) error {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	now := time.Now().UTC()
+	for _, match := range getSampleMatches() {
+		if match.CreatedAt.IsZero() {
+			match.CreatedAt = now
+		}
+		match.UpdatedAt = now
+
+		filter := bson.M{"_id": match.ID}
+		update := bson.M{
+			"$setOnInsert": bson.M{
+				"_id":          match.ID,
+				"tournamentId": match.TournamentID,
+				"format":       match.Format,
+				"teamAId":      match.TeamAID,
+				"teamBId":      match.TeamBID,
+				"teamALogo":    match.TeamALogo,
+				"teamBLogo":    match.TeamBLogo,
+				"startTime":    match.StartTime,
+				"status":       match.Status,
+				"innings":      match.Innings,
+				"currentScore": match.CurrentScore,
+				"wicketsLost":  match.WicketsLost,
+				"ballsLeft":    match.BallsLeft,
+				"targetScore":  match.TargetScore,
+				"oversText":    match.OversText,
+				"liveContext":  match.LiveContext,
+				"createdAt":    match.CreatedAt,
+			},
+			"$set": bson.M{
+				"teamAName": match.TeamAName,
+				"teamBName": match.TeamBName,
+				"updatedAt": now,
+			},
+		}
+		if _, err := r.col.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *MongoRepository) GetAll(ctx context.Context) []Match {

@@ -60,6 +60,7 @@ type BallEventRequest struct {
 	Runs           int    `json:"runs"`
 	IsWicket       bool   `json:"isWicket"`
 	Extra          string `json:"extra,omitempty"`
+	WicketType     string `json:"wicketType,omitempty"`
 	BallNumber     int    `json:"ballNumber,omitempty"`
 	Description    string `json:"description,omitempty"`
 	NextBatterName string `json:"nextBatterName,omitempty"`
@@ -67,10 +68,13 @@ type BallEventRequest struct {
 
 // BallEventResponse is one item in GET /api/v1/matches/{id}/events.
 type BallEventResponse struct {
-	Innings  int     `json:"innings"`
-	Over     int     `json:"over"`
-	Ball     int     `json:"ball"`
-	Runs     int     `json:"runs"`
-	IsWicket bool    `json:"isWicket"`
-	Extra    *string `json:"extra"`
+	Innings     int     `json:"innings"`
+	Over        int     `json:"over"`
+	Ball        int     `json:"ball"`
+	Runs        int     `json:"runs"`
+	IsWicket    bool    `json:"isWicket"`
+	Extra       *string `json:"extra"`
+	StrikerName string  `json:"strikerName,omitempty"`
+	BowlerName  string  `json:"bowlerName,omitempty"`
+	Commentary  string  `json:"commentary,omitempty"`
 }

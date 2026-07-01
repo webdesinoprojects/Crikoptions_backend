@@ -20,16 +20,19 @@ const (
 // BallEvent is one persisted delivery for a match, used to reconstruct the
 // "This over" view for clients that join after balls were already bowled.
 type BallEvent struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty"`
-	MatchID   string             `bson:"matchId"`
-	Innings   int                `bson:"innings"`
-	Over      int                `bson:"over"`
-	Ball      int                `bson:"ball"`
-	LegalBall bool               `bson:"legalBall"`
-	Runs      int                `bson:"runs"`
-	IsWicket  bool               `bson:"isWicket"`
-	Extra     *string            `bson:"extra"`
-	CreatedAt time.Time          `bson:"createdAt"`
+	ID          primitive.ObjectID `bson:"_id,omitempty"`
+	MatchID     string             `bson:"matchId"`
+	Innings     int                `bson:"innings"`
+	Over        int                `bson:"over"`
+	Ball        int                `bson:"ball"`
+	LegalBall   bool               `bson:"legalBall"`
+	Runs        int                `bson:"runs"`
+	IsWicket    bool               `bson:"isWicket"`
+	Extra       *string            `bson:"extra"`
+	StrikerName string             `bson:"strikerName,omitempty"`
+	BowlerName  string             `bson:"bowlerName,omitempty"`
+	Commentary  string             `bson:"commentary,omitempty"`
+	CreatedAt   time.Time          `bson:"createdAt"`
 }
 
 // EventRepository persists and reads per-ball events. AppendEvent must preserve
@@ -37,7 +40,9 @@ type BallEvent struct {
 type EventRepository interface {
 	AppendEvent(ctx context.Context, event BallEvent) error
 	LegalBallCount(ctx context.Context, matchID string, innings int) (int, error)
+	EventCount(ctx context.Context, matchID string, innings int) (int, error)
 	RecentEvents(ctx context.Context, matchID string, innings, limit int) ([]BallEvent, error)
+	DeleteByMatchID(ctx context.Context, matchID string) error
 	EnsureIndexes(ctx context.Context) error
 }
 
@@ -103,6 +108,18 @@ func (r *MemoryEventRepository) LegalBallCount(_ context.Context, matchID string
 	return count, nil
 }
 
+func (r *MemoryEventRepository) EventCount(_ context.Context, matchID string, innings int) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	count := 0
+	for _, e := range r.events {
+		if e.MatchID == matchID && e.Innings == innings {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (r *MemoryEventRepository) RecentEvents(_ context.Context, matchID string, innings, limit int) ([]BallEvent, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -119,6 +136,19 @@ func (r *MemoryEventRepository) RecentEvents(_ context.Context, matchID string, 
 		desc[len(filtered)-1-i] = filtered[i]
 	}
 	return recentFromDescending(desc, limit), nil
+}
+
+func (r *MemoryEventRepository) DeleteByMatchID(_ context.Context, matchID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	keep := r.events[:0]
+	for _, e := range r.events {
+		if e.MatchID != matchID {
+			keep = append(keep, e)
+		}
+	}
+	r.events = keep
+	return nil
 }
 
 func (r *MemoryEventRepository) EnsureIndexes(_ context.Context) error { return nil }
@@ -162,6 +192,23 @@ func (r *MongoEventRepository) LegalBallCount(ctx context.Context, matchID strin
 		return 0, err
 	}
 	return int(count), nil
+}
+
+func (r *MongoEventRepository) EventCount(ctx context.Context, matchID string, innings int) (int, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+	count, err := r.col.CountDocuments(ctx, bson.M{"matchId": matchID, "innings": innings})
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
+}
+
+func (r *MongoEventRepository) DeleteByMatchID(ctx context.Context, matchID string) error {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+	_, err := r.col.DeleteMany(ctx, bson.M{"matchId": matchID})
+	return err
 }
 
 func (r *MongoEventRepository) RecentEvents(ctx context.Context, matchID string, innings, limit int) ([]BallEvent, error) {

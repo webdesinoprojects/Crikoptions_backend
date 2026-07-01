@@ -8,5 +8,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
 FROM gcr.io/distroless/static-debian12
 WORKDIR /
 COPY --from=build /out/api /api
+COPY --from=build /app/data/simulator /data/simulator
+ENV SIMULATOR_DATA_DIR=/data/simulator
 EXPOSE 8080
 ENTRYPOINT ["/api"]

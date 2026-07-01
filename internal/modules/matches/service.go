@@ -283,6 +283,14 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 		return nil, errNextBatterRequired
 	}
 
+	// Capture pre-delivery player names for event history (before rotate/wicket).
+	strikerName := ""
+	bowlerName := ""
+	if liveContext != nil {
+		strikerName = liveContext.Striker.Name
+		bowlerName = liveContext.Bowler.Name
+	}
+
 	if req.IsWicket {
 		wicketsLost++
 		if wicketsLost > 10 {
@@ -314,14 +322,17 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 	// update were to fail.
 	if s.events != nil {
 		_ = s.events.AppendEvent(ctx, BallEvent{
-			MatchID:   matchID,
-			Innings:   innings,
-			Over:      over,
-			Ball:      ball,
-			LegalBall: legalBall,
-			Runs:      req.Runs,
-			IsWicket:  req.IsWicket,
-			Extra:     extra,
+			MatchID:     matchID,
+			Innings:     innings,
+			Over:        over,
+			Ball:        ball,
+			LegalBall:   legalBall,
+			Runs:        req.Runs,
+			IsWicket:    req.IsWicket,
+			Extra:       extra,
+			StrikerName: strikerName,
+			BowlerName:  bowlerName,
+			Commentary:  req.Description,
 		})
 	}
 
@@ -356,15 +367,43 @@ func (s *Service) GetRecentEvents(ctx context.Context, id string, limit int) ([]
 	out := make([]BallEventResponse, 0, len(events))
 	for _, e := range events {
 		out = append(out, BallEventResponse{
-			Innings:  e.Innings,
-			Over:     e.Over,
-			Ball:     e.Ball,
-			Runs:     e.Runs,
-			IsWicket: e.IsWicket,
-			Extra:    e.Extra,
+			Innings:     e.Innings,
+			Over:        e.Over,
+			Ball:        e.Ball,
+			Runs:        e.Runs,
+			IsWicket:    e.IsWicket,
+			Extra:       e.Extra,
+			StrikerName: e.StrikerName,
+			BowlerName:  e.BowlerName,
+			Commentary:  e.Commentary,
 		})
 	}
 	return out, nil
+}
+
+// ClearMatchEvents deletes all persisted ball events for the given match.
+// Used by the simulator on start/reset to ensure a clean slate.
+func (s *Service) ClearMatchEvents(ctx context.Context, matchID string) error {
+	if s.events == nil {
+		return nil
+	}
+	objID, err := resolveMatchID(ctx, s.repo, matchID)
+	if err != nil {
+		return err
+	}
+	return s.events.DeleteByMatchID(ctx, objID.Hex())
+}
+
+// BallEventCount returns how many deliveries were persisted for a match innings.
+func (s *Service) BallEventCount(ctx context.Context, matchID string, innings int) (int, error) {
+	if s.events == nil {
+		return 0, nil
+	}
+	objID, err := resolveMatchID(ctx, s.repo, matchID)
+	if err != nil {
+		return 0, err
+	}
+	return s.events.EventCount(ctx, objID.Hex(), innings)
 }
 
 func (s *Service) publishScore(match *Match) {
@@ -466,9 +505,10 @@ func (s *Service) publishCommentary(matchID string, req BallEventRequest, extra 
 		return
 	}
 	data := map[string]any{
-		"runs":     req.Runs,
-		"isWicket": req.IsWicket,
-		"extra":    extra,
+		"runs":       req.Runs,
+		"isWicket":   req.IsWicket,
+		"wicketType": req.WicketType,
+		"extra":      extra,
 	}
 	if req.BallNumber > 0 {
 		data["ballNumber"] = req.BallNumber
