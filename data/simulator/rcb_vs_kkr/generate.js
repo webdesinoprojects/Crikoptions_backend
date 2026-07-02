@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 
 const MATCH_ID = "0000000000000000000000bb";
-const DELAY_SEC = 7;
+const DELAY_SEC = 15;
 const TOTAL_LEGAL_BALLS = 120;
 
 const TEAM_A = "RCB";

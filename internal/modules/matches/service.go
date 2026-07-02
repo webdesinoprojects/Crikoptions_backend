@@ -336,27 +336,30 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 		return match, err
 	}
 
-	// Persist the ball AFTER mutating aggregate state so the critical match state
-	// update succeeds first. This prevents dangling history events if the score
-	// update were to fail.
-	if s.events != nil {
-		_ = s.events.AppendEvent(ctx, BallEvent{
-			MatchID:     matchID,
-			Innings:     innings,
-			Over:        over,
-			Ball:        ball,
-			LegalBall:   legalBall,
-			Runs:        req.Runs,
-			IsWicket:    req.IsWicket,
-			Extra:       extra,
-			StrikerName: strikerName,
-			BowlerName:  bowlerName,
-			Commentary:  req.Description,
-		})
+	event := BallEvent{
+		MatchID:     matchID,
+		Innings:     innings,
+		Over:        over,
+		Ball:        ball,
+		LegalBall:   legalBall,
+		Runs:        req.Runs,
+		IsWicket:    req.IsWicket,
+		Extra:       extra,
+		StrikerName: strikerName,
+		BowlerName:  bowlerName,
+		Commentary:  req.Description,
 	}
 
-	s.publishCommentary(match.ID.Hex(), req, extra)
+	// Persist the ball AFTER mutating aggregate state so the critical match state
+	// update succeeds first. This prevents dangling history events if the score
+	// update were to fail, while still making history available before realtime
+	// clients receive the matching score frame.
+	if s.events != nil {
+		_ = s.events.AppendEvent(ctx, event)
+	}
+
 	s.publishScore(match)
+	s.publishCommentary(match.ID.Hex(), event, req, extra, match)
 	return match, nil
 }
 
@@ -423,6 +426,18 @@ func (s *Service) BallEventCount(ctx context.Context, matchID string, innings in
 		return 0, err
 	}
 	return s.events.EventCount(ctx, objID.Hex(), innings)
+}
+
+// LegalBallCount returns how many legal deliveries were persisted for a match innings.
+func (s *Service) LegalBallCount(ctx context.Context, matchID string, innings int) (int, error) {
+	if s.events == nil {
+		return 0, nil
+	}
+	objID, err := resolveMatchID(ctx, s.repo, matchID)
+	if err != nil {
+		return 0, err
+	}
+	return s.events.LegalBallCount(ctx, objID.Hex(), innings)
 }
 
 func (s *Service) publishScore(match *Match) {
@@ -519,15 +534,25 @@ func applyDeliveryToLiveContext(
 	}
 }
 
-func (s *Service) publishCommentary(matchID string, req BallEventRequest, extra *string) {
+func (s *Service) publishCommentary(matchID string, event BallEvent, req BallEventRequest, extra *string, match *Match) {
 	if s.publisher == nil {
 		return
 	}
 	data := map[string]any{
-		"runs":       req.Runs,
-		"isWicket":   req.IsWicket,
-		"wicketType": req.WicketType,
-		"extra":      extra,
+		"matchId":      matchID,
+		"innings":      event.Innings,
+		"over":         event.Over,
+		"ball":         event.Ball,
+		"legalBall":    event.LegalBall,
+		"runs":         req.Runs,
+		"isWicket":     req.IsWicket,
+		"wicketType":   req.WicketType,
+		"extra":        extra,
+		"currentScore": match.CurrentScore,
+		"wicketsLost":  match.WicketsLost,
+		"ballsLeft":    match.BallsLeft,
+		"targetScore":  match.TargetScore,
+		"oversText":    match.OversText,
 	}
 	if req.BallNumber > 0 {
 		data["ballNumber"] = req.BallNumber

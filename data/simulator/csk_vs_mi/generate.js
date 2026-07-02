@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 
 const MATCH_ID = "0000000000000000000000aa";
-const DELAY_SEC = 7;
+const DELAY_SEC = 15;
 const TOTAL_LEGAL_BALLS = 120;
 
 // ── Innings 1: CSK bat, MI bowl ─────────────────────────────────────────────

@@ -61,11 +61,11 @@ type BallRow struct {
 
 // CSVDataset is the fully loaded script for one match.
 type CSVDataset struct {
-	MatchID    string
-	Innings1   InningsConfig
-	Innings2   InningsConfig
+	MatchID     string
+	Innings1    InningsConfig
+	Innings2    InningsConfig
 	HasInnings2 bool
-	Events     map[int][]BallRow // keyed by innings number (1 or 2)
+	Events      map[int][]BallRow // keyed by innings number (1 or 2)
 }
 
 // LoadDataset loads matches_config.csv and ball_events CSV(s) from dataDir/scriptName/.
@@ -232,7 +232,7 @@ func readBallCSV(path string) ([]BallRow, error) {
 		}
 		delay := intField(rec, idx, "delay_sec")
 		if delay <= 0 {
-			delay = 7
+			delay = 15
 		}
 		out = append(out, BallRow{
 			MatchID:        field(rec, idx, "match_id"),

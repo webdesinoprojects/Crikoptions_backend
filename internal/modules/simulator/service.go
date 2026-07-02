@@ -17,6 +17,7 @@ import (
 type MatchService interface {
 	GetMatchByID(ctx context.Context, matchID string) (*matches.Match, error)
 	BallEventCount(ctx context.Context, matchID string, innings int) (int, error)
+	LegalBallCount(ctx context.Context, matchID string, innings int) (int, error)
 	RecordBall(ctx context.Context, matchID string, req matches.BallEventRequest) (*matches.Match, error)
 	UpdateMatchScore(ctx context.Context, id string, req matches.UpdateScoreRequest) (*matches.Match, error)
 	UpdateLiveContext(ctx context.Context, id string, req matches.UpdateLiveContextRequest) (*matches.Match, error)
@@ -53,7 +54,7 @@ func LoadConfig() Config {
 	if dir == "" {
 		dir = "./data/simulator"
 	}
-	interval := 7
+	interval := 15
 	if v := strings.TrimSpace(os.Getenv("SIMULATOR_DEFAULT_INTERVAL_SEC")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			interval = n

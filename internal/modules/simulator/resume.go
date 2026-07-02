@@ -19,7 +19,7 @@ type resumePlan struct {
 
 // deriveResumePlan decides whether to fresh-start, resume, or skip based on the
 // persisted match document and ball-event counts.
-func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, autoLoop bool) resumePlan {
+func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, legalCounts map[int]int, autoLoop bool) resumePlan {
 	if match == nil {
 		return resumePlan{freshStart: true}
 	}
@@ -52,6 +52,13 @@ func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, 
 	innings := match.Innings
 	if innings < 1 {
 		innings = 1
+	}
+	expectedLegal := 120 - match.BallsLeft
+	if expectedLegal < 0 {
+		expectedLegal = 0
+	}
+	if legalCounts[innings] != expectedLegal {
+		return resumePlan{freshStart: true}
 	}
 	cursor := counts[innings]
 
@@ -143,7 +150,11 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 		1: s.eventCount(ctx, matchID, 1),
 		2: s.eventCount(ctx, matchID, 2),
 	}
-	plan := deriveResumePlan(match, ds, counts, s.cfg.AutoLoop)
+	legalCounts := map[int]int{
+		1: s.legalBallCount(ctx, matchID, 1),
+		2: s.legalBallCount(ctx, matchID, 2),
+	}
+	plan := deriveResumePlan(match, ds, counts, legalCounts, s.cfg.AutoLoop)
 
 	if plan.skip {
 		log.Printf("simulator[%s]: not starting (%s)", matchID, plan.skipReason)
@@ -219,6 +230,15 @@ func (s *Service) eventCount(ctx context.Context, matchID string, innings int) i
 	n, err := s.svc.BallEventCount(ctx, matchID, innings)
 	if err != nil {
 		log.Printf("simulator[%s]: BallEventCount innings=%d: %v", matchID, innings, err)
+		return 0
+	}
+	return n
+}
+
+func (s *Service) legalBallCount(ctx context.Context, matchID string, innings int) int {
+	n, err := s.svc.LegalBallCount(ctx, matchID, innings)
+	if err != nil {
+		log.Printf("simulator[%s]: LegalBallCount innings=%d: %v", matchID, innings, err)
 		return 0
 	}
 	return n
