@@ -18,29 +18,21 @@ type resumePlan struct {
 }
 
 // deriveResumePlan decides whether to fresh-start, resume, or skip based on the
-// persisted match document and ball-event counts.
-func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, legalCounts map[int]int, autoLoop bool) resumePlan {
+// persisted match document and ball-event counts. Server boot never resets a
+// match that already has deliveries — only an empty history starts at 0/0.
+func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, legalCounts map[int]int) resumePlan {
 	if match == nil {
 		return resumePlan{freshStart: true}
 	}
 
 	status := matches.NormalizeStatus(match.Status)
 	if status == matches.StatusCompleted {
-		if autoLoop {
-			return resumePlan{freshStart: true}
-		}
 		return resumePlan{skip: true, skipReason: "match already completed"}
 	}
 	if match.Innings == 2 && match.TargetScore > 0 && match.CurrentScore >= match.TargetScore {
-		if autoLoop {
-			return resumePlan{freshStart: true}
-		}
 		return resumePlan{skip: true, skipReason: "chase target already reached"}
 	}
 	if match.Innings == 2 && match.BallsLeft <= 0 && counts[2] > 0 {
-		if autoLoop {
-			return resumePlan{freshStart: true}
-		}
 		return resumePlan{skip: true, skipReason: "innings 2 overs complete"}
 	}
 
@@ -58,7 +50,8 @@ func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, 
 		expectedLegal = 0
 	}
 	if legalCounts[innings] != expectedLegal {
-		return resumePlan{freshStart: true}
+		log.Printf("simulator resume: legal ball drift innings=%d stored=%d expected=%d — using event cursor",
+			innings, legalCounts[innings], expectedLegal)
 	}
 	cursor := counts[innings]
 
@@ -75,9 +68,6 @@ func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, 
 		return resumePlan{skip: true, skipReason: "no CSV events for current innings"}
 	}
 	if cursor >= len(events) {
-		if autoLoop {
-			return resumePlan{freshStart: true}
-		}
 		return resumePlan{skip: true, skipReason: "all CSV events already applied"}
 	}
 
@@ -154,7 +144,7 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 		1: s.legalBallCount(ctx, matchID, 1),
 		2: s.legalBallCount(ctx, matchID, 2),
 	}
-	plan := deriveResumePlan(match, ds, counts, legalCounts, s.cfg.AutoLoop)
+	plan := deriveResumePlan(match, ds, counts, legalCounts)
 
 	if plan.skip {
 		log.Printf("simulator[%s]: not starting (%s)", matchID, plan.skipReason)
@@ -182,6 +172,11 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 
 	// Sync innings-2 document if we crashed between innings.
 	if plan.innings == 2 && match.Innings == 1 && len(ds.Events[1]) > 0 && counts[1] >= len(ds.Events[1]) {
+		if s.squareOff != nil {
+			if err := s.squareOff.SquareOffInnings1(ctx, matchID); err != nil {
+				log.Printf("simulator[%s]: square-off innings 1 on resume: %v", matchID, err)
+			}
+		}
 		if err := beginInnings2(ctx, s.svc, matchID, ds, match.CurrentScore); err != nil {
 			log.Printf("simulator[%s]: begin innings 2 on resume: %v", matchID, err)
 		} else if refreshed, rErr := s.svc.GetMatchByID(ctx, matchID); rErr == nil && refreshed != nil {
@@ -204,13 +199,7 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 		}
 	}
 
-	intervalSec := req.IntervalSec
-	if intervalSec <= 0 {
-		intervalSec = ds.Innings1.ReplayIntervalSec
-	}
-	if intervalSec <= 0 {
-		intervalSec = s.cfg.DefaultIntervalSec
-	}
+	intervalSec := s.resolveIntervalSec(req.IntervalSec, ds.Innings1.ReplayIntervalSec)
 
 	w := newWorkerResumed(
 		matchID, ds, s.svc, intervalSec,

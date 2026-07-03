@@ -14,6 +14,7 @@ import (
 
 type stubMarketSvc struct {
 	market     *markets.Market
+	markets    []markets.Market
 	bid        float64
 	ask        float64
 	ok         bool
@@ -22,6 +23,24 @@ type stubMarketSvc struct {
 }
 
 func (s *stubMarketSvc) GetMarketByID(_ context.Context, _ string) (*markets.Market, error) {
+	return s.market, nil
+}
+
+func (s *stubMarketSvc) GetMarketsByMatchID(_ context.Context, _ string) []markets.Market {
+	if len(s.markets) > 0 {
+		return s.markets
+	}
+	if s.market != nil {
+		return []markets.Market{*s.market}
+	}
+	return nil
+}
+
+func (s *stubMarketSvc) SetMarketStatus(_ context.Context, id, status string) (*markets.Market, error) {
+	if s.market != nil && s.market.ID.Hex() == id {
+		s.market.Status = status
+		return s.market, nil
+	}
 	return s.market, nil
 }
 
@@ -61,6 +80,10 @@ func (c *capturePositionWriter) ResolveCloseTarget(context.Context, primitive.Ob
 }
 
 func (c *capturePositionWriter) OpenCloseTargets(context.Context, primitive.ObjectID) ([]PositionSnapshot, error) {
+	return nil, nil
+}
+
+func (c *capturePositionWriter) ListOpenByMatch(context.Context, string) ([]PositionSnapshot, error) {
 	return nil, nil
 }
 

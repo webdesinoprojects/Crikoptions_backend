@@ -39,6 +39,8 @@ type MatchReader interface {
 
 type MarketReader interface {
 	GetMarketByID(ctx context.Context, id string) (*markets.Market, error)
+	GetMarketsByMatchID(ctx context.Context, matchID string) []markets.Market
+	SetMarketStatus(ctx context.Context, id, status string) (*markets.Market, error)
 	StrikeQuote(input markets.PriceCalculationInput, strike float64) (bid, ask float64, ok bool)
 	IsTradable(market *markets.Market) bool
 }
@@ -65,6 +67,7 @@ type EventPublisher interface {
 // PositionSnapshot is the post-fill view of a user's position for a strike,
 // used both for WebSocket broadcasts and the close endpoint.
 type PositionSnapshot struct {
+	UserID      primitive.ObjectID
 	ID          string
 	MatchID     string
 	MarketID    string
@@ -84,6 +87,7 @@ type PositionView interface {
 	PositionFor(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (PositionSnapshot, bool)
 	ResolveCloseTarget(ctx context.Context, userID primitive.ObjectID, positionID string) (PositionSnapshot, bool)
 	OpenCloseTargets(ctx context.Context, userID primitive.ObjectID) ([]PositionSnapshot, error)
+	ListOpenByMatch(ctx context.Context, matchID string) ([]PositionSnapshot, error)
 }
 
 type PositionProjectionWriter interface {

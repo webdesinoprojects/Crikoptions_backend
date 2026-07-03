@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -196,6 +197,26 @@ func (s *Service) OpenCloseTargets(ctx context.Context, userID primitive.ObjectI
 	return targets, nil
 }
 
+// ListOpenByMatch returns open positions for every user on a match. Implements
+// orders.PositionView for auto square-off at innings/match end.
+func (s *Service) ListOpenByMatch(ctx context.Context, matchID string) ([]orders.PositionSnapshot, error) {
+	filter := PositionFilter{Status: "open"}
+	if strings.TrimSpace(matchID) != "" {
+		filter.MatchID = matchID
+	}
+	all, err := s.ListAdminPositions(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]orders.PositionSnapshot, 0, len(all))
+	for _, p := range all {
+		if p.Lots > 0 {
+			out = append(out, toSnapshot(p))
+		}
+	}
+	return out, nil
+}
+
 func (s *Service) ApplyExecution(ctx context.Context, exec executions.Execution) error {
 	if s.projections == nil {
 		return nil
@@ -205,6 +226,7 @@ func (s *Service) ApplyExecution(ctx context.Context, exec executions.Execution)
 
 func toSnapshot(p Position) orders.PositionSnapshot {
 	return orders.PositionSnapshot{
+		UserID:      p.UserID,
 		ID:          p.ID,
 		MatchID:     p.MatchID,
 		MarketID:    p.MarketID,

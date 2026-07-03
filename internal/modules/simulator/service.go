@@ -75,6 +75,20 @@ func LoadConfig() Config {
 	return Config{DataDir: dir, DefaultIntervalSec: interval, Enabled: enabled, AutoStart: autoStart, AutoLoop: autoLoop}
 }
 
+// resolveIntervalSec picks seconds between deliveries: API request > .env > CSV config.
+func (s *Service) resolveIntervalSec(requestSec, csvReplaySec int) int {
+	if requestSec > 0 {
+		return requestSec
+	}
+	if s.cfg.DefaultIntervalSec > 0 {
+		return s.cfg.DefaultIntervalSec
+	}
+	if csvReplaySec > 0 {
+		return csvReplaySec
+	}
+	return 15
+}
+
 // SimStatus is returned by the status and control APIs.
 type SimStatus struct {
 	Status       WorkerStatus `json:"status"`
@@ -94,16 +108,28 @@ type StartRequest struct {
 	IntervalSec int    `json:"intervalSec"` // 0 → use CSV delay_sec
 }
 
+// SquareOffPort settles open positions when innings 1 ends and reopens markets on replay reset.
+type SquareOffPort interface {
+	SquareOffInnings1(ctx context.Context, matchID string) error
+	ReopenMatchMarkets(ctx context.Context, matchID string) error
+}
+
 // Service manages replay workers across all active matches.
 type Service struct {
-	cfg     Config
-	svc     MatchService
-	workers sync.Map // map[matchID string]*Worker
+	cfg       Config
+	svc       MatchService
+	squareOff SquareOffPort
+	workers   sync.Map // map[matchID string]*Worker
 }
 
 // NewService creates a new simulator service.
 func NewService(cfg Config, svc MatchService) *Service {
 	return &Service{cfg: cfg, svc: svc}
+}
+
+// SetSquareOff wires auto square-off when innings 1 ends.
+func (s *Service) SetSquareOff(port SquareOffPort) {
+	s.squareOff = port
 }
 
 // Start loads the CSV dataset, resets the match to a clean state, and launches
@@ -140,14 +166,8 @@ func (s *Service) Start(ctx context.Context, matchID string, req StartRequest) (
 		return nil, err
 	}
 
-	// Determine tick interval: request > CSV config > env default.
-	intervalSec := req.IntervalSec
-	if intervalSec <= 0 {
-		intervalSec = ds.Innings1.ReplayIntervalSec
-	}
-	if intervalSec <= 0 {
-		intervalSec = s.cfg.DefaultIntervalSec
-	}
+	// Determine tick interval: request > .env > CSV config.
+	intervalSec := s.resolveIntervalSec(req.IntervalSec, ds.Innings1.ReplayIntervalSec)
 
 	w := newWorker(matchID, ds, s.svc, intervalSec)
 	s.attachWorker(matchID, ds, w)
@@ -157,6 +177,11 @@ func (s *Service) Start(ctx context.Context, matchID string, req StartRequest) (
 
 // resetMatchForReplay clears ball history and sets the match to innings-1 0/0 live.
 func (s *Service) resetMatchForReplay(ctx context.Context, matchID string, ds *CSVDataset) error {
+	if s.squareOff != nil {
+		if err := s.squareOff.ReopenMatchMarkets(ctx, matchID); err != nil {
+			log.Printf("simulator[%s]: reopen markets: %v", matchID, err)
+		}
+	}
 	if err := s.svc.ClearMatchEvents(ctx, matchID); err != nil {
 		log.Printf("simulator[%s]: ClearMatchEvents: %v", matchID, err)
 	}
@@ -188,6 +213,7 @@ func (s *Service) attachWorker(matchID string, ds *CSVDataset, w *Worker) {
 	w.onRestart = func(ctx context.Context) error {
 		return s.resetMatchForReplay(ctx, matchID, ds)
 	}
+	w.squareOff = s.squareOff
 	s.workers.Store(matchID, w)
 	go w.Run()
 }

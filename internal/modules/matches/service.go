@@ -3,6 +3,7 @@ package matches
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
@@ -37,6 +38,12 @@ type EventPublisher interface {
 	Publish(topic string, data any)
 }
 
+// SettlementRunner force-closes open positions when an innings or match ends.
+type SettlementRunner interface {
+	SquareOffInnings1(ctx context.Context, matchID string) error
+	SquareOffMatch(ctx context.Context, matchID string) error
+}
+
 // normalizeExtra validates and canonicalizes the extra field. Returns the
 // stored value (nil for a legal delivery) and ok=false for an invalid value.
 func normalizeExtra(raw string) (*string, bool) {
@@ -64,13 +71,19 @@ var legacyMatchIDMap = map[string]string{
 }
 
 type Service struct {
-	repo      Repository
-	events    EventRepository
-	publisher EventPublisher
+	repo        Repository
+	events      EventRepository
+	publisher   EventPublisher
+	settlement  SettlementRunner
 }
 
 func NewService(repo Repository, events EventRepository, publisher EventPublisher) *Service {
 	return &Service{repo: repo, events: events, publisher: publisher}
+}
+
+// SetSettlement wires auto square-off when innings or the match ends.
+func (s *Service) SetSettlement(runner SettlementRunner) {
+	s.settlement = runner
 }
 
 func (s *Service) GetHomeMatches(ctx context.Context) []Match {
@@ -615,6 +628,12 @@ func (s *Service) CompleteMatch(ctx context.Context, id string) (*Match, error) 
 	status := NormalizeStatus(existing.Status)
 	if status != StatusLive && status != StatusInningsBreak {
 		return nil, errMatchNotLive
+	}
+
+	if s.settlement != nil {
+		if err := s.settlement.SquareOffMatch(ctx, id); err != nil {
+			return nil, fmt.Errorf("square off match positions: %w", err)
+		}
 	}
 
 	match, err := s.repo.UpdateScore(ctx, objID, ScoreUpdate{

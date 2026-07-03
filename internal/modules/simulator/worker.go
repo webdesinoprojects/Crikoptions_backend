@@ -61,6 +61,7 @@ type Worker struct {
 	// auto-loop: restart from 0/0 when the replay finishes
 	loopOnComplete bool
 	onRestart      func(context.Context) error
+	squareOff      SquareOffPort
 }
 
 func newWorker(matchID string, ds *CSVDataset, svc MatchService, intervalSec int) *Worker {
@@ -187,10 +188,7 @@ func (w *Worker) Run() {
 		}
 		row := events[cursor]
 
-		delay := time.Duration(row.DelaySec) * time.Second
-		if delay <= 0 {
-			delay = time.Duration(w.intervalSec) * time.Second
-		}
+		delay := w.deliveryDelay(row.DelaySec)
 
 		// Sleep for the row's delay, interruptible by stop.
 		if !w.sleep(delay) {
@@ -407,6 +405,12 @@ func (w *Worker) transitionToInnings2(ctx context.Context) error {
 	firstInningsScore := w.score
 	w.mu.Unlock()
 
+	if w.squareOff != nil {
+		if err := w.squareOff.SquareOffInnings1(ctx, w.matchID); err != nil {
+			log.Printf("simulator[%s]: square-off innings 1: %v", w.matchID, err)
+		}
+	}
+
 	if err := beginInnings2(ctx, w.svc, w.matchID, w.dataset, firstInningsScore); err != nil {
 		return fmt.Errorf("begin innings 2: %w", err)
 	}
@@ -427,6 +431,19 @@ func (w *Worker) transitionToInnings2(ctx context.Context) error {
 	w.mu.Unlock()
 
 	return nil
+}
+
+// deliveryDelay returns seconds to wait before the next ball. The worker's
+// intervalSec (from .env / API) overrides per-row CSV delay_sec when set.
+func (w *Worker) deliveryDelay(csvDelaySec int) time.Duration {
+	sec := w.intervalSec
+	if sec <= 0 && csvDelaySec > 0 {
+		sec = csvDelaySec
+	}
+	if sec <= 0 {
+		sec = 15
+	}
+	return time.Duration(sec) * time.Second
 }
 
 // sleep sleeps for d, returning false if the worker is stopped during the wait.

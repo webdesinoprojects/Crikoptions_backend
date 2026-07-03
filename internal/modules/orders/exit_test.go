@@ -66,6 +66,10 @@ func (p *execPositions) OpenCloseTargets(_ context.Context, _ primitive.ObjectID
 	return p.closeTargets, nil
 }
 
+func (p *execPositions) ListOpenByMatch(_ context.Context, _ string) ([]PositionSnapshot, error) {
+	return p.closeTargets, nil
+}
+
 type exitFixture struct {
 	svc       *Service
 	walletSvc *wallet.Service

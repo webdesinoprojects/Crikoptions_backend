@@ -105,6 +105,7 @@ func main() {
 
 	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService, positionsService, realtimeHub)
 	ordersHandler := orders.NewHandler(ordersService)
+	matchesService.SetSettlement(ordersService)
 
 	// Portfolio aggregates wallet, positions, markets, and matches server-side so
 	// dashboard/portfolio calculations are not duplicated in frontend clients.
@@ -130,6 +131,7 @@ func main() {
 	// Simulator — replay ball events from CSV datasets automatically.
 	simCfg := simulator.LoadConfig()
 	simService := simulator.NewService(simCfg, matchesService)
+	simService.SetSquareOff(ordersService)
 	simHandler := simulator.NewHandler(simService)
 	defer simService.Shutdown()
 	simService.AutoStartOnBoot(context.Background())
