@@ -13,50 +13,31 @@ import (
 // InningsConfig holds per-innings configuration from matches_config.csv.
 type InningsConfig struct {
 	MatchID           string
-	TeamA             string
-	TeamB             string
-	Format            string
 	Innings           int
 	ReplayIntervalSec int
 	StartStriker      string
 	StartNonStriker   string
 	StartBowler       string
-	BattingTeam       string
-	BowlingTeam       string
-	StatusOnStart     string
 	TargetScore       int
-	ScriptName        string
 }
 
 // BallRow holds one delivery row from a ball_events CSV.
 type BallRow struct {
-	MatchID        string
 	EventSeq       int
 	Innings        int
 	Runs           int
 	IsWicket       bool
 	Extra          string // "" | "wide" | "noball"
-	StrikerName    string
-	NonStrikerName string
-	BowlerName     string
 	NextBatterName string
 	WicketType     string
 	DelaySec       int
-	Over           int
-	BallInOver     int
-	IsLegalBall    bool
-	RunsOffBat     int
-	ExtraRuns      int
-	IsBoundary     bool
-	IsFour         bool
-	IsSix          bool
 	ScoreAfter     int
 	WicketsAfter   int
+	BallsLeftAfter int
 	Commentary     string
 	EndInnings     bool
 	EndMatch       bool
 	ChangeBowler   string // new bowler name for next over, if non-empty
-	SwapStrike     bool
 }
 
 // CSVDataset is the fully loaded script for one match.
@@ -132,73 +113,20 @@ func loadMatchesConfig(path string) ([]InningsConfig, error) {
 		}
 		out = append(out, InningsConfig{
 			MatchID:           field(rec, idx, "match_id"),
-			TeamA:             field(rec, idx, "team_a"),
-			TeamB:             field(rec, idx, "team_b"),
-			Format:            field(rec, idx, "format"),
 			Innings:           intField(rec, idx, "innings"),
 			ReplayIntervalSec: intField(rec, idx, "replay_interval_sec"),
 			StartStriker:      field(rec, idx, "start_striker"),
 			StartNonStriker:   field(rec, idx, "start_non_striker"),
 			StartBowler:       field(rec, idx, "start_bowler"),
-			BattingTeam:       field(rec, idx, "batting_team"),
-			BowlingTeam:       field(rec, idx, "bowling_team"),
-			StatusOnStart:     field(rec, idx, "status_on_start"),
 			TargetScore:       intField(rec, idx, "target_score"),
-			ScriptName:        field(rec, idx, "script_name"),
 		})
 	}
 	return out, nil
 }
 
-// loadBallEvents tries candidate filenames in preference order, supplementing
-// per-innings files when a combined file only covers one innings.
+// loadBallEvents loads the single full-match source-of-truth CSV for a script.
 func loadBallEvents(dir string) ([]BallRow, error) {
-	// Prefer a single file covering both innings.
-	for _, name := range []string{"ball_events_full_match.csv", "ball_events.csv"} {
-		rows, err := readBallCSV(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		has1, has2 := false, false
-		for _, r := range rows {
-			if r.Innings == 1 {
-				has1 = true
-			}
-			if r.Innings == 2 {
-				has2 = true
-			}
-		}
-		if has1 && has2 {
-			return rows, nil
-		}
-		// Partial file — fill in the missing innings from per-innings files.
-		var combined []BallRow
-		combined = append(combined, rows...)
-		if !has1 {
-			if r1, e := readBallCSV(filepath.Join(dir, "ball_events_innings1.csv")); e == nil {
-				combined = append(combined, r1...)
-			}
-		}
-		if !has2 {
-			if r2, e := readBallCSV(filepath.Join(dir, "ball_events_innings2.csv")); e == nil {
-				combined = append(combined, r2...)
-			}
-		}
-		if len(combined) > 0 {
-			return combined, nil
-		}
-	}
-
-	// Fall back: combine both per-innings files.
-	var all []BallRow
-	r1, e1 := readBallCSV(filepath.Join(dir, "ball_events_innings1.csv"))
-	r2, e2 := readBallCSV(filepath.Join(dir, "ball_events_innings2.csv"))
-	if e1 != nil && e2 != nil {
-		return nil, fmt.Errorf("no ball events CSV found in %s", dir)
-	}
-	all = append(all, r1...)
-	all = append(all, r2...)
-	return all, nil
+	return readBallCSV(filepath.Join(dir, "ball_events_full_match.csv"))
 }
 
 func readBallCSV(path string) ([]BallRow, error) {
@@ -216,8 +144,20 @@ func readBallCSV(path string) ([]BallRow, error) {
 		return nil, err
 	}
 	idx := colIndex(header)
+	required := []string{
+		"event_seq", "innings", "runs", "is_wicket", "extra",
+		"next_batter_name", "wicket_type", "delay_sec",
+		"score_after", "wickets_after", "commentary",
+		"end_innings", "end_match", "change_bowler",
+	}
+	for _, col := range required {
+		if _, ok := idx[col]; !ok {
+			return nil, fmt.Errorf("missing required column %q in %s", col, path)
+		}
+	}
 
 	var out []BallRow
+	legalByInnings := map[int]int{}
 	for {
 		rec, err := r.Read()
 		if err == io.EOF {
@@ -234,34 +174,26 @@ func readBallCSV(path string) ([]BallRow, error) {
 		if delay <= 0 {
 			delay = 15
 		}
+		extra := normalizeCSVExtra(field(rec, idx, "extra"))
+		if extra == "" {
+			legalByInnings[innings]++
+		}
 		out = append(out, BallRow{
-			MatchID:        field(rec, idx, "match_id"),
 			EventSeq:       intField(rec, idx, "event_seq"),
 			Innings:        innings,
 			Runs:           intField(rec, idx, "runs"),
 			IsWicket:       boolField(rec, idx, "is_wicket"),
-			Extra:          strings.ToLower(strings.TrimSpace(field(rec, idx, "extra"))),
-			StrikerName:    field(rec, idx, "striker_name"),
-			NonStrikerName: field(rec, idx, "non_striker_name"),
-			BowlerName:     field(rec, idx, "bowler_name"),
+			Extra:          extra,
 			NextBatterName: field(rec, idx, "next_batter_name"),
 			WicketType:     field(rec, idx, "wicket_type"),
 			DelaySec:       delay,
-			Over:           intField(rec, idx, "over"),
-			BallInOver:     intField(rec, idx, "ball_in_over"),
-			IsLegalBall:    boolField(rec, idx, "is_legal_ball"),
-			RunsOffBat:     intField(rec, idx, "runs_off_bat"),
-			ExtraRuns:      intField(rec, idx, "extra_runs"),
-			IsBoundary:     boolField(rec, idx, "is_boundary"),
-			IsFour:         boolField(rec, idx, "is_four"),
-			IsSix:          boolField(rec, idx, "is_six"),
 			ScoreAfter:     intField(rec, idx, "score_after"),
 			WicketsAfter:   intField(rec, idx, "wickets_after"),
+			BallsLeftAfter: max(0, 120-legalByInnings[innings]),
 			Commentary:     field(rec, idx, "commentary"),
 			EndInnings:     boolField(rec, idx, "end_innings"),
 			EndMatch:       boolField(rec, idx, "end_match"),
 			ChangeBowler:   field(rec, idx, "change_bowler"),
-			SwapStrike:     boolField(rec, idx, "swap_strike"),
 		})
 	}
 	return out, nil
@@ -293,4 +225,15 @@ func intField(rec []string, idx map[string]int, col string) int {
 func boolField(rec []string, idx map[string]int, col string) bool {
 	v := strings.ToLower(strings.TrimSpace(field(rec, idx, col)))
 	return v == "true" || v == "1" || v == "yes"
+}
+
+func normalizeCSVExtra(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "wide":
+		return "wide"
+	case "noball", "no_ball", "no-ball":
+		return "noball"
+	default:
+		return ""
+	}
 }

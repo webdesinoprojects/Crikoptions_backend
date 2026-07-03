@@ -7,11 +7,8 @@ Ball-by-ball CSV scripts for automatic match simulation (both innings, no admin 
 | File | Description |
 |------|-------------|
 | `matches_config.csv` | Setup for **both innings** (2 rows) |
-| `ball_events_innings1.csv` | CSK 1st innings — 20 overs |
-| `ball_events_innings2.csv` | MI chase — 2nd innings |
-| `ball_events_full_match.csv` | Combined file (innings 1 + 2, continuous `event_seq`) |
-| `ball_events.csv` | Alias for innings 1 (backward compatible) |
-| `generate.js` | Regenerate all CSVs |
+| `ball_events_full_match.csv` | Source-of-truth ball script for both innings |
+| `generate.js` | Regenerate the cleaned CSVs |
 
 ## Match result (generated)
 
@@ -21,23 +18,23 @@ Ball-by-ball CSV scripts for automatic match simulation (both innings, no admin 
 | **2** | MI | CSK | **206/5** (chase) | **MI win** |
 
 - **Target:** 206 (CSK 205 + 1)
-- **Replay interval:** 7 seconds per delivery
+- **Replay interval:** 15 seconds per delivery
 - **Match ID:** `0000000000000000000000aa`
 
-## Innings 2 extra columns
+## Ball event columns
 
-- `runs_needed_after` — runs still required after each ball
-- `target_score` — 206 for chase innings
-- `end_match` — `true` on the winning delivery
+- `event_seq`, `innings` — stable replay order and innings
+- `runs`, `is_wicket`, `extra`, `next_batter_name`, `wicket_type` — delivery input
+- `delay_sec` — per-row replay delay when no override is configured
+- `score_after`, `wickets_after` — authoritative aggregate score after the delivery
+- `commentary`, `end_innings`, `end_match`, `change_bowler` — live feed and transitions
 
 ## Backend replay flow
 
-1. Load innings 1 config row → replay `ball_events_innings1.csv`
-2. On `end_innings=true` → switch teams, set `target_score=206`
-3. Load innings 2 config row → replay `ball_events_innings2.csv`
-4. On `end_match=true` → mark match `completed`
-
-Or replay `ball_events_full_match.csv` in one pass (worker switches innings when `innings` column changes from 1 → 2).
+1. Load `matches_config.csv` for starting players, bowler, replay interval, and chase target.
+2. Replay `ball_events_full_match.csv`.
+3. After each recorded delivery, align aggregate score/wickets/balls-left to the CSV row.
+4. On `end_innings=true`, switch to innings 2. On `end_match=true`, complete the match.
 
 ## Regenerate
 

@@ -147,6 +147,12 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 	plan := deriveResumePlan(match, ds, counts, legalCounts)
 
 	if plan.skip {
+		innings, cursor := lastAppliedResumePosition(match, ds, counts)
+		if corrected, changed, rErr := reconcileMatchToLastCSVRow(ctx, s.svc, matchID, ds, match, innings, cursor); rErr != nil {
+			log.Printf("simulator[%s]: align skipped resume to CSV: %v", matchID, rErr)
+		} else if changed {
+			match = corrected
+		}
 		log.Printf("simulator[%s]: not starting (%s)", matchID, plan.skipReason)
 		return &SimStatus{
 			Status:       StatusCompleted,
@@ -172,6 +178,11 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 
 	// Sync innings-2 document if we crashed between innings.
 	if plan.innings == 2 && match.Innings == 1 && len(ds.Events[1]) > 0 && counts[1] >= len(ds.Events[1]) {
+		if corrected, changed, rErr := reconcileMatchToLastCSVRow(ctx, s.svc, matchID, ds, match, 1, counts[1]); rErr != nil {
+			log.Printf("simulator[%s]: align innings 1 to CSV before resume transition: %v", matchID, rErr)
+		} else if changed {
+			match = corrected
+		}
 		if s.squareOff != nil {
 			if err := s.squareOff.SquareOffInnings1(ctx, matchID); err != nil {
 				log.Printf("simulator[%s]: square-off innings 1 on resume: %v", matchID, err)
@@ -181,6 +192,14 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 			log.Printf("simulator[%s]: begin innings 2 on resume: %v", matchID, err)
 		} else if refreshed, rErr := s.svc.GetMatchByID(ctx, matchID); rErr == nil && refreshed != nil {
 			match = refreshed
+		}
+	}
+
+	if match.Innings == plan.innings {
+		if corrected, changed, rErr := reconcileMatchToLastCSVRow(ctx, s.svc, matchID, ds, match, plan.innings, plan.cursor); rErr != nil {
+			log.Printf("simulator[%s]: align resume to CSV: %v", matchID, rErr)
+		} else if changed {
+			match = corrected
 		}
 	}
 

@@ -248,7 +248,7 @@ func (w *Worker) Run() {
 			NextBatterName: row.NextBatterName,
 		}
 
-		m, err := w.svc.RecordBall(ctx, w.matchID, ballReq)
+		m, err := w.recordCSVBall(ctx, innings, row, ballReq)
 		if err != nil {
 			log.Printf("simulator[%s] innings=%d seq=%d: RecordBall: %v", w.matchID, innings, row.EventSeq, err)
 			if matches.TerminalBallError(err) {
@@ -338,6 +338,25 @@ func (w *Worker) Run() {
 			continue
 		}
 	}
+}
+
+func (w *Worker) recordCSVBall(ctx context.Context, innings int, row BallRow, ballReq matches.BallEventRequest) (*matches.Match, error) {
+	m, err := w.svc.RecordBall(ctx, w.matchID, ballReq)
+	if err != nil {
+		return nil, err
+	}
+
+	before := m
+	corrected, changed, err := reconcileMatchToCSVRow(ctx, w.svc, w.matchID, row, m)
+	if err != nil {
+		log.Printf("simulator[%s] innings=%d seq=%d: align CSV state: %v", w.matchID, innings, row.EventSeq, err)
+		return m, nil
+	}
+	if changed {
+		logCSVStateCorrection(w.matchID, innings, row, before, corrected)
+		m = corrected
+	}
+	return m, nil
 }
 
 func (w *Worker) completeMatch(ctx context.Context) bool {

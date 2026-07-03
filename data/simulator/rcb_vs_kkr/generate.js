@@ -210,7 +210,6 @@ function generateInnings({
     }
 
     const ballsAfter = legalBowled;
-    const oversAfter = oversText(ballsAfter);
     const ballsLeft = TOTAL_LEGAL_BALLS - ballsAfter;
     const runsNeeded = chaseMode ? Math.max(0, targetScore - score) : 0;
 
@@ -223,39 +222,22 @@ function generateInnings({
       ballsAfter >= TOTAL_LEGAL_BALLS || wickets >= 10 || chaseWon;
 
     events.push({
-      match_id: MATCH_ID,
       event_seq: eventSeq,
       innings,
       runs: totalRuns,
       is_wicket: isWicket,
       extra: extra ?? "",
-      striker_name: striker,
-      non_striker_name: nonStriker,
-      bowler_name: currentBowler,
       next_batter_name: nextBatter,
       wicket_type: isWicket ? wicketType : "",
       delay_sec: DELAY_SEC,
-      over: isLegal ? Math.floor((ballsAfter - 1) / 6) + 1 : Math.floor(legalBowled / 6) + 1,
-      ball_in_over: isLegal ? ((ballsAfter - 1) % 6) + 1 : legalInCurrentOver || 1,
-      is_legal_ball: isLegal,
-      runs_off_bat: isWicket ? 0 : runsOffBat,
-      extra_runs: extraRuns,
-      is_boundary: isFour || isSix,
-      is_four: isFour,
-      is_six: isSix,
       score_after: score,
       wickets_after: wickets,
-      balls_bowled_after: ballsAfter,
-      overs_text_after: oversAfter,
-      runs_needed_after: runsNeeded,
-      target_score: chaseMode ? targetScore : "",
       commentary: commentary(
         striker, currentBowler, runsOffBat, extra, isWicket, wicketType, isFour, isSix, chaseInfo
       ),
       end_innings: inningsDone,
       end_match: chaseMode && chaseWon,
       change_bowler: "",
-      swap_strike: false,
     });
 
     if (chaseWon) {
@@ -274,7 +256,6 @@ function generateInnings({
       bowlerIndex = (bowlerIndex + 1) % bowlers.length;
       currentBowler = bowlers[bowlerIndex];
       events[events.length - 1].change_bowler = currentBowler;
-      events[events.length - 1].swap_strike = true;
       legalInCurrentOver = 0;
     }
   }
@@ -287,12 +268,10 @@ function generateInnings({
 }
 
 const BALL_HEADERS = [
-  "match_id", "event_seq", "innings", "runs", "is_wicket", "extra",
-  "striker_name", "non_striker_name", "bowler_name", "next_batter_name", "wicket_type",
-  "delay_sec", "over", "ball_in_over", "is_legal_ball", "runs_off_bat", "extra_runs",
-  "is_boundary", "is_four", "is_six", "score_after", "wickets_after", "balls_bowled_after",
-  "overs_text_after", "runs_needed_after", "target_score", "commentary",
-  "end_innings", "end_match", "change_bowler", "swap_strike",
+  "event_seq", "innings", "runs", "is_wicket", "extra",
+  "next_batter_name", "wicket_type", "delay_sec",
+  "score_after", "wickets_after", "commentary",
+  "end_innings", "end_match", "change_bowler",
 ];
 
 function toCsvLines(events) {
@@ -330,25 +309,22 @@ function main() {
   ];
 
   const configHeaders = [
-    "match_id", "team_a", "team_b", "format", "innings", "replay_interval_sec",
-    "start_striker", "start_non_striker", "start_bowler", "batting_team", "bowling_team",
-    "status_on_start", "target_score", "script_name",
+    "match_id", "innings", "replay_interval_sec",
+    "start_striker", "start_non_striker", "start_bowler", "target_score",
   ];
 
   const configRows = [
     {
-      match_id: MATCH_ID, team_a: TEAM_A, team_b: TEAM_B, format: "T20", innings: 1,
+      match_id: MATCH_ID, innings: 1,
       replay_interval_sec: DELAY_SEC,
       start_striker: RCB_OPENERS.striker, start_non_striker: RCB_OPENERS.nonStriker,
-      start_bowler: KKR_BOWLERS[0], batting_team: TEAM_A, bowling_team: TEAM_B,
-      status_on_start: "live", target_score: 0, script_name: "rcb_vs_kkr_innings1_v1",
+      start_bowler: KKR_BOWLERS[0], target_score: 0,
     },
     {
-      match_id: MATCH_ID, team_a: TEAM_A, team_b: TEAM_B, format: "T20", innings: 2,
+      match_id: MATCH_ID, innings: 2,
       replay_interval_sec: DELAY_SEC,
       start_striker: KKR_OPENERS.striker, start_non_striker: KKR_OPENERS.nonStriker,
-      start_bowler: RCB_BOWLERS[0], batting_team: TEAM_B, bowling_team: TEAM_A,
-      status_on_start: "live", target_score: target, script_name: "rcb_vs_kkr_innings2_v1",
+      start_bowler: RCB_BOWLERS[0], target_score: target,
     },
   ];
 
@@ -358,15 +334,12 @@ function main() {
     [configHeaders.join(","), ...configRows.map((r) => configHeaders.map((h) => csvEscape(r[h])).join(","))].join("\n") + "\n",
     "utf8"
   );
-  fs.writeFileSync(path.join(dir, "ball_events_innings1.csv"), toCsvLines(inn1.events).join("\n") + "\n", "utf8");
-  fs.writeFileSync(path.join(dir, "ball_events_innings2.csv"), toCsvLines(inn2.events).join("\n") + "\n", "utf8");
-  fs.writeFileSync(path.join(dir, "ball_events.csv"), toCsvLines(inn1.events).join("\n") + "\n", "utf8");
   fs.writeFileSync(path.join(dir, "ball_events_full_match.csv"), toCsvLines(fullEvents).join("\n") + "\n", "utf8");
 
   console.log(`Innings 1 (${TEAM_A}): ${inn1.score}/${inn1.wickets} in ${oversText(inn1.legalBowled)} overs (${inn1.events.length} events)`);
   console.log(`Innings 2 (${TEAM_B} chase): ${inn2.score}/${inn2.wickets} — target ${target} (${inn2.events.length} events)`);
   console.log(`Match result: ${inn2.score >= target ? `${TEAM_B} won` : `${TEAM_A} defended`}`);
-  console.log("Written: matches_config.csv, ball_events_innings1.csv, ball_events_innings2.csv, ball_events_full_match.csv");
+  console.log("Written: matches_config.csv, ball_events_full_match.csv");
 }
 
 main();
