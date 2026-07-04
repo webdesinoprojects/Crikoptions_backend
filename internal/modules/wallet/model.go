@@ -9,14 +9,14 @@ import (
 const (
 	CurrencyPaperINR = "PAPER_INR"
 
-	LedgerAdminCredit   = "ADMIN_CREDIT"
-	LedgerAdminDebit    = "ADMIN_DEBIT"
-	LedgerOrderReserve  = "ORDER_RESERVE"
-	LedgerOrderRelease  = "ORDER_RELEASE"
-	LedgerTradeDebit    = "TRADE_DEBIT"
-	LedgerTradeCredit   = "TRADE_CREDIT"
-	LedgerWelcomeBonus  = "WELCOME_BONUS"
-	LedgerUserTopUp     = "USER_TOPUP"
+	LedgerAdminCredit  = "ADMIN_CREDIT"
+	LedgerAdminDebit   = "ADMIN_DEBIT"
+	LedgerOrderReserve = "ORDER_RESERVE"
+	LedgerOrderRelease = "ORDER_RELEASE"
+	LedgerTradeDebit   = "TRADE_DEBIT"
+	LedgerTradeCredit  = "TRADE_CREDIT"
+	LedgerWelcomeBonus = "WELCOME_BONUS"
+	LedgerUserTopUp    = "USER_TOPUP"
 
 	AccountActive = "ACTIVE"
 )
@@ -94,6 +94,17 @@ type BuyFillOp struct {
 
 // SellFillOp credits proceeds from a sell fill.
 type SellFillOp struct {
+	UserID        primitive.ObjectID
+	Proceeds      float64
+	ReferenceType string
+	ReferenceID   string
+	Description   string
+	CreatedBy     primitive.ObjectID
+}
+
+// ShortOpenFillOp credits short-sale proceeds while reserving those proceeds
+// as collateral so they are not reusable until the short is covered.
+type ShortOpenFillOp struct {
 	UserID        primitive.ObjectID
 	Proceeds      float64
 	ReferenceType string

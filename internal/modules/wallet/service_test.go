@@ -115,3 +115,42 @@ func TestFundingRejectsInvalidAmount(t *testing.T) {
 		}
 	}
 }
+
+func TestShortOpenFillCreditsCashAndReservesProceeds(t *testing.T) {
+	svc := NewService(NewMemoryRepository())
+	userID := primitive.NewObjectID()
+	adminID := primitive.NewObjectID()
+
+	if _, err := svc.AdminCredit(context.Background(), adminID, userID, FundingRequest{Amount: 1000}); err != nil {
+		t.Fatalf("AdminCredit: %v", err)
+	}
+	if _, err := svc.ReserveOrderMargin(context.Background(), userID, 100, "order-1", "short initial margin"); err != nil {
+		t.Fatalf("ReserveOrderMargin: %v", err)
+	}
+	if _, err := svc.SettleShortOpenFill(context.Background(), userID, 100, "order-1", "short sale proceeds"); err != nil {
+		t.Fatalf("SettleShortOpenFill: %v", err)
+	}
+
+	wallet, err := svc.GetWallet(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetWallet: %v", err)
+	}
+	if wallet.CashBalance != 1100 || wallet.ReservedBalance != 200 || wallet.AvailableBalance != 900 {
+		t.Fatalf("wallet after short = cash %.2f reserved %.2f available %.2f, want 1100/200/900", wallet.CashBalance, wallet.ReservedBalance, wallet.AvailableBalance)
+	}
+
+	if _, err := svc.SettleBuyFill(context.Background(), userID, 80, 0, "order-2", "short cover cost"); err != nil {
+		t.Fatalf("SettleBuyFill: %v", err)
+	}
+	if _, err := svc.ReleaseOrderMargin(context.Background(), userID, 200, "order-2", "release short collateral"); err != nil {
+		t.Fatalf("ReleaseOrderMargin: %v", err)
+	}
+
+	wallet, err = svc.GetWallet(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetWallet after cover: %v", err)
+	}
+	if wallet.CashBalance != 1020 || wallet.ReservedBalance != 0 || wallet.AvailableBalance != 1020 {
+		t.Fatalf("wallet after cover = cash %.2f reserved %.2f available %.2f, want 1020/0/1020", wallet.CashBalance, wallet.ReservedBalance, wallet.AvailableBalance)
+	}
+}

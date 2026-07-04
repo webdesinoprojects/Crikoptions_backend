@@ -125,3 +125,82 @@ func TestSummaryAggregatesPortfolioMetrics(t *testing.T) {
 		t.Fatalf("closed/winRate = %d/%.2f, want 1/100", len(summary.ClosedTrades), summary.WinRate)
 	}
 }
+
+func TestSummaryHandlesShortPositionsAndClosedShortTrades(t *testing.T) {
+	userID := primitive.NewObjectID()
+	marketID := primitive.NewObjectID().Hex()
+	now := time.Now()
+
+	svc := NewService(
+		stubPositions{
+			open: []positions.Position{{
+				ID:        "short-open",
+				UserID:    userID,
+				MatchID:   "match-1",
+				MarketID:  marketID,
+				Strike:    120,
+				Status:    "open",
+				Side:      "SELL",
+				Lots:      -10,
+				SellPrice: 50,
+				LTP:       45,
+				PnL:       50,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}},
+			closed: []positions.Position{{
+				ID:          "short-closed",
+				UserID:      userID,
+				MatchID:     "match-1",
+				MarketID:    marketID,
+				Strike:      110,
+				Status:      "closed",
+				Side:        "SELL",
+				BuyPrice:    40,
+				SellPrice:   50,
+				PnL:         100,
+				RealizedPnL: 100,
+				MatchedLots: 10,
+				CreatedAt:   now.Add(-time.Hour),
+				UpdatedAt:   now,
+			}},
+		},
+		stubWallet{account: &wallet.Account{
+			UserID:           userID,
+			CashBalance:      1000,
+			ReservedBalance:  100,
+			AvailableBalance: 900,
+		}},
+		stubMarkets{items: map[string]*markets.Market{
+			marketID: {Title: "RCB 120"},
+		}},
+		stubMatches{items: map[string]*matches.Match{
+			"match-1": {TeamAName: "RCB", TeamBName: "KKR"},
+		}},
+	)
+
+	summary, err := svc.GetSummary(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetSummary: %v", err)
+	}
+	if len(summary.Positions) != 1 {
+		t.Fatalf("positions = %d, want 1", len(summary.Positions))
+	}
+	open := summary.Positions[0]
+	if open.Side != "SELL" || open.Quantity != 10 || open.AverageEntryPrice != 50 || open.UnrealizedPnL != 50 {
+		t.Fatalf("open short = %+v, want SELL qty 10 entry 50 pnl 50", open)
+	}
+	if summary.TotalEquity != 550 {
+		t.Fatalf("totalEquity = %.2f, want 550", summary.TotalEquity)
+	}
+	if len(summary.ClosedTrades) != 1 {
+		t.Fatalf("closed trades = %d, want 1", len(summary.ClosedTrades))
+	}
+	closed := summary.ClosedTrades[0]
+	if closed.Side != "SELL" || closed.EntryPrice != 50 || closed.ExitPrice != 40 || closed.RealizedPnL != 100 {
+		t.Fatalf("closed short = %+v, want SELL entry 50 exit 40 pnl 100", closed)
+	}
+	if summary.TotalPnL != 150 {
+		t.Fatalf("totalPnL = %.2f, want 150", summary.TotalPnL)
+	}
+}

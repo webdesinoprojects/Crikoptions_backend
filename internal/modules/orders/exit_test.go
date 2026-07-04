@@ -50,12 +50,22 @@ type execPositions struct {
 }
 
 func (p *execPositions) PositionFor(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (PositionSnapshot, bool) {
-	lots := p.exec.OpenLongQty(ctx, userID, matchID, marketID, strike)
+	summary := p.exec.PositionSummary(ctx, userID, matchID, marketID, strike)
+	lots := summary.NetLots
 	status := "open"
 	if lots == 0 {
 		status = "closed"
 	}
-	return PositionSnapshot{MatchID: matchID, MarketID: marketID, Strike: strike, Lots: lots, LTP: p.ltp, Status: status}, true
+	return PositionSnapshot{
+		MatchID:   matchID,
+		MarketID:  marketID,
+		Strike:    strike,
+		Lots:      lots,
+		BuyPrice:  summary.AvgBuyPrice,
+		SellPrice: summary.AvgSellPrice,
+		LTP:       p.ltp,
+		Status:    status,
+	}, true
 }
 
 func (p *execPositions) ResolveCloseTarget(_ context.Context, _ primitive.ObjectID, _ string) (PositionSnapshot, bool) {
@@ -146,6 +156,10 @@ func (f *exitFixture) openQty(strike float64) int {
 	return f.execSvc.OpenLongQty(context.Background(), f.userID, "1", f.marketID.Hex(), strike)
 }
 
+func (f *exitFixture) netQty(strike float64) int {
+	return f.execSvc.PositionSummary(context.Background(), f.userID, "1", f.marketID.Hex(), strike).NetLots
+}
+
 func (f *exitFixture) balance(t *testing.T) float64 {
 	t.Helper()
 	acct, err := f.walletSvc.GetWallet(context.Background(), f.userID)
@@ -153,6 +167,15 @@ func (f *exitFixture) balance(t *testing.T) float64 {
 		t.Fatalf("wallet: %v", err)
 	}
 	return acct.AvailableBalance
+}
+
+func (f *exitFixture) account(t *testing.T) *wallet.Account {
+	t.Helper()
+	acct, err := f.walletSvc.GetWallet(context.Background(), f.userID)
+	if err != nil {
+		t.Fatalf("wallet: %v", err)
+	}
+	return acct
 }
 
 // 1. Full exit: long 10 @ 34.85, MARKET sell 10 @ bid 48.78.
@@ -272,13 +295,13 @@ func TestExit_WorkingLimitThenCancel(t *testing.T) {
 	}
 }
 
-// 4. Oversell: long 10, sell 15 -> 400 with exact message, no state change.
-func TestExit_OversellRejected(t *testing.T) {
+// 4. AUTO sell beyond long closes the long first, then opens a short.
+func TestShortSelling_SellBeyondLongFlipsShort(t *testing.T) {
 	f := newExitFixture(t, 100000)
 	f.buy(t, 130, 10)
 
 	f.market.bid = 48
-	_, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+	order, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
 		MatchID:  "1",
 		MarketID: f.marketID.Hex(),
 		Strike:   130,
@@ -286,24 +309,31 @@ func TestExit_OversellRejected(t *testing.T) {
 		Type:     OrderTypeMarket,
 		Quantity: 15,
 	})
-	apiErr, ok := err.(*APIError)
-	if !ok {
-		t.Fatalf("err = %v, want *APIError", err)
+	if err != nil {
+		t.Fatalf("sell: %v", err)
 	}
-	if apiErr.Status != 400 || apiErr.Message != "Cannot sell 15 lots; only 10 open" {
-		t.Fatalf("err = %d/%q, want 400/'Cannot sell 15 lots; only 10 open'", apiErr.Status, apiErr.Message)
+	if order.Status != StatusExecuted || order.FilledQuantity != 15 {
+		t.Fatalf("order status/filled = %q/%d, want executed/15", order.Status, order.FilledQuantity)
 	}
-	if got := f.openQty(130); got != 10 {
-		t.Fatalf("open lots = %d, want 10 (unchanged)", got)
+	if order.PositionIntent != "SELL_CLOSE_AND_OPEN_SHORT" {
+		t.Fatalf("position intent = %q, want SELL_CLOSE_AND_OPEN_SHORT", order.PositionIntent)
+	}
+	if got := f.netQty(130); got != -5 {
+		t.Fatalf("net lots = %d, want -5", got)
+	}
+	acct := f.account(t)
+	if acct.CashBalance != 100371.50 || acct.ReservedBalance != 480 || acct.AvailableBalance != 99891.50 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 100371.50/480/99891.50", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
 	}
 }
 
-// 5. No position: sell strike with no holding -> 400, no state change.
-func TestExit_NoPositionRejected(t *testing.T) {
+// 5. AUTO sell from flat opens a short and reserves short proceeds plus initial margin.
+func TestShortSelling_SellFromFlatOpensShort(t *testing.T) {
 	f := newExitFixture(t, 100000)
 
 	f.market.bid = 48
-	_, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+	f.market.ask = 49
+	order, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
 		MatchID:  "1",
 		MarketID: f.marketID.Hex(),
 		Strike:   140,
@@ -311,12 +341,29 @@ func TestExit_NoPositionRejected(t *testing.T) {
 		Type:     OrderTypeMarket,
 		Quantity: 5,
 	})
-	apiErr, ok := err.(*APIError)
-	if !ok {
-		t.Fatalf("err = %v, want *APIError", err)
+	if err != nil {
+		t.Fatalf("sell: %v", err)
 	}
-	if apiErr.Status != 400 || apiErr.Message != "No open position for strike 140" {
-		t.Fatalf("err = %d/%q, want 400/'No open position for strike 140'", apiErr.Status, apiErr.Message)
+	if order.Status != StatusExecuted || order.PositionIntent != "SELL_TO_OPEN_SHORT" {
+		t.Fatalf("order status/intent = %q/%q, want executed/SELL_TO_OPEN_SHORT", order.Status, order.PositionIntent)
+	}
+	if order.ReservedAmount != 240 || order.ReservedQuantity != 5 {
+		t.Fatalf("reserved = %.2f/%d, want 240/5", order.ReservedAmount, order.ReservedQuantity)
+	}
+	if got := f.netQty(140); got != -5 {
+		t.Fatalf("net lots = %d, want -5", got)
+	}
+	acct := f.account(t)
+	if acct.CashBalance != 100240 || acct.ReservedBalance != 480 || acct.AvailableBalance != 99760 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 100240/480/99760", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	}
+
+	msg, ok := f.pub.last("user:" + f.userID.Hex() + ":positions")
+	if !ok {
+		t.Fatal("no positions broadcast")
+	}
+	if msg["lots"].(int) != -5 || msg["sellPrice"].(float64) != 48 || msg["status"].(string) != "open" {
+		t.Fatalf("positions msg = %+v, want lots -5 / sellPrice 48 / open", msg)
 	}
 }
 
@@ -327,9 +374,230 @@ func TestExit_BuyFlowUnchanged(t *testing.T) {
 	if got := f.openQty(130); got != 10 {
 		t.Fatalf("open lots = %d, want 10", got)
 	}
-	// Buy must not emit sell broadcasts.
-	if _, ok := f.pub.last("user:" + f.userID.Hex() + ":orders"); ok {
-		t.Fatal("buy should not broadcast sell order updates")
+	msg, ok := f.pub.last("user:" + f.userID.Hex() + ":orders")
+	if !ok {
+		t.Fatal("buy should broadcast order updates")
+	}
+	if msg["side"].(string) != "BUY" || msg["positionIntent"].(string) != "BUY_TO_OPEN_LONG" {
+		t.Fatalf("order msg = %+v, want BUY/BUY_TO_OPEN_LONG", msg)
+	}
+}
+
+func TestShortSelling_BuyCoversShortAndReleasesCollateral(t *testing.T) {
+	f := newExitFixture(t, 100000)
+
+	f.market.bid = 48
+	f.market.ask = 49
+	_, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   140,
+		Side:     "sell",
+		Type:     OrderTypeMarket,
+		Quantity: 10,
+	})
+	if err != nil {
+		t.Fatalf("open short: %v", err)
+	}
+
+	f.market.bid = 39.5
+	f.market.ask = 40
+	partial, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   140,
+		Side:     "buy",
+		Type:     OrderTypeMarket,
+		Quantity: 4,
+	})
+	if err != nil {
+		t.Fatalf("partial cover: %v", err)
+	}
+	if partial.PositionIntent != "BUY_TO_COVER" || f.netQty(140) != -6 {
+		t.Fatalf("partial intent/net = %q/%d, want BUY_TO_COVER/-6", partial.PositionIntent, f.netQty(140))
+	}
+	acct := f.account(t)
+	if acct.CashBalance != 100320 || acct.ReservedBalance != 576 || acct.AvailableBalance != 99744 {
+		t.Fatalf("partial wallet = cash %.2f reserved %.2f available %.2f, want 100320/576/99744", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	}
+
+	full, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   140,
+		Side:     "buy",
+		Type:     OrderTypeMarket,
+		Quantity: 6,
+	})
+	if err != nil {
+		t.Fatalf("full cover: %v", err)
+	}
+	if full.PositionIntent != "BUY_TO_COVER" || f.netQty(140) != 0 {
+		t.Fatalf("full intent/net = %q/%d, want BUY_TO_COVER/0", full.PositionIntent, f.netQty(140))
+	}
+	acct = f.account(t)
+	if acct.CashBalance != 100080 || acct.ReservedBalance != 0 || acct.AvailableBalance != 100080 {
+		t.Fatalf("full wallet = cash %.2f reserved %.2f available %.2f, want 100080/0/100080", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	}
+}
+
+func TestShortSelling_BuyBeyondShortFlipsLong(t *testing.T) {
+	f := newExitFixture(t, 100000)
+
+	f.market.bid = 48
+	f.market.ask = 49
+	_, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   140,
+		Side:     "sell",
+		Type:     OrderTypeMarket,
+		Quantity: 5,
+	})
+	if err != nil {
+		t.Fatalf("open short: %v", err)
+	}
+
+	f.market.bid = 39.5
+	f.market.ask = 40
+	order, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   140,
+		Side:     "buy",
+		Type:     OrderTypeMarket,
+		Quantity: 8,
+	})
+	if err != nil {
+		t.Fatalf("flip long: %v", err)
+	}
+	if order.PositionIntent != "BUY_COVER_AND_OPEN_LONG" {
+		t.Fatalf("position intent = %q, want BUY_COVER_AND_OPEN_LONG", order.PositionIntent)
+	}
+	if got := f.netQty(140); got != 3 {
+		t.Fatalf("net lots = %d, want 3", got)
+	}
+	acct := f.account(t)
+	if acct.CashBalance != 99920 || acct.ReservedBalance != 0 || acct.AvailableBalance != 99920 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 99920/0/99920", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	}
+}
+
+func TestPositionEffectCloseRejectsOpeningOrFlipping(t *testing.T) {
+	f := newExitFixture(t, 100000)
+
+	f.market.bid = 48
+	_, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:        "1",
+		MarketID:       f.marketID.Hex(),
+		Strike:         140,
+		Side:           "sell",
+		Type:           OrderTypeMarket,
+		PositionEffect: PositionEffectClose,
+		Quantity:       5,
+	})
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.Message != "No open position for strike 140" {
+		t.Fatalf("flat close err = %v, want no open position APIError", err)
+	}
+
+	f.buy(t, 130, 10)
+	_, err = f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:        "1",
+		MarketID:       f.marketID.Hex(),
+		Strike:         130,
+		Side:           "sell",
+		Type:           OrderTypeMarket,
+		PositionEffect: PositionEffectClose,
+		Quantity:       15,
+	})
+	apiErr, ok = err.(*APIError)
+	if !ok || apiErr.Message != "Cannot close 15 lots; only 10 long" {
+		t.Fatalf("long over-close err = %v, want insufficient long APIError", err)
+	}
+
+	_, err = f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   150,
+		Side:     "sell",
+		Type:     OrderTypeMarket,
+		Quantity: 5,
+	})
+	if err != nil {
+		t.Fatalf("open short: %v", err)
+	}
+	f.market.ask = 49
+	_, err = f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:        "1",
+		MarketID:       f.marketID.Hex(),
+		Strike:         150,
+		Side:           "buy",
+		Type:           OrderTypeMarket,
+		PositionEffect: PositionEffectClose,
+		Quantity:       6,
+	})
+	apiErr, ok = err.(*APIError)
+	if !ok || apiErr.Message != "Cannot cover 6 lots; only 5 short" {
+		t.Fatalf("short over-cover err = %v, want insufficient short APIError", err)
+	}
+}
+
+func TestShortSelling_PendingShortLimitReservesAndCancelReleases(t *testing.T) {
+	f := newExitFixture(t, 100000)
+
+	f.market.bid = 48
+	f.market.ask = 49
+	order, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   140,
+		Side:     "sell",
+		Type:     OrderTypeLimit,
+		Quantity: 10,
+		Price:    60,
+	})
+	if err != nil {
+		t.Fatalf("open short limit: %v", err)
+	}
+	if order.Status != StatusOpen || order.ReservedAmount != 600 || order.ReservedQuantity != 10 {
+		t.Fatalf("order status/reserved = %q/%.2f/%d, want open/600/10", order.Status, order.ReservedAmount, order.ReservedQuantity)
+	}
+	acct := f.account(t)
+	if acct.ReservedBalance != 600 || acct.AvailableBalance != 99400 {
+		t.Fatalf("wallet after reserve = reserved %.2f available %.2f, want 600/99400", acct.ReservedBalance, acct.AvailableBalance)
+	}
+
+	cancelled, err := f.svc.CancelOrder(context.Background(), order.ID, f.userID)
+	if err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if cancelled == nil || cancelled.Status != StatusCancelled {
+		t.Fatalf("cancelled = %+v, want cancelled order", cancelled)
+	}
+	acct = f.account(t)
+	if acct.ReservedBalance != 0 || acct.AvailableBalance != 100000 {
+		t.Fatalf("wallet after cancel = reserved %.2f available %.2f, want 0/100000", acct.ReservedBalance, acct.AvailableBalance)
+	}
+}
+
+func TestShortSelling_InsufficientMarginRejected(t *testing.T) {
+	f := newExitFixture(t, 100)
+
+	f.market.bid = 50
+	_, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   140,
+		Side:     "sell",
+		Type:     OrderTypeMarket,
+		Quantity: 3,
+	})
+	if err != ErrInsufficientBalance {
+		t.Fatalf("err = %v, want ErrInsufficientBalance", err)
+	}
+	if got := f.netQty(140); got != 0 {
+		t.Fatalf("net lots = %d, want 0", got)
 	}
 }
 
@@ -359,29 +627,44 @@ func TestExit_CloseAllPositions(t *testing.T) {
 	f := newExitFixture(t, 100000)
 	f.buy(t, 130, 10)
 	f.buy(t, 140, 5)
+	_, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: f.marketID.Hex(),
+		Strike:   150,
+		Side:     "sell",
+		Type:     OrderTypeMarket,
+		Quantity: 5,
+	})
+	if err != nil {
+		t.Fatalf("open short: %v", err)
+	}
 
 	f.market.bid = 48.78
 	f.market.ask = 49.28
 	f.posView.closeTargets = []PositionSnapshot{
 		{MatchID: "1", MarketID: f.marketID.Hex(), Strike: 130, Lots: 10, Status: "open"},
 		{MatchID: "1", MarketID: f.marketID.Hex(), Strike: 140, Lots: 5, Status: "open"},
+		{MatchID: "1", MarketID: f.marketID.Hex(), Strike: 150, Lots: -5, Status: "open"},
 	}
 
 	result, err := f.svc.CloseAllPositions(context.Background(), f.userID, OrderTypeMarket)
 	if err != nil {
 		t.Fatalf("close all: %v", err)
 	}
-	if result.Requested != 2 || result.Submitted != 2 || result.Failed != 0 {
-		t.Fatalf("result = requested %d submitted %d failed %d, want 2/2/0", result.Requested, result.Submitted, result.Failed)
+	if result.Requested != 3 || result.Submitted != 3 || result.Failed != 0 {
+		t.Fatalf("result = requested %d submitted %d failed %d, want 3/3/0", result.Requested, result.Submitted, result.Failed)
 	}
-	if len(result.Orders) != 2 {
-		t.Fatalf("orders = %d, want 2", len(result.Orders))
+	if len(result.Orders) != 3 {
+		t.Fatalf("orders = %d, want 3", len(result.Orders))
 	}
 	if got := f.openQty(130); got != 0 {
 		t.Fatalf("open lots strike 130 = %d, want 0", got)
 	}
 	if got := f.openQty(140); got != 0 {
 		t.Fatalf("open lots strike 140 = %d, want 0", got)
+	}
+	if got := f.netQty(150); got != 0 {
+		t.Fatalf("net lots strike 150 = %d, want 0", got)
 	}
 }
 

@@ -427,6 +427,45 @@ func TestPreviewOrder_ReturnsBackendNotionalAndBalance(t *testing.T) {
 	}
 }
 
+func TestPreviewOrder_ShortSellRequiresMargin(t *testing.T) {
+	userID := primitive.NewObjectID()
+	marketID := primitive.NewObjectID()
+
+	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
+	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 100})
+
+	svc := NewService(
+		NewMemoryRepository(),
+		&stubMarketSvc{market: &markets.Market{ID: marketID, Status: markets.MarketStatusActive}, bid: 50, ask: 51, ok: true},
+		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, BallsLeft: 42}},
+		walletSvc,
+		executions.NewService(executions.NewMemoryRepository()),
+		nil,
+		nil,
+	)
+
+	preview, err := svc.PreviewOrder(context.Background(), userID, CreateOrderRequest{
+		MatchID:  "1",
+		MarketID: marketID.Hex(),
+		Strike:   130,
+		Side:     "sell",
+		Type:     OrderTypeMarket,
+		Quantity: 3,
+	})
+	if err != nil {
+		t.Fatalf("PreviewOrder: %v", err)
+	}
+	if preview.PositionIntent != "SELL_TO_OPEN_SHORT" || preview.PositionEffect != PositionEffectAuto {
+		t.Fatalf("intent/effect = %q/%q, want SELL_TO_OPEN_SHORT/AUTO", preview.PositionIntent, preview.PositionEffect)
+	}
+	if preview.Notional != 150 || preview.MarginRequired != 150 {
+		t.Fatalf("notional/margin = %.2f/%.2f, want 150/150", preview.Notional, preview.MarginRequired)
+	}
+	if preview.SufficientBalance {
+		t.Fatal("preview sufficient = true, want false with only 100 available")
+	}
+}
+
 func TestCancelOrder_ReleasesReservedBalance(t *testing.T) {
 	userID := primitive.NewObjectID()
 	marketID := primitive.NewObjectID()

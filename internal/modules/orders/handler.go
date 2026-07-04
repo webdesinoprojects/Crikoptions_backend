@@ -207,8 +207,8 @@ func (h *Handler) PreviewOrder(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ClosePosition exits (sells to close) a derived position by id. It reuses the
-// full SELL validation + matching via the service.
+// ClosePosition exits a derived position by id without allowing a flip. Long
+// positions close with SELL, short positions close with BUY.
 func (h *Handler) ClosePosition(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r)
 	if !ok {

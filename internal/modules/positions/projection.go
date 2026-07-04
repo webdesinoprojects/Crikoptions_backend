@@ -39,6 +39,7 @@ type PositionProjection struct {
 	MarketID     string             `bson:"marketId"`
 	Strike       float64            `bson:"strike"`
 	Status       string             `bson:"status"`
+	Side         string             `bson:"side,omitempty"`
 	Lots         int                `bson:"lots"`
 	BuyLots      int                `bson:"buyLots"`
 	BuyNotional  float64            `bson:"buyNotional"`
@@ -60,6 +61,7 @@ func (p PositionProjection) ToPosition(ltp float64) Position {
 		MarketID:    p.MarketID,
 		Strike:      p.Strike,
 		Status:      p.Status,
+		Side:        normalizedPositionSide(p.Side, p.Lots),
 		Lots:        p.Lots,
 		BuyPrice:    round2(p.BuyPrice),
 		SellPrice:   round2(p.SellPrice),
@@ -83,11 +85,13 @@ func (p *PositionProjection) apply(exec executions.Execution) {
 	}
 
 	if p.ID == "" {
+		side := strings.ToLower(strings.TrimSpace(exec.Side))
 		p.ID = derivePositionID(exec.UserID, exec.MatchID, exec.MarketID, exec.Strike, createdAt)
 		p.UserID = exec.UserID
 		p.MatchID = exec.MatchID
 		p.MarketID = exec.MarketID
 		p.Strike = exec.Strike
+		p.Side = sideToPositionSide(side)
 		p.CreatedAt = createdAt
 	}
 
@@ -378,4 +382,27 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func sideToPositionSide(side string) string {
+	switch strings.ToLower(strings.TrimSpace(side)) {
+	case "sell":
+		return "SELL"
+	default:
+		return "BUY"
+	}
+}
+
+func normalizedPositionSide(side string, lots int) string {
+	if lots < 0 {
+		return "SELL"
+	}
+	if lots > 0 {
+		return "BUY"
+	}
+	side = strings.ToUpper(strings.TrimSpace(side))
+	if side == "BUY" || side == "SELL" {
+		return side
+	}
+	return "BUY"
 }

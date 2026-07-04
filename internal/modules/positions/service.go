@@ -190,7 +190,7 @@ func (s *Service) OpenCloseTargets(ctx context.Context, userID primitive.ObjectI
 	}
 	targets := make([]orders.PositionSnapshot, 0, len(open))
 	for _, p := range open {
-		if p.Lots > 0 {
+		if p.Lots != 0 {
 			targets = append(targets, toSnapshot(p))
 		}
 	}
@@ -210,7 +210,7 @@ func (s *Service) ListOpenByMatch(ctx context.Context, matchID string) ([]orders
 	}
 	out := make([]orders.PositionSnapshot, 0, len(all))
 	for _, p := range all {
-		if p.Lots > 0 {
+		if p.Lots != 0 {
 			out = append(out, toSnapshot(p))
 		}
 	}
@@ -233,6 +233,7 @@ func toSnapshot(p Position) orders.PositionSnapshot {
 		Strike:      p.Strike,
 		Lots:        p.Lots,
 		BuyPrice:    p.BuyPrice,
+		SellPrice:   p.SellPrice,
 		LTP:         p.LTP,
 		PnL:         p.PnL,
 		RealizedPnL: p.RealizedPnL,
@@ -267,7 +268,7 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		k := key{userID: fill.UserID, matchID: fill.MatchID, marketID: fill.MarketID, strike: fill.Strike}
 		b, ok := activeBuckets[k]
 		if !ok {
-			b = &aggregateBucket{firstSeen: fill.CreatedAt}
+			b = &aggregateBucket{firstSeen: fill.CreatedAt, side: sideToPositionSide(fill.Side)}
 			activeBuckets[k] = b
 			allBuckets = append(allBuckets, b)
 			bucketKeys = append(bucketKeys, k)
@@ -397,6 +398,7 @@ type aggregateBucket struct {
 	buyNotional  float64
 	sellQty      int
 	sellNotional float64
+	side         string
 	firstSeen    time.Time
 	lastUpdated  time.Time
 }
@@ -441,6 +443,7 @@ func (b *aggregateBucket) toPosition() Position {
 	}
 	return Position{
 		Status:      status,
+		Side:        normalizedPositionSide(b.side, net),
 		Lots:        net,
 		BuyPrice:    round2(avgBuy),
 		SellPrice:   round2(avgSell),

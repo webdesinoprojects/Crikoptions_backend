@@ -163,3 +163,14 @@ func (s *Service) SettleSellFill(ctx context.Context, userID primitive.ObjectID,
 		CreatedBy:     userID,
 	})
 }
+
+func (s *Service) SettleShortOpenFill(ctx context.Context, userID primitive.ObjectID, proceeds float64, orderID, description string) (*AdjustmentResult, error) {
+	return s.repo.SettleShortOpenFill(ctx, ShortOpenFillOp{
+		UserID:        userID,
+		Proceeds:      proceeds,
+		ReferenceType: "EXECUTION",
+		ReferenceID:   orderID,
+		Description:   description,
+		CreatedBy:     userID,
+	})
+}

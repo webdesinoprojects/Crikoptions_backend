@@ -77,6 +77,36 @@ func TestAggregate_OpenLong(t *testing.T) {
 	}
 }
 
+func TestAggregate_OpenShort(t *testing.T) {
+	uid := primitive.NewObjectID()
+	now := time.Now().UTC()
+	items := []executions.Execution{
+		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "sell", Quantity: 20, Price: 50, CreatedAt: now},
+	}
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 45}})
+
+	open, err := svc.GetUserOpenPositions(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("GetUserOpenPositions: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("expected 1 open position, got %d", len(open))
+	}
+	p := open[0]
+	if p.Side != "SELL" {
+		t.Errorf("side = %q, want SELL", p.Side)
+	}
+	if p.Lots != -20 {
+		t.Errorf("lots = %d, want -20", p.Lots)
+	}
+	if p.SellPrice != 50 {
+		t.Errorf("sellPrice = %v, want 50", p.SellPrice)
+	}
+	if p.PnL != 100 {
+		t.Errorf("pnl = %v, want 100", p.PnL)
+	}
+}
+
 func TestAggregate_ClosedPosition(t *testing.T) {
 	uid := primitive.NewObjectID()
 	now := time.Now().UTC()
@@ -97,6 +127,32 @@ func TestAggregate_ClosedPosition(t *testing.T) {
 	p := closed[0]
 	if p.PnL != 500 {
 		t.Errorf("pnl = %v, want 500", p.PnL)
+	}
+}
+
+func TestAggregate_ClosedShortPositionKeepsSellSide(t *testing.T) {
+	uid := primitive.NewObjectID()
+	now := time.Now().UTC()
+	items := []executions.Execution{
+		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "buy", Quantity: 10, Price: 40, CreatedAt: now.Add(time.Minute)},
+		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "sell", Quantity: 10, Price: 50, CreatedAt: now},
+	}
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 45}})
+
+	open, _ := svc.GetUserOpenPositions(context.Background(), uid)
+	if len(open) != 0 {
+		t.Errorf("expected no open positions, got %d", len(open))
+	}
+	closed, _ := svc.GetUserClosedPositions(context.Background(), uid)
+	if len(closed) != 1 {
+		t.Fatalf("expected 1 closed position, got %d", len(closed))
+	}
+	p := closed[0]
+	if p.Side != "SELL" {
+		t.Errorf("side = %q, want SELL", p.Side)
+	}
+	if p.RealizedPnL != 100 || p.PnL != 100 {
+		t.Errorf("realized/pnl = %.2f/%.2f, want 100/100", p.RealizedPnL, p.PnL)
 	}
 }
 

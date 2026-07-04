@@ -25,6 +25,7 @@ type Repository interface {
 	ReleaseMargin(ctx context.Context, op OrderFundsOp) (*AdjustmentResult, error)
 	SettleBuyFill(ctx context.Context, op BuyFillOp) (*AdjustmentResult, error)
 	SettleSellFill(ctx context.Context, op SellFillOp) (*AdjustmentResult, error)
+	SettleShortOpenFill(ctx context.Context, op ShortOpenFillOp) (*AdjustmentResult, error)
 	ListLedger(ctx context.Context, filter LedgerFilter) ([]LedgerEntry, error)
 	EnsureIndexes(ctx context.Context) error
 }
@@ -160,7 +161,7 @@ func (r *MemoryRepository) SettleBuyFill(_ context.Context, op BuyFillOp) (*Adju
 
 	fillCost := round2(op.FillCost)
 	release := round2(op.ReserveRelease)
-	if fillCost <= 0 || release <= 0 {
+	if fillCost <= 0 || release < 0 {
 		return nil, errInvalidAmount
 	}
 
@@ -209,6 +210,43 @@ func (r *MemoryRepository) SettleSellFill(_ context.Context, op SellFillOp) (*Ad
 	before := r.ensureAccountLocked(op.UserID, now)
 	after := before
 	after.CashBalance = round2(after.CashBalance + proceeds)
+	after.AvailableBalance = round2(after.CashBalance - after.ReservedBalance)
+	after.UpdatedAt = now
+	r.accounts[op.UserID] = after
+
+	entry := LedgerEntry{
+		ID:             primitive.NewObjectID(),
+		WalletID:       after.ID,
+		UserID:         op.UserID,
+		Type:           LedgerTradeCredit,
+		Amount:         proceeds,
+		BalanceBefore:  before.CashBalance,
+		BalanceAfter:   after.CashBalance,
+		ReservedBefore: before.ReservedBalance,
+		ReservedAfter:  after.ReservedBalance,
+		ReferenceType:  op.ReferenceType,
+		ReferenceID:    op.ReferenceID,
+		Description:    op.Description,
+		CreatedBy:      op.CreatedBy,
+		CreatedAt:      now,
+	}
+	return &AdjustmentResult{Account: after, LedgerEntry: entry}, nil
+}
+
+func (r *MemoryRepository) SettleShortOpenFill(_ context.Context, op ShortOpenFillOp) (*AdjustmentResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	proceeds := round2(op.Proceeds)
+	if proceeds <= 0 {
+		return nil, errInvalidAmount
+	}
+
+	now := time.Now().UTC()
+	before := r.ensureAccountLocked(op.UserID, now)
+	after := before
+	after.CashBalance = round2(after.CashBalance + proceeds)
+	after.ReservedBalance = round2(after.ReservedBalance + proceeds)
 	after.AvailableBalance = round2(after.CashBalance - after.ReservedBalance)
 	after.UpdatedAt = now
 	r.accounts[op.UserID] = after
@@ -450,6 +488,20 @@ func (r *MongoRepository) SettleSellFill(ctx context.Context, op SellFillOp) (*A
 		referenceID:    op.ReferenceID,
 		description:    op.Description,
 		createdBy:      op.CreatedBy,
+	})
+}
+
+func (r *MongoRepository) SettleShortOpenFill(ctx context.Context, op ShortOpenFillOp) (*AdjustmentResult, error) {
+	return r.applyBalanceMutation(ctx, balanceMutation{
+		userID:        op.UserID,
+		amount:        op.Proceeds,
+		cashDelta:     op.Proceeds,
+		reservedDelta: op.Proceeds,
+		ledgerType:    LedgerTradeCredit,
+		referenceType: op.ReferenceType,
+		referenceID:   op.ReferenceID,
+		description:   op.Description,
+		createdBy:     op.CreatedBy,
 	})
 }
 

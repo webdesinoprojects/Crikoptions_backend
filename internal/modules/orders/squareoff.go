@@ -20,13 +20,13 @@ const (
 
 // SquareOffResult summarizes a forced settlement run.
 type SquareOffResult struct {
-	MatchID           string  `json:"matchId"`
-	Scope             string  `json:"scope"`
-	MarketsClosed     int     `json:"marketsClosed"`
-	OrdersCancelled   int     `json:"ordersCancelled"`
-	PositionsSettled  int     `json:"positionsSettled"`
-	PositionsFailed   int     `json:"positionsFailed"`
-	TotalRealizedPnL  float64 `json:"totalRealizedPnl"`
+	MatchID          string  `json:"matchId"`
+	Scope            string  `json:"scope"`
+	MarketsClosed    int     `json:"marketsClosed"`
+	OrdersCancelled  int     `json:"ordersCancelled"`
+	PositionsSettled int     `json:"positionsSettled"`
+	PositionsFailed  int     `json:"positionsFailed"`
+	TotalRealizedPnL float64 `json:"totalRealizedPnl"`
 }
 
 // SquareOffInnings1 settles open positions in 1st-innings score markets when
@@ -83,7 +83,7 @@ func (s *Service) SquareOff(ctx context.Context, matchID string, scope string) (
 	marketByID := mapMarketsByHex(marketList)
 
 	for _, target := range openPositions {
-		if target.Lots <= 0 || target.UserID.IsZero() {
+		if target.Lots == 0 || target.UserID.IsZero() {
 			continue
 		}
 		market := marketByID[target.MarketID]
@@ -139,14 +139,19 @@ func (s *Service) forceSettlePosition(
 	unlock := s.lockFor(userID, target.MarketID, target.Strike)
 	defer unlock()
 
-	openQty := s.executions.OpenLongQty(ctx, userID, target.MatchID, target.MarketID, target.Strike)
-	if openQty <= 0 {
+	net := s.executions.PositionSummary(ctx, userID, target.MatchID, target.MarketID, target.Strike).NetLots
+	if net == 0 {
 		return 0, nil
 	}
+	closeQty := absInt(net)
 
 	fillPrice := s.settlementPrice(match, market, target)
 	if fillPrice <= 0 {
 		return 0, fmt.Errorf("no settlement price available")
+	}
+	side := "sell"
+	if net < 0 {
+		side = "buy"
 	}
 
 	now := time.Now().UTC()
@@ -155,12 +160,16 @@ func (s *Service) forceSettlePosition(
 		MatchID:           target.MatchID,
 		MarketID:          target.MarketID,
 		Strike:            target.Strike,
-		Side:              "sell",
+		Side:              side,
 		Type:              OrderTypeMarket,
-		Quantity:          openQty,
+		PositionEffect:    PositionEffectClose,
+		PositionIntent:    planIntent(side, positionPlan{CloseLongQty: maxInt(net, 0), CoverShortQty: maxInt(-net, 0)}),
+		Quantity:          closeQty,
 		Price:             fillPrice,
+		ReservedAmount:    0,
+		ReservedQuantity:  0,
 		FilledQuantity:    0,
-		RemainingQuantity: openQty,
+		RemainingQuantity: closeQty,
 		Status:            StatusOpen,
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -172,21 +181,29 @@ func (s *Service) forceSettlePosition(
 		if txErr != nil {
 			return txErr
 		}
-		filled, txErr = s.applyFill(txCtx, userID, created, fillPrice, openQty)
+		filled, txErr = s.applyFill(txCtx, userID, created, fillPrice, closeQty)
 		return txErr
 	})
 	if err != nil {
 		return 0, err
 	}
 
-	buyPrice := target.BuyPrice
-	if buyPrice <= 0 {
-		buyPrice = fillPrice
+	if net > 0 {
+		buyPrice := target.BuyPrice
+		if buyPrice <= 0 {
+			buyPrice = fillPrice
+		}
+		realizedPnL = round2((fillPrice - buyPrice) * float64(closeQty))
+	} else {
+		sellPrice := target.SellPrice
+		if sellPrice <= 0 {
+			sellPrice = fillPrice
+		}
+		realizedPnL = round2((sellPrice - fillPrice) * float64(closeQty))
 	}
-	realizedPnL = round2((fillPrice - buyPrice) * float64(openQty))
 
 	if filled != nil {
-		s.broadcastSell(ctx, userID, filled)
+		s.broadcastOrderAndPosition(ctx, userID, filled)
 	}
 	return realizedPnL, nil
 }
@@ -194,11 +211,18 @@ func (s *Service) forceSettlePosition(
 func (s *Service) settlementPrice(match *matches.Match, market *markets.Market, target PositionSnapshot) float64 {
 	if match != nil {
 		input := markets.PricingInputFromMatch(*match)
-		if bid, _, ok := s.markets.StrikeQuote(input, target.Strike); ok && bid > 0 {
+		bid, ask, ok := s.markets.StrikeQuote(input, target.Strike)
+		if target.Lots < 0 && ok && ask > 0 {
+			return round2(ask)
+		}
+		if ok && bid > 0 {
 			return round2(bid)
 		}
 	}
 	if market != nil {
+		if target.Lots < 0 && market.SellerPrice > 0 {
+			return round2(market.SellerPrice)
+		}
 		if market.LTP > 0 {
 			return round2(market.LTP)
 		}
@@ -208,6 +232,9 @@ func (s *Service) settlementPrice(match *matches.Match, market *markets.Market, 
 	}
 	if target.LTP > 0 {
 		return round2(target.LTP)
+	}
+	if target.Lots < 0 && target.SellPrice > 0 {
+		return round2(target.SellPrice)
 	}
 	if target.BuyPrice > 0 {
 		return round2(target.BuyPrice)
@@ -243,8 +270,8 @@ func (s *Service) cancelWorkingOrder(ctx context.Context, order *Order) error {
 		return nil
 	}
 	return s.repo.DoTx(ctx, func(txCtx context.Context) error {
-		if order.Side == "buy" && order.ReservedAmount() > 0 {
-			if _, txErr := s.wallets.ReleaseOrderMargin(txCtx, order.UserID, order.ReservedAmount(), order.ID.Hex(),
+		if remainingReserve := order.RemainingReservedAmount(); remainingReserve > 0 {
+			if _, txErr := s.wallets.ReleaseOrderMargin(txCtx, order.UserID, remainingReserve, order.ID.Hex(),
 				fmt.Sprintf("Release margin for cancelled order %s (square-off)", order.ID.Hex())); txErr != nil {
 				return txErr
 			}
@@ -263,7 +290,7 @@ func (s *Service) collectOpenPositions(ctx context.Context, match *matches.Match
 	seen := map[string]struct{}{}
 	out := make([]PositionSnapshot, 0, len(batch))
 	for _, p := range batch {
-		if p.Lots <= 0 || !positionMatchesMatch(p, keySet) {
+		if p.Lots == 0 || !positionMatchesMatch(p, keySet) {
 			continue
 		}
 		dedupe := p.UserID.Hex() + "|" + p.MatchID + "|" + p.MarketID + "|" + formatStrike(p.Strike)

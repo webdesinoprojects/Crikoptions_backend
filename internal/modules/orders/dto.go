@@ -9,6 +9,7 @@ type CreateOrderRequest struct {
 	Strike          float64                        `json:"strike"`
 	Side            string                         `json:"side"`
 	Type            string                         `json:"type"`
+	PositionEffect  string                         `json:"positionEffect,omitempty"`
 	Quantity        int                            `json:"quantity"`
 	Price           float64                        `json:"price"`
 	PricingSnapshot *markets.PriceCalculationInput `json:"pricingSnapshot,omitempty"`
@@ -22,8 +23,12 @@ type OrderResponse struct {
 	Strike            float64 `json:"strike"`
 	Side              string  `json:"side"`
 	Type              string  `json:"type"`
+	PositionEffect    string  `json:"positionEffect,omitempty"`
+	PositionIntent    string  `json:"positionIntent,omitempty"`
 	Quantity          int     `json:"quantity"`
 	Price             float64 `json:"price"`
+	ReservedAmount    float64 `json:"reservedAmount,omitempty"`
+	ReservedQuantity  int     `json:"reservedQuantity,omitempty"`
 	FilledQuantity    int     `json:"filledQuantity"`
 	RemainingQuantity int     `json:"remainingQuantity"`
 	AverageFillPrice  float64 `json:"averageFillPrice"`
@@ -43,6 +48,8 @@ type OrderPreviewResponse struct {
 	Strike            float64 `json:"strike"`
 	Side              string  `json:"side"`
 	Type              string  `json:"type"`
+	PositionEffect    string  `json:"positionEffect"`
+	PositionIntent    string  `json:"positionIntent"`
 	Quantity          int     `json:"quantity"`
 	RequestedPrice    float64 `json:"requestedPrice"`
 	OrderPrice        float64 `json:"orderPrice"`
@@ -51,6 +58,8 @@ type OrderPreviewResponse struct {
 	Ask               float64 `json:"ask"`
 	Notional          float64 `json:"notional"`
 	MarginRequired    float64 `json:"marginRequired"`
+	NetLotsBefore     int     `json:"netLotsBefore"`
+	ProjectedLots     int     `json:"projectedLots"`
 	AvailableBalance  float64 `json:"availableBalance"`
 	SufficientBalance bool    `json:"sufficientBalance"`
 	WillExecuteNow    bool    `json:"willExecuteNow"`

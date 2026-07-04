@@ -183,6 +183,63 @@ func TestSquareOff_MatchSettlesAllMarkets(t *testing.T) {
 	}
 }
 
+func TestSquareOff_MatchSettlesShortAtAsk(t *testing.T) {
+	userID := primitive.NewObjectID()
+	matchHex := "0000000000000000000000aa"
+	marketID, _ := primitive.ObjectIDFromHex("0000000000000000000000d3")
+
+	market := markets.Market{ID: marketID, MatchID: "1", Type: "future", Status: markets.MarketStatusActive, LTP: 45}
+	marketSvc := &stubMarketSvc{
+		markets: []markets.Market{market},
+		market:  &market,
+		bid:     44,
+		ask:     45,
+		ok:      true,
+	}
+
+	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
+	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 10000, Reason: "seed"})
+	_, _ = walletSvc.ReserveOrderMargin(context.Background(), userID, 500, "short-open", "short initial margin")
+	_, _ = walletSvc.SettleShortOpenFill(context.Background(), userID, 500, "short-open", "short sale proceeds")
+
+	execSvc := executions.NewService(executions.NewMemoryRepository())
+	_, _ = execSvc.Create(context.Background(), executions.Execution{
+		UserID: userID, MatchID: "1", MarketID: marketID.Hex(), Strike: 160, Side: "sell", Price: 50, Quantity: 10,
+	})
+
+	orderRepo := NewMemoryRepository()
+	orderRepo.orders = nil
+	posView := &squareOffPositions{
+		byMatch: map[string][]PositionSnapshot{
+			"1": {
+				{UserID: userID, MatchID: "1", MarketID: marketID.Hex(), Strike: 160, Lots: -10, SellPrice: 50, LTP: 45, Status: "open"},
+			},
+		},
+	}
+
+	matchID, _ := primitive.ObjectIDFromHex(matchHex)
+	svc := NewService(orderRepo, marketSvc, &stubMatchSvc{match: &matches.Match{ID: matchID, Status: "live", Innings: 2}}, walletSvc, execSvc, posView, nil)
+
+	result, err := svc.SquareOff(context.Background(), matchHex, SquareOffScopeMatch)
+	if err != nil {
+		t.Fatalf("SquareOff: %v", err)
+	}
+	if result.PositionsSettled != 1 || result.TotalRealizedPnL != 50 {
+		t.Fatalf("settled/pnl = %d/%.2f, want 1/50", result.PositionsSettled, result.TotalRealizedPnL)
+	}
+	if got := execSvc.NetLots(context.Background(), userID, "1", marketID.Hex(), 160); got != 0 {
+		t.Fatalf("net lots = %d, want 0", got)
+	}
+	orders := orderRepo.GetAll(context.Background())
+	if len(orders) != 1 || orders[0].Side != "buy" || orders[0].AverageFillPrice != 45 {
+		t.Fatalf("settlement order = %+v, want one BUY at ask 45", orders)
+	}
+	acct, _ := walletSvc.GetWallet(context.Background(), userID)
+	if acct.CashBalance != 10050 || acct.ReservedBalance != 0 || acct.AvailableBalance != 10050 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 10050/0/10050", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	}
+}
+
 func TestReopenMatchMarkets(t *testing.T) {
 	marketID, _ := primitive.ObjectIDFromHex("0000000000000000000000d2")
 	m := markets.Market{ID: marketID, MatchID: "1", Type: "future", Status: markets.MarketStatusClosed}

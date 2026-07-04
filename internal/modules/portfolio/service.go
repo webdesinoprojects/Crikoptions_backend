@@ -199,7 +199,7 @@ func (s *Service) adaptOpenPosition(ctx context.Context, lookup *lookupCache, po
 	match := lookup.match(ctx, position.MatchID)
 
 	side := "BUY"
-	if position.Lots < 0 {
+	if position.Side == "SELL" || position.Lots < 0 {
 		side = "SELL"
 	}
 	quantity := absInt(position.Lots)
@@ -235,6 +235,16 @@ func (s *Service) adaptClosedTrade(ctx context.Context, lookup *lookupCache, pos
 	if quantity == 0 {
 		quantity = absInt(position.Lots)
 	}
+	side := position.Side
+	if side != "SELL" {
+		side = "BUY"
+	}
+	entryPrice := position.BuyPrice
+	exitPrice := position.SellPrice
+	if side == "SELL" {
+		entryPrice = position.SellPrice
+		exitPrice = position.BuyPrice
+	}
 	pnl := realizedPnL(position)
 	openedAt := position.CreatedAt
 	closedAt := position.UpdatedAt
@@ -247,12 +257,12 @@ func (s *Service) adaptClosedTrade(ctx context.Context, lookup *lookupCache, pos
 		MarketID:        position.MarketID,
 		Symbol:          symbolFromMarket(market, position.MarketID),
 		MatchName:       matchName(match, position.MatchID),
-		Side:            "BUY",
+		Side:            side,
 		Quantity:        quantity,
-		EntryPrice:      round2(position.BuyPrice),
-		ExitPrice:       round2(position.SellPrice),
+		EntryPrice:      round2(entryPrice),
+		ExitPrice:       round2(exitPrice),
 		RealizedPnL:     pnl,
-		RealizedPnLPct:  pct(pnl, position.BuyPrice*float64(quantity)),
+		RealizedPnLPct:  pct(pnl, entryPrice*float64(quantity)),
 		OpenedAt:        formatTime(openedAt),
 		ClosedAt:        formatTime(closedAt),
 		HoldingPeriodMs: maxInt64(0, closedAt.Sub(openedAt).Milliseconds()),
