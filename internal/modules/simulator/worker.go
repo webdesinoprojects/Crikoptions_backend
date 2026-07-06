@@ -62,6 +62,7 @@ type Worker struct {
 	loopOnComplete bool
 	onRestart      func(context.Context) error
 	squareOff      SquareOffPort
+	lease          *LockLease
 }
 
 func newWorker(matchID string, ds *CSVDataset, svc MatchService, intervalSec int) *Worker {
@@ -160,6 +161,7 @@ func (w *Worker) Run() {
 			w.status = StatusStopped
 		}
 		w.mu.Unlock()
+		w.lease.Release(context.Background())
 		log.Printf("simulator[%s]: replay goroutine exited", w.matchID)
 	}()
 
@@ -209,6 +211,9 @@ func (w *Worker) Run() {
 		}
 
 		ctx := context.Background()
+		if !w.renewLease(ctx) {
+			return
+		}
 
 		// Do not bowl further if chase target already reached (innings 2).
 		if innings == 2 && w.targetScore > 0 && w.score >= w.targetScore {
@@ -360,6 +365,9 @@ func (w *Worker) recordCSVBall(ctx context.Context, innings int, row BallRow, ba
 }
 
 func (w *Worker) completeMatch(ctx context.Context) bool {
+	if !w.renewLease(ctx) {
+		return false
+	}
 	if _, err := w.svc.CompleteMatch(ctx, w.matchID); err != nil {
 		log.Printf("simulator[%s]: CompleteMatch: %v", w.matchID, err)
 	}
@@ -419,6 +427,9 @@ func (w *Worker) transitionToInnings2(ctx context.Context) error {
 	if !w.dataset.HasInnings2 || len(w.dataset.Events[2]) == 0 {
 		return fmt.Errorf("no innings 2 data in dataset")
 	}
+	if !w.renewLease(ctx) {
+		return ErrLockHeld
+	}
 
 	w.mu.Lock()
 	firstInningsScore := w.score
@@ -450,6 +461,20 @@ func (w *Worker) transitionToInnings2(ctx context.Context) error {
 	w.mu.Unlock()
 
 	return nil
+}
+
+func (w *Worker) renewLease(ctx context.Context) bool {
+	if w.lease == nil {
+		return true
+	}
+	if err := w.lease.Renew(ctx); err != nil {
+		log.Printf("simulator[%s]: lost simulator lock: %v", w.matchID, err)
+		w.mu.Lock()
+		w.status = StatusStopped
+		w.mu.Unlock()
+		return false
+	}
+	return true
 }
 
 // deliveryDelay returns seconds to wait before the next ball. The worker's
