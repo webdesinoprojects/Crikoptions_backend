@@ -87,7 +87,31 @@ func main() {
 		if err := resetOne(ctx, matchesService, simCfg.DataDir, spec, *dryRun); err != nil {
 			log.Fatalf("reset %s (%s): %v", spec.matchID, spec.script, err)
 		}
+		if *dryRun {
+			if err := printLock(ctx, lockStore, spec.matchID); err != nil {
+				log.Fatalf("read simulator lock %s: %v", spec.matchID, err)
+			}
+		}
 	}
+}
+
+func printLock(ctx context.Context, store *simulator.MongoLockStore, matchID string) error {
+	record, ok, err := store.Get(ctx, matchID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		log.Printf("match=%s lock=none", matchID)
+		return nil
+	}
+	log.Printf(
+		"match=%s lock=owner:%s expiresAt:%s updatedAt:%s",
+		matchID,
+		record.OwnerID,
+		record.ExpiresAt.Format(time.RFC3339),
+		record.UpdatedAt.Format(time.RFC3339),
+	)
+	return nil
 }
 
 func resetOne(ctx context.Context, svc *matches.Service, dataDir string, spec resetSpec, dryRun bool) error {

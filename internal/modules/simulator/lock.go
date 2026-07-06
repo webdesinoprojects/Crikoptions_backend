@@ -25,6 +25,13 @@ type LockStore interface {
 	Release(ctx context.Context, matchID, ownerID, token string) error
 }
 
+type LockRecord struct {
+	MatchID   string    `bson:"_id"`
+	OwnerID   string    `bson:"ownerId"`
+	ExpiresAt time.Time `bson:"expiresAt"`
+	UpdatedAt time.Time `bson:"updatedAt"`
+}
+
 type LockLease struct {
 	store   LockStore
 	matchID string
@@ -147,6 +154,21 @@ func (s *MongoLockStore) Release(ctx context.Context, matchID, ownerID, token st
 		"token":   token,
 	})
 	return err
+}
+
+func (s *MongoLockStore) Get(ctx context.Context, matchID string) (*LockRecord, bool, error) {
+	ctx, cancel := lockTimeout(ctx)
+	defer cancel()
+
+	var record LockRecord
+	err := s.col.FindOne(ctx, bson.M{"_id": matchID}).Decode(&record)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return &record, true, nil
 }
 
 func validateLockArgs(matchID, ownerID, token string, ttl time.Duration) error {
