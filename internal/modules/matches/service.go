@@ -208,7 +208,9 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 	if err != nil || match == nil {
 		return match, err
 	}
-	s.publishScore(match)
+	if !deferBallRealtime(ctx) {
+		s.publishScore(match)
+	}
 	return match, nil
 }
 
@@ -257,40 +259,61 @@ func (s *Service) UpdateLiveContext(ctx context.Context, id string, req UpdateLi
 // match state, and publishes separate score + commentary WebSocket topics.
 // A "wide"/"noball" extra does not consume a legal delivery (ballsLeft stays).
 func (s *Service) RecordBall(ctx context.Context, id string, req BallEventRequest) (*Match, error) {
+	match, _, err := s.recordBall(ctx, id, req)
+	return match, err
+}
+
+// RecordBallDelivery is like RecordBall but also returns the persisted event.
+// When ctx carries WithDeferredBallRealtime, callers must invoke PublishBallDelivery.
+func (s *Service) RecordBallDelivery(ctx context.Context, id string, req BallEventRequest) (*Match, BallEvent, error) {
+	return s.recordBall(ctx, id, req)
+}
+
+// PublishBallDelivery emits one score + commentary update for a recorded delivery.
+func (s *Service) PublishBallDelivery(match *Match, event BallEvent, req BallEventRequest) {
+	if match == nil {
+		return
+	}
+	extra, _ := normalizeExtra(req.Extra)
+	s.publishScore(match)
+	s.publishCommentary(match.ID.Hex(), event, req, extra, match)
+}
+
+func (s *Service) recordBall(ctx context.Context, id string, req BallEventRequest) (*Match, BallEvent, error) {
 	extra, ok := normalizeExtra(req.Extra)
 	if !ok {
-		return nil, errInvalidBallEvent
+		return nil, BallEvent{}, errInvalidBallEvent
 	}
 	maxRuns := 6
 	if extra != nil {
 		maxRuns = 7 // supports a six hit from a no-ball (six bat runs + one extra)
 	}
 	if req.Runs < 0 || req.Runs > maxRuns {
-		return nil, errInvalidBallEvent
+		return nil, BallEvent{}, errInvalidBallEvent
 	}
 	legalBall := extra == nil
 
 	objID, err := resolveMatchID(ctx, s.repo, id)
 	if err != nil {
-		return nil, err
+		return nil, BallEvent{}, err
 	}
 
 	existing, err := s.repo.GetByID(ctx, objID)
 	if err != nil || existing == nil {
-		return nil, errMatchNotFound
+		return nil, BallEvent{}, errMatchNotFound
 	}
 
 	status := NormalizeStatus(existing.Status)
 	if status != StatusLive && status != StatusInningsBreak {
-		return nil, errMatchNotLiveBall
+		return nil, BallEvent{}, errMatchNotLiveBall
 	}
 
 	innings := existing.Innings
 	if innings == 2 && existing.TargetScore > 0 && existing.CurrentScore >= existing.TargetScore {
-		return nil, errMatchNotLiveBall
+		return nil, BallEvent{}, errMatchNotLiveBall
 	}
 	if legalBall && existing.BallsLeft <= 0 {
-		return nil, errInningsOver
+		return nil, BallEvent{}, errInningsOver
 	}
 
 	matchID := existing.ID.Hex()
@@ -312,7 +335,7 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 	targetScore := existing.TargetScore
 	liveContext := cloneLiveContext(existing.LiveContext)
 	if req.IsWicket && liveContext != nil && strings.TrimSpace(req.NextBatterName) == "" {
-		return nil, errNextBatterRequired
+		return nil, BallEvent{}, errNextBatterRequired
 	}
 
 	// Capture pre-delivery player names for event history (before rotate/wicket).
@@ -346,7 +369,7 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 		LiveContext:  liveContext,
 	})
 	if err != nil || match == nil {
-		return match, err
+		return match, BallEvent{}, err
 	}
 
 	event := BallEvent{
@@ -371,9 +394,11 @@ func (s *Service) RecordBall(ctx context.Context, id string, req BallEventReques
 		_ = s.events.AppendEvent(ctx, event)
 	}
 
-	s.publishScore(match)
-	s.publishCommentary(match.ID.Hex(), event, req, extra, match)
-	return match, nil
+	if !deferBallRealtime(ctx) {
+		s.publishScore(match)
+		s.publishCommentary(match.ID.Hex(), event, req, extra, match)
+	}
+	return match, event, nil
 }
 
 // GetRecentEvents returns the last `limit` legal deliveries (plus interleaved

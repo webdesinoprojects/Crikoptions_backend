@@ -346,7 +346,9 @@ func (w *Worker) Run() {
 }
 
 func (w *Worker) recordCSVBall(ctx context.Context, innings int, row BallRow, ballReq matches.BallEventRequest) (*matches.Match, error) {
-	m, err := w.svc.RecordBall(ctx, w.matchID, ballReq)
+	ctx = matches.WithDeferredBallRealtime(ctx)
+
+	m, event, err := w.svc.RecordBallDelivery(ctx, w.matchID, ballReq)
 	if err != nil {
 		return nil, err
 	}
@@ -355,12 +357,15 @@ func (w *Worker) recordCSVBall(ctx context.Context, innings int, row BallRow, ba
 	corrected, changed, err := reconcileMatchToCSVRow(ctx, w.svc, w.matchID, row, m)
 	if err != nil {
 		log.Printf("simulator[%s] innings=%d seq=%d: align CSV state: %v", w.matchID, innings, row.EventSeq, err)
+		w.svc.PublishBallDelivery(m, event, ballReq)
 		return m, nil
 	}
 	if changed {
 		logCSVStateCorrection(w.matchID, innings, row, before, corrected)
 		m = corrected
 	}
+
+	w.svc.PublishBallDelivery(m, event, ballReq)
 	return m, nil
 }
 

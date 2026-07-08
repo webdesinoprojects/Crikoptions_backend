@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
@@ -16,9 +17,10 @@ type fakeCSVMatchService struct {
 	eventCounts map[int]int
 	legalCounts map[int]int
 
-	recordCalls int
-	recordReqs  []matches.BallEventRequest
-	updateReqs  []matches.UpdateScoreRequest
+	recordCalls   int
+	recordReqs    []matches.BallEventRequest
+	updateReqs    []matches.UpdateScoreRequest
+	publishCalls  int
 }
 
 func (f *fakeCSVMatchService) GetMatchByID(ctx context.Context, matchID string) (*matches.Match, error) {
@@ -33,13 +35,27 @@ func (f *fakeCSVMatchService) LegalBallCount(ctx context.Context, matchID string
 	return f.legalCounts[innings], nil
 }
 
-func (f *fakeCSVMatchService) RecordBall(ctx context.Context, matchID string, req matches.BallEventRequest) (*matches.Match, error) {
+func (f *fakeCSVMatchService) RecordBallDelivery(ctx context.Context, matchID string, req matches.BallEventRequest) (*matches.Match, matches.BallEvent, error) {
 	f.recordCalls++
 	f.recordReqs = append(f.recordReqs, req)
+	var match *matches.Match
 	if f.recordMatch != nil {
-		return cloneCSVTestMatch(f.recordMatch), nil
+		match = cloneCSVTestMatch(f.recordMatch)
+	} else {
+		match = cloneCSVTestMatch(f.match)
 	}
-	return cloneCSVTestMatch(f.match), nil
+	event := matches.BallEvent{
+		MatchID:   matchID,
+		Innings:   match.Innings,
+		Runs:      req.Runs,
+		IsWicket:  req.IsWicket,
+		LegalBall: strings.TrimSpace(req.Extra) == "",
+	}
+	return match, event, nil
+}
+
+func (f *fakeCSVMatchService) PublishBallDelivery(match *matches.Match, event matches.BallEvent, req matches.BallEventRequest) {
+	f.publishCalls++
 }
 
 func (f *fakeCSVMatchService) UpdateMatchScore(ctx context.Context, id string, req matches.UpdateScoreRequest) (*matches.Match, error) {
@@ -135,6 +151,9 @@ func TestWorkerRecordCSVBallAlignsAggregateState(t *testing.T) {
 	}
 	if svc.recordCalls != 1 {
 		t.Fatalf("RecordBall calls = %d, want 1", svc.recordCalls)
+	}
+	if svc.publishCalls != 1 {
+		t.Fatalf("PublishBallDelivery calls = %d, want 1", svc.publishCalls)
 	}
 	if len(svc.updateReqs) != 1 {
 		t.Fatalf("UpdateMatchScore calls = %d, want 1", len(svc.updateReqs))
