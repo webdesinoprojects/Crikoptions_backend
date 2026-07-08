@@ -99,7 +99,7 @@ func main() {
 	// the order service can resolve/broadcast position state on exits.
 	positionsRepo := positions.NewMongoProjectionRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "position_projections", positionsRepo.EnsureIndexes)
-	positionsService := positions.NewServiceWithProjection(executionsService, marketsService, positionsRepo)
+	positionsService := positions.NewServiceWithProjection(executionsService, marketsService, positionsRepo, matchesService, marketsService)
 	positionsHandler := positions.NewHandler(positionsService)
 
 	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService, positionsService, realtimeHub)

@@ -14,6 +14,7 @@ type PortfolioPosition struct {
 	CurrentPrice      float64 `json:"currentPrice"`
 	UnrealizedPnL     float64 `json:"unrealizedPnL"`
 	UnrealizedPnLPct  float64 `json:"unrealizedPnLPct"`
+	RealizedPnL       float64 `json:"realizedPnL"`
 	Notional          float64 `json:"notional"`
 	Allocation        float64 `json:"allocation"`
 	OpenedAt          string  `json:"openedAt"`

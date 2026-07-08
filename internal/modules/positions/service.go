@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -13,11 +14,20 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
 )
 
 var errInvalidUserID = errors.New("invalid userId")
+
+type MatchReader interface {
+	GetMatchByID(ctx context.Context, id string) (*matches.Match, error)
+}
+
+type MarketPricer interface {
+	CalculatePrice(input markets.PriceCalculationInput) (markets.PriceResponse, error)
+}
 
 type ExecutionReader interface {
 	List(ctx context.Context, filter executions.Filter) []executions.Execution
@@ -35,14 +45,16 @@ type Service struct {
 	executions  ExecutionReader
 	markets     MarketReader
 	projections ProjectionRepository
+	matches     MatchReader
+	pricer      MarketPricer
 }
 
-func NewService(executions ExecutionReader, markets MarketReader) *Service {
-	return &Service{executions: executions, markets: markets}
+func NewService(executions ExecutionReader, markets MarketReader, matches MatchReader, pricer MarketPricer) *Service {
+	return &Service{executions: executions, markets: markets, matches: matches, pricer: pricer}
 }
 
-func NewServiceWithProjection(executions ExecutionReader, markets MarketReader, projections ProjectionRepository) *Service {
-	return &Service{executions: executions, markets: markets, projections: projections}
+func NewServiceWithProjection(executions ExecutionReader, markets MarketReader, projections ProjectionRepository, matches MatchReader, pricer MarketPricer) *Service {
+	return &Service{executions: executions, markets: markets, projections: projections, matches: matches, pricer: pricer}
 }
 
 func (s *Service) GetUserOpenPositions(ctx context.Context, userID primitive.ObjectID) ([]Position, error) {
@@ -285,7 +297,7 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 	for _, key := range bucketKeys {
 		marketIDs = append(marketIDs, key.marketID)
 	}
-	ltps := s.marketLTPs(ctx, marketIDs)
+	prices := s.marketPrices(ctx, marketIDs)
 	out := make([]Position, 0, len(allBuckets))
 	for i, b := range allBuckets {
 		k := bucketKeys[i]
@@ -298,7 +310,17 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		p.CreatedAt = b.firstSeen
 		p.UpdatedAt = b.lastUpdated
 
-		p.LTP = ltps[k.marketID]
+		ltp := 0.0
+		if price, ok := prices[k.marketID]; ok {
+			ltp = price.LTP
+			for _, sp := range price.OptionChain {
+				if math.Abs(sp.Strike-k.strike) < 0.01 {
+					ltp = sp.Premium
+					break
+				}
+			}
+		}
+		p.LTP = ltp
 		p.PnL = computePnL(p, b.matchedQty())
 		p.RealizedPnL = computeRealized(b)
 		out = append(out, p)
@@ -345,16 +367,26 @@ func (s *Service) positionsFromProjections(ctx context.Context, projections []Po
 	for _, projection := range projections {
 		marketIDs = append(marketIDs, projection.MarketID)
 	}
-	ltps := s.marketLTPs(ctx, marketIDs)
+	prices := s.marketPrices(ctx, marketIDs)
 
 	positions := make([]Position, 0, len(projections))
 	for _, projection := range projections {
-		positions = append(positions, projection.ToPosition(ltps[projection.MarketID]))
+		ltp := 0.0
+		if price, ok := prices[projection.MarketID]; ok {
+			ltp = price.LTP
+			for _, sp := range price.OptionChain {
+				if math.Abs(sp.Strike-projection.Strike) < 0.01 {
+					ltp = sp.Premium
+					break
+				}
+			}
+		}
+		positions = append(positions, projection.ToPosition(ltp))
 	}
 	return positions, nil
 }
 
-func (s *Service) marketLTPs(ctx context.Context, ids []string) map[string]float64 {
+func (s *Service) marketPrices(ctx context.Context, ids []string) map[string]*markets.PriceResponse {
 	marketIDs := make([]string, 0, len(ids))
 	seen := make(map[string]struct{})
 	for _, marketID := range ids {
@@ -368,29 +400,40 @@ func (s *Service) marketLTPs(ctx context.Context, ids []string) map[string]float
 		marketIDs = append(marketIDs, marketID)
 	}
 
-	ltps := make(map[string]float64, len(marketIDs))
+	prices := make(map[string]*markets.PriceResponse, len(marketIDs))
 	if s.markets == nil {
-		return ltps
-	}
-	if batch, ok := s.markets.(BatchMarketReader); ok {
-		marketsByID, err := batch.GetMarketsByIDs(ctx, marketIDs)
-		if err == nil {
-			for id, market := range marketsByID {
-				if market != nil {
-					ltps[id] = market.LTP
-				}
-			}
-			return ltps
-		}
+		return prices
 	}
 
 	for _, marketID := range marketIDs {
 		market, err := s.markets.GetMarketByID(ctx, marketID)
 		if err == nil && market != nil {
-			ltps[marketID] = market.LTP
+			price := &markets.PriceResponse{
+				LTP: market.LTP,
+			}
+
+			// Attempt to dynamically calculate live LTP based on the current match score
+			if s.matches != nil {
+				if match, err := s.matches.GetMatchByID(ctx, market.MatchID); err == nil && match != nil {
+					if pricer, ok := s.markets.(MarketPricer); ok {
+						if res, err := pricer.CalculatePrice(markets.PriceCalculationInput{
+							MatchID:      market.MatchID,
+							Innings:      match.Innings,
+							CurrentScore: match.CurrentScore,
+							WicketsLost:  match.WicketsLost,
+							BallsLeft:    match.BallsLeft,
+							BallsBowled:  120 - match.BallsLeft,
+							TargetScore:  match.TargetScore,
+						}); err == nil {
+							price = &res
+						}
+					}
+				}
+			}
+			prices[marketID] = price
 		}
 	}
-	return ltps
+	return prices
 }
 
 type aggregateBucket struct {

@@ -14,7 +14,7 @@ func TestProjectionLifecycle_PartialCloseFullCloseAndReopen(t *testing.T) {
 	ctx := context.Background()
 	userID := primitive.NewObjectID()
 	repo := NewMemoryProjectionRepository()
-	svc := NewServiceWithProjection(&stubExecutionReader{}, &stubMarketReader{ltps: map[string]float64{"m1": 120}}, repo)
+	svc := NewServiceWithProjection(&stubExecutionReader{}, &stubMarketReader{ltps: map[string]float64{"m1": 120}}, repo, nil, nil)
 	now := time.Now().UTC()
 
 	fills := []executions.Execution{
@@ -84,7 +84,7 @@ func TestProjectionLifecycle_OpenShortCoverAndReopen(t *testing.T) {
 	ctx := context.Background()
 	userID := primitive.NewObjectID()
 	repo := NewMemoryProjectionRepository()
-	svc := NewServiceWithProjection(&stubExecutionReader{}, &stubMarketReader{ltps: map[string]float64{"m1": 45}}, repo)
+	svc := NewServiceWithProjection(&stubExecutionReader{}, &stubMarketReader{ltps: map[string]float64{"m1": 45}}, repo, nil, nil)
 	now := time.Now().UTC()
 
 	if err := repo.ApplyExecution(ctx, executions.Execution{

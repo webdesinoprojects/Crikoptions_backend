@@ -50,7 +50,7 @@ func TestAggregate_OpenLong(t *testing.T) {
 	items := []executions.Execution{
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "buy", Quantity: 50, Price: 155, CreatedAt: now},
 	}
-	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 160}})
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 160}}, nil, nil)
 
 	open, err := svc.GetUserOpenPositions(context.Background(), uid)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestAggregate_OpenShort(t *testing.T) {
 	items := []executions.Execution{
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "sell", Quantity: 20, Price: 50, CreatedAt: now},
 	}
-	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 45}})
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 45}}, nil, nil)
 
 	open, err := svc.GetUserOpenPositions(context.Background(), uid)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestAggregate_ClosedPosition(t *testing.T) {
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "buy", Quantity: 50, Price: 100, CreatedAt: now},
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "sell", Quantity: 50, Price: 110, CreatedAt: now},
 	}
-	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 115}})
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 115}}, nil, nil)
 
 	open, _ := svc.GetUserOpenPositions(context.Background(), uid)
 	if len(open) != 0 {
@@ -137,7 +137,7 @@ func TestAggregate_ClosedShortPositionKeepsSellSide(t *testing.T) {
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "buy", Quantity: 10, Price: 40, CreatedAt: now.Add(time.Minute)},
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "sell", Quantity: 10, Price: 50, CreatedAt: now},
 	}
-	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 45}})
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 45}}, nil, nil)
 
 	open, _ := svc.GetUserOpenPositions(context.Background(), uid)
 	if len(open) != 0 {
@@ -163,7 +163,7 @@ func TestAggregate_PartiallyClosed(t *testing.T) {
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "buy", Quantity: 100, Price: 100, CreatedAt: now},
 		{UserID: uid, MatchID: "1", MarketID: "m1", Strike: 130, Side: "sell", Quantity: 40, Price: 110, CreatedAt: now},
 	}
-	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 120}})
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 120}}, nil, nil)
 
 	open, _ := svc.GetUserOpenPositions(context.Background(), uid)
 	if len(open) != 1 {
@@ -186,7 +186,7 @@ func TestAggregate_AdminList(t *testing.T) {
 		{UserID: u2, MatchID: "1", MarketID: "m1", Strike: 130, Side: "buy", Quantity: 20, Price: 105, CreatedAt: now},
 		{UserID: u1, MatchID: "1", MarketID: "m2", Strike: 140, Side: "buy", Quantity: 5, Price: 50, CreatedAt: now},
 	}
-	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 100, "m2": 50}})
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 100, "m2": 50}}, nil, nil)
 
 	all, err := svc.ListAdminPositions(context.Background(), PositionFilter{})
 	if err != nil {
@@ -206,7 +206,7 @@ func TestListUserPositions_FiltersByMarket(t *testing.T) {
 		{UserID: uid, MatchID: "1", MarketID: "m2", Strike: 140, Side: "buy", Quantity: 20, Price: 100, CreatedAt: now},
 		{UserID: otherUser, MatchID: "1", MarketID: "m2", Strike: 150, Side: "buy", Quantity: 30, Price: 100, CreatedAt: now},
 	}
-	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 105, "m2": 110}})
+	svc := NewService(&stubExecutionReader{items: items}, &stubMarketReader{ltps: map[string]float64{"m1": 105, "m2": 110}}, nil, nil)
 
 	filtered, err := svc.ListUserPositions(context.Background(), uid, PositionFilter{
 		Status:   "open",

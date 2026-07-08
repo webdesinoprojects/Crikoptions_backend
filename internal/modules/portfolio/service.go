@@ -222,6 +222,7 @@ func (s *Service) adaptOpenPosition(ctx context.Context, lookup *lookupCache, po
 		CurrentPrice:      round2(position.LTP),
 		UnrealizedPnL:     pnl,
 		UnrealizedPnLPct:  pct(pnl, entryPrice*float64(quantity)),
+		RealizedPnL:       round2(position.RealizedPnL),
 		Notional:          notional,
 		OpenedAt:          formatTime(position.CreatedAt),
 	}
@@ -424,6 +425,7 @@ func computeDailyPnL(positions []PortfolioPosition, closedTrades []ClosedTrade, 
 	for _, position := range positions {
 		if isSameLocalDay(parseTime(position.OpenedAt), now) {
 			total += position.UnrealizedPnL
+			total += position.RealizedPnL
 		}
 	}
 	for _, trade := range closedTrades {

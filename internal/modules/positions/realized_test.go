@@ -42,7 +42,7 @@ func TestRealizedPnL_PartialExitKeepsOpenWithRealizedSlice(t *testing.T) {
 	seedFill(t, exec, userID, marketID, 130, "buy", 34.85, 15)
 	seedFill(t, exec, userID, marketID, 130, "sell", 49, 5)
 
-	svc := NewService(exec, stubMarkets{ltp: 50})
+	svc := NewService(exec, stubMarkets{ltp: 50}, nil, nil)
 	open, err := svc.GetUserOpenPositions(context.Background(), userID)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -68,7 +68,7 @@ func TestRealizedPnL_FullExitClosesPosition(t *testing.T) {
 	seedFill(t, exec, userID, marketID, 140, "buy", 34.85, 10)
 	seedFill(t, exec, userID, marketID, 140, "sell", 48.78, 10)
 
-	svc := NewService(exec, stubMarkets{ltp: 48})
+	svc := NewService(exec, stubMarkets{ltp: 48}, nil, nil)
 
 	open, _ := svc.GetUserOpenPositions(context.Background(), userID)
 	if len(open) != 0 {
