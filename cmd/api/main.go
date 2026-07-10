@@ -72,7 +72,7 @@ func main() {
 	mustEnsureIndexes(context.Background(), "markets", marketsRepo.EnsureIndexes)
 	seedMongoDefaults(context.Background(), "markets", marketsRepo.SeedDefaults)
 	marketsService := markets.NewService(marketsRepo)
-	marketsHandler := markets.NewHandler(marketsService)
+	marketsHandler := markets.NewHandler(marketsService, matchesService)
 
 	// Orders.
 	ordersRepo := orders.NewMongoRepository(mongo.DB)

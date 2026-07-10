@@ -42,6 +42,7 @@ type EventRepository interface {
 	LegalBallCount(ctx context.Context, matchID string, innings int) (int, error)
 	EventCount(ctx context.Context, matchID string, innings int) (int, error)
 	RecentEvents(ctx context.Context, matchID string, innings, limit int) ([]BallEvent, error)
+	InningsEvents(ctx context.Context, matchID string, innings, limit int) ([]BallEvent, error)
 	DeleteByMatchID(ctx context.Context, matchID string) error
 	EnsureIndexes(ctx context.Context) error
 }
@@ -138,6 +139,27 @@ func (r *MemoryEventRepository) RecentEvents(_ context.Context, matchID string, 
 	return recentFromDescending(desc, limit), nil
 }
 
+func (r *MemoryEventRepository) InningsEvents(_ context.Context, matchID string, innings, limit int) ([]BallEvent, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = len(r.events)
+	}
+
+	filtered := make([]BallEvent, 0, limit)
+	for _, e := range r.events {
+		if e.MatchID != matchID || e.Innings != innings {
+			continue
+		}
+		filtered = append(filtered, e)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered, nil
+}
+
 func (r *MemoryEventRepository) DeleteByMatchID(_ context.Context, matchID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -167,6 +189,7 @@ func (r *MongoEventRepository) EnsureIndexes(ctx context.Context) error {
 	defer cancel()
 	_, err := r.col.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "matchId", Value: 1}, {Key: "innings", Value: 1}, {Key: "_id", Value: 1}}},
+		{Keys: bson.D{{Key: "matchId", Value: 1}, {Key: "innings", Value: 1}, {Key: "createdAt", Value: 1}, {Key: "_id", Value: 1}}},
 	})
 	return err
 }
@@ -237,4 +260,31 @@ func (r *MongoEventRepository) RecentEvents(ctx context.Context, matchID string,
 		return nil, err
 	}
 	return recentFromDescending(desc, limit), nil
+}
+
+func (r *MongoEventRepository) InningsEvents(ctx context.Context, matchID string, innings, limit int) ([]BallEvent, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	if limit <= 0 {
+		limit = 240
+	}
+
+	cur, err := r.col.Find(
+		ctx,
+		bson.M{"matchId": matchID, "innings": innings},
+		options.Find().
+			SetSort(bson.D{{Key: "createdAt", Value: 1}, {Key: "_id", Value: 1}}).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var events []BallEvent
+	if err := cur.All(ctx, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
 }

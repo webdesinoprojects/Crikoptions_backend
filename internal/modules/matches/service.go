@@ -71,10 +71,10 @@ var legacyMatchIDMap = map[string]string{
 }
 
 type Service struct {
-	repo        Repository
-	events      EventRepository
-	publisher   EventPublisher
-	settlement  SettlementRunner
+	repo       Repository
+	events     EventRepository
+	publisher  EventPublisher
+	settlement SettlementRunner
 }
 
 func NewService(repo Repository, events EventRepository, publisher EventPublisher) *Service {
@@ -439,6 +439,27 @@ func (s *Service) GetRecentEvents(ctx context.Context, id string, limit int) ([]
 		})
 	}
 	return out, nil
+}
+
+func (s *Service) GetInningsEvents(ctx context.Context, id string, innings, limit int) ([]BallEvent, error) {
+	if limit <= 0 {
+		limit = 240
+	}
+	objID, err := resolveMatchID(ctx, s.repo, id)
+	if err != nil {
+		return nil, err
+	}
+	match, err := s.repo.GetByID(ctx, objID)
+	if err != nil || match == nil {
+		return nil, errMatchNotFound
+	}
+	if innings <= 0 {
+		innings = match.Innings
+	}
+	if s.events == nil {
+		return []BallEvent{}, nil
+	}
+	return s.events.InningsEvents(ctx, match.ID.Hex(), innings, limit)
 }
 
 // ClearMatchEvents deletes all persisted ball events for the given match.

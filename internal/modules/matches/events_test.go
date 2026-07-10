@@ -86,9 +86,9 @@ func TestEvents_IndependentPerMatch(t *testing.T) {
 func TestEvents_ExtraDoesNotConsumeLegalBall(t *testing.T) {
 	svc := liveSeedService(t)
 
-	feedBall(t, svc, "2", 6, false, "")      // legal ball 1
-	feedBall(t, svc, "2", 1, false, "wide")  // extra, not legal
-	feedBall(t, svc, "2", 2, false, "")      // legal ball 2
+	feedBall(t, svc, "2", 6, false, "")     // legal ball 1
+	feedBall(t, svc, "2", 1, false, "wide") // extra, not legal
+	feedBall(t, svc, "2", 2, false, "")     // legal ball 2
 
 	got, _ := svc.GetRecentEvents(context.Background(), "2", 6)
 	if want := []int{6, 1, 2}; !equalInts(runsOf(got), want) {
@@ -113,6 +113,26 @@ func TestEvents_LimitReturnsLastN(t *testing.T) {
 	got, _ := svc.GetRecentEvents(context.Background(), "2", 6)
 	if want := []int{2, 3, 4, 6, 0, 1}; !equalInts(runsOf(got), want) {
 		t.Fatalf("runs = %v, want last 6 %v", runsOf(got), want)
+	}
+}
+
+func TestEvents_InningsEventsReturnsChronologicalFromStart(t *testing.T) {
+	svc := liveSeedService(t)
+	for _, r := range []int{1, 2, 3, 4, 6, 0, 1} {
+		feedBall(t, svc, "2", r, false, "")
+	}
+
+	got, err := svc.GetInningsEvents(context.Background(), "2", 1, 120)
+	if err != nil {
+		t.Fatalf("GetInningsEvents: %v", err)
+	}
+
+	runs := make([]int, len(got))
+	for i, event := range got {
+		runs[i] = event.Runs
+	}
+	if want := []int{1, 2, 3, 4, 6, 0, 1}; !equalInts(runs, want) {
+		t.Fatalf("runs = %v, want full innings %v", runs, want)
 	}
 }
 

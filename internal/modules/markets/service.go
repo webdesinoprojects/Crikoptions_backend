@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -260,6 +262,56 @@ func (s *Service) CalculatePrice(input PriceCalculationInput) (PriceResponse, er
 	}, nil
 }
 
+func (s *Service) BuildOptionChainHistory(market Market, match matches.Match, events []matches.BallEvent) (OptionChainHistoryResponse, error) {
+	const defaultStep = 15 * time.Second
+
+	innings := match.Innings
+	if innings <= 0 {
+		innings = 1
+	}
+	totalBalls := totalBallsForFormat(match.Format)
+	startedAt := inferInningsStart(match, events, defaultStep)
+
+	state := inningsHistoryState{
+		innings:     innings,
+		ballsLeft:   totalBalls,
+		targetScore: match.TargetScore,
+	}
+
+	points := make([]OptionChainHistoryPoint, 0, (len(events)+1)*int(s.pricingConfig.MaxStrike/s.pricingConfig.StrikeStep))
+	appendSnapshot := func(timestamp time.Time) error {
+		priced, err := s.CalculatePrice(state.priceInput(match.ID.Hex(), totalBalls))
+		if err != nil {
+			return err
+		}
+		points = append(points, optionChainHistoryPoints(market, state.score, priced, timestamp)...)
+		return nil
+	}
+
+	if err := appendSnapshot(startedAt); err != nil {
+		return OptionChainHistoryResponse{}, err
+	}
+
+	for i, event := range events {
+		state.apply(event, totalBalls)
+		timestamp := event.CreatedAt
+		if timestamp.IsZero() {
+			timestamp = startedAt.Add(time.Duration(i+1) * defaultStep)
+		}
+		if err := appendSnapshot(timestamp); err != nil {
+			return OptionChainHistoryResponse{}, err
+		}
+	}
+
+	return OptionChainHistoryResponse{
+		MarketID:  market.ID.Hex(),
+		MatchID:   match.ID.Hex(),
+		Innings:   innings,
+		StartedAt: startedAt.UnixMilli(),
+		Points:    points,
+	}, nil
+}
+
 // PriceCalculationInput is the public request body for POST /api/v1/markets/{id}/calculate-price.
 //
 // Innings 1: pass Innings=1, CurrentScore, WicketsLost, BallsLeft.
@@ -272,4 +324,160 @@ type PriceCalculationInput struct {
 	BallsLeft    int    `json:"ballsLeft"`
 	BallsBowled  int    `json:"ballsBowled"`
 	TargetScore  int    `json:"targetScore"`
+}
+
+type inningsHistoryState struct {
+	innings     int
+	score       int
+	wickets     int
+	legalBalls  int
+	ballsLeft   int
+	targetScore int
+}
+
+func (s *inningsHistoryState) apply(event matches.BallEvent, totalBalls int) {
+	s.score += event.Runs
+	if event.IsWicket {
+		s.wickets++
+		if s.wickets > 10 {
+			s.wickets = 10
+		}
+	}
+	if event.LegalBall {
+		s.legalBalls++
+	}
+	s.ballsLeft = totalBalls - s.legalBalls
+	if s.ballsLeft < 0 {
+		s.ballsLeft = 0
+	}
+}
+
+func (s inningsHistoryState) priceInput(matchID string, totalBalls int) PriceCalculationInput {
+	input := PriceCalculationInput{
+		MatchID:      matchID,
+		Innings:      s.innings,
+		CurrentScore: s.score,
+		WicketsLost:  s.wickets,
+		TargetScore:  s.targetScore,
+	}
+	if s.innings == 2 {
+		input.BallsBowled = totalBalls - s.ballsLeft
+		if input.TargetScore <= 0 {
+			input.TargetScore = max(s.score+1, 1)
+		}
+		return input
+	}
+	input.BallsLeft = s.ballsLeft
+	return input
+}
+
+func optionChainHistoryPoints(market Market, score int, priced PriceResponse, timestamp time.Time) []OptionChainHistoryPoint {
+	if len(priced.OptionChain) == 0 {
+		return nil
+	}
+
+	chain := priced.OptionChain
+	atmStrike := nearestStrike(chain, chainReference(score, priced.ProjectedS0))
+	itmReference := priced.ProjectedS0
+	if score > 0 {
+		itmReference = float64(score)
+	}
+
+	points := make([]OptionChainHistoryPoint, 0, len(chain))
+	for i, item := range chain {
+		bid, ask := quoteFromPremium(item.Premium)
+		bidQty, askQty := ladderQuantities(market, i)
+		points = append(points, OptionChainHistoryPoint{
+			MarketID:  market.ID.Hex(),
+			Timestamp: timestamp.UnixMilli(),
+			Strike:    item.Strike,
+			Premium:   item.Premium,
+			Bid:       bid,
+			Ask:       ask,
+			BidQty:    bidQty,
+			AskQty:    askQty,
+			Moneyness: moneyness(item.Strike, atmStrike, itmReference),
+		})
+	}
+	return points
+}
+
+func ladderQuantities(market Market, index int) (int, int) {
+	if len(market.QuantityLadder) == 0 {
+		return 0, 0
+	}
+	entry := market.QuantityLadder[index%len(market.QuantityLadder)]
+	return entry.BuyerQty, entry.SellerQty
+}
+
+func moneyness(strike, atmStrike, reference float64) string {
+	if strike == atmStrike {
+		return "ATM"
+	}
+	if strike < reference {
+		return "ITM"
+	}
+	return "OTM"
+}
+
+func chainReference(score int, projected float64) float64 {
+	if score > 0 {
+		return roundScoreToNearestStrike(float64(score))
+	}
+	return projected
+}
+
+func roundScoreToNearestStrike(score float64) float64 {
+	if score <= 0 {
+		return 0
+	}
+	remainder := int(score) % 10
+	if remainder <= 5 {
+		return float64(int(score/10) * 10)
+	}
+	return float64((int(score/10) + 1) * 10)
+}
+
+func nearestStrike(chain []StrikePremium, reference float64) float64 {
+	if len(chain) == 0 {
+		return 0
+	}
+	closest := chain[0].Strike
+	for _, item := range chain[1:] {
+		if abs(item.Strike-reference) < abs(closest-reference) {
+			closest = item.Strike
+		}
+	}
+	return closest
+}
+
+func inferInningsStart(match matches.Match, events []matches.BallEvent, step time.Duration) time.Time {
+	if match.Innings <= 1 && !match.StartTime.IsZero() {
+		return match.StartTime
+	}
+	if len(events) > 0 && !events[0].CreatedAt.IsZero() {
+		return events[0].CreatedAt.Add(-step)
+	}
+	if !match.UpdatedAt.IsZero() {
+		return match.UpdatedAt
+	}
+	if !match.StartTime.IsZero() {
+		return match.StartTime
+	}
+	return time.Now().UTC()
+}
+
+func totalBallsForFormat(format string) int {
+	upper := strings.ToUpper(format)
+	if strings.Contains(upper, "ODI") || strings.Contains(upper, "ONE") {
+		return 300
+	}
+	return 120
+}
+
+func abs(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
 }

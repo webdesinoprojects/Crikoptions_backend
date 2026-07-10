@@ -15,6 +15,10 @@ func RegisterRoutes(mux *http.ServeMux, handler *Handler, authHandler *auth.Hand
 		handler.GetMarketDetail(w, r)
 	})
 
+	mux.HandleFunc("GET /api/v1/markets/{id}/option-chain-history", func(w http.ResponseWriter, r *http.Request) {
+		handler.GetOptionChainHistory(w, r)
+	})
+
 	mux.HandleFunc("POST /api/v1/markets/{id}/calculate-price", func(w http.ResponseWriter, r *http.Request) {
 		handler.CalculatePrice(w, r)
 	})

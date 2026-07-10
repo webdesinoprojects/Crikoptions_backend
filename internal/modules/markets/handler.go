@@ -1,18 +1,32 @@
 package markets
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/httpjson"
 )
 
 type Handler struct {
-	service *Service
+	service      *Service
+	matchHistory MatchHistoryProvider
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+type MatchHistoryProvider interface {
+	GetMatchByID(ctx context.Context, id string) (*matches.Match, error)
+	GetInningsEvents(ctx context.Context, id string, innings, limit int) ([]matches.BallEvent, error)
+}
+
+func NewHandler(service *Service, history ...MatchHistoryProvider) *Handler {
+	var provider MatchHistoryProvider
+	if len(history) > 0 {
+		provider = history[0]
+	}
+	return &Handler{service: service, matchHistory: provider}
 }
 
 func (h *Handler) GetMarketsByMatchID(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +47,7 @@ func (h *Handler) GetMarketsByMatchID(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Markets fetched successfully",
-		"data":   markets,
+		"data":    markets,
 	})
 }
 
@@ -59,7 +73,69 @@ func (h *Handler) GetMarketDetail(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, map[string]any{
 		"success": true,
 		"message": "Market detail fetched successfully",
-		"data":   market,
+		"data":    market,
+	})
+}
+
+func (h *Handler) GetOptionChainHistory(w http.ResponseWriter, r *http.Request) {
+	if h.matchHistory == nil {
+		httpjson.Write(w, http.StatusServiceUnavailable, map[string]any{
+			"success": false,
+			"message": "Match history is unavailable",
+		})
+		return
+	}
+
+	marketID := r.PathValue("id")
+	if marketID == "" {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid market ID",
+		})
+		return
+	}
+
+	market, err := h.service.GetMarketByID(r.Context(), marketID)
+	if err != nil || market == nil {
+		httpjson.Write(w, http.StatusNotFound, map[string]any{
+			"success": false,
+			"message": "Market not found",
+		})
+		return
+	}
+
+	match, err := h.matchHistory.GetMatchByID(r.Context(), market.MatchID)
+	if err != nil || match == nil {
+		httpjson.Write(w, http.StatusNotFound, map[string]any{
+			"success": false,
+			"message": "Match not found",
+		})
+		return
+	}
+
+	limit := parseHistoryLimit(r.URL.Query().Get("limit"))
+	events, err := h.matchHistory.GetInningsEvents(r.Context(), match.ID.Hex(), match.Innings, limit)
+	if err != nil {
+		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": "Failed to fetch option chain history",
+		})
+		return
+	}
+
+	history, err := h.service.BuildOptionChainHistory(*market, *match, events)
+	if err != nil {
+		httpjson.Write(w, http.StatusInternalServerError, map[string]any{
+			"success": false,
+			"message": "Failed to build option chain history",
+		})
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Option chain history fetched successfully",
+		"data":    history,
 	})
 }
 
@@ -232,4 +308,23 @@ func (h *Handler) CalculatePrice(w http.ResponseWriter, r *http.Request) {
 		"message": "Price calculated successfully",
 		"data":    result,
 	})
+}
+
+func parseHistoryLimit(raw string) int {
+	const (
+		defaultLimit = 240
+		maxLimit     = 400
+	)
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return defaultLimit
+	}
+	limit, err := strconv.Atoi(trimmed)
+	if err != nil || limit <= 0 {
+		return defaultLimit
+	}
+	if limit > maxLimit {
+		return maxLimit
+	}
+	return limit
 }
