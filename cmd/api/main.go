@@ -15,6 +15,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/middleware"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/chat"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/health"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
@@ -126,6 +127,19 @@ func main() {
 		}
 		return id.Hex(), nil
 	})
+	realtimeHandler.SetAllowedOrigins(cfg.AllowedOrigins)
+	realtimeHandler.SetChatEnabled(cfg.ChatEnabled)
+
+	var chatHandler *chat.Handler
+	if cfg.ChatEnabled {
+		chatRepo := chat.NewMongoRepository(mongo.DB)
+		chatService := chat.NewService(chatRepo, authService, matchesService, realtimeHub)
+		mustEnsureIndexes(context.Background(), "chat", chatService.EnsureIndexes)
+		chatHandler = chat.NewHandler(chatService)
+		log.Printf("chat enabled")
+	} else {
+		log.Printf("chat disabled")
+	}
 
 	// Simulator — replay ball events from CSV datasets automatically.
 	simCfg := simulator.LoadConfig()
@@ -138,8 +152,8 @@ func main() {
 	defer simService.Shutdown()
 	simService.AutoStartOnBoot(context.Background())
 
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler)
-	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler)
+	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS(cfg.AllowedOrigins))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

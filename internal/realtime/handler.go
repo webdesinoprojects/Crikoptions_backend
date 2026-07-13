@@ -10,31 +10,42 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			// Non-browser clients (e.g. native apps) omit Origin.
-			return true
-		}
-		return true // Allow all origins for the API, or configure via CORS policies
-	},
-}
-
 type AuthFunc func(token string) (userID string, err error)
 
 type Handler struct {
-	hub      *Hub
-	authFunc AuthFunc
+	hub            *Hub
+	authFunc       AuthFunc
+	allowedOrigins map[string]struct{}
+	chatEnabled    bool
 }
 
 func NewHandler(hub *Hub, authFunc AuthFunc) *Handler {
-	return &Handler{hub: hub, authFunc: authFunc}
+	return &Handler{hub: hub, authFunc: authFunc, allowedOrigins: map[string]struct{}{}}
+}
+
+func (h *Handler) SetAllowedOrigins(origins []string) {
+	h.allowedOrigins = make(map[string]struct{}, len(origins))
+	for _, origin := range origins {
+		origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+		if origin != "" {
+			h.allowedOrigins[origin] = struct{}{}
+		}
+	}
+}
+
+func (h *Handler) SetChatEnabled(enabled bool) { h.chatEnabled = enabled }
+
+func (h *Handler) originAllowed(r *http.Request) bool {
+	origin := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
+	if origin == "" {
+		return true
+	}
+	_, ok := h.allowedOrigins[origin]
+	return ok
 }
 
 func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{ReadBufferSize: 1024, WriteBufferSize: 1024, CheckOrigin: h.originAllowed}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -111,17 +122,20 @@ func (h *Handler) handleControlMessage(c *Client, message []byte) {
 	}
 
 	action := strings.ToLower(strings.TrimSpace(msg.Action))
-	
+
 	if action == "auth" {
 		if h.authFunc == nil {
+			c.rejectAuth()
 			return
 		}
 		userID, err := h.authFunc(msg.Token)
 		if err != nil {
 			log.Printf("ws auth failed: %v", err)
+			c.rejectAuth()
 			return
 		}
 		c.setUserID(userID)
+		c.trySendPayload(map[string]any{"event": "auth.ok", "data": map[string]string{"userId": userID}})
 		return
 	}
 
@@ -134,14 +148,10 @@ func (h *Handler) handleControlMessage(c *Client, message []byte) {
 	case "subscribe":
 		for _, topic := range topics {
 			topic = strings.TrimSpace(topic)
-			if topic != "" {
-				if strings.HasPrefix(topic, "user:") {
-					parts := strings.Split(topic, ":")
-					if len(parts) >= 2 && parts[1] != c.getUserID() {
-						continue // Unauthorized
-					}
-				}
+			if topic != "" && h.canSubscribe(c, topic) {
 				c.subscribe(topic)
+			} else if topic != "" {
+				c.trySendPayload(map[string]any{"event": "subscription.error", "data": map[string]string{"code": "TOPIC_FORBIDDEN"}})
 			}
 		}
 	case "unsubscribe":
@@ -152,4 +162,18 @@ func (h *Handler) handleControlMessage(c *Client, message []byte) {
 			}
 		}
 	}
+}
+
+func (h *Handler) canSubscribe(c *Client, topic string) bool {
+	if strings.HasPrefix(topic, "match:score:") || strings.HasPrefix(topic, "match:commentary:") {
+		return strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(topic, "match:score:"), "match:commentary:")) != ""
+	}
+	if strings.HasPrefix(topic, "user:") {
+		parts := strings.Split(topic, ":")
+		return len(parts) == 3 && c.getUserID() != "" && parts[1] == c.getUserID() && (parts[2] == "orders" || parts[2] == "positions")
+	}
+	if strings.HasPrefix(topic, "chat:room:") {
+		return h.chatEnabled && c.getUserID() != "" && strings.TrimSpace(strings.TrimPrefix(topic, "chat:room:")) != ""
+	}
+	return false
 }

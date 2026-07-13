@@ -9,11 +9,13 @@ import (
 )
 
 type Config struct {
-	Port       string
-	MongoURI   string
-	MongoDB    string
-	JWTSecret  string
-	TokenHours int
+	Port           string
+	MongoURI       string
+	MongoDB        string
+	JWTSecret      string
+	TokenHours     int
+	ChatEnabled    bool
+	AllowedOrigins []string
 }
 
 func Load() (Config, error) {
@@ -50,12 +52,33 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Port:       port,
-		MongoURI:   mongoURI,
-		MongoDB:    mongoDB,
-		JWTSecret:  jwtSecret,
-		TokenHours: tokenHours,
+		Port: port, MongoURI: mongoURI, MongoDB: mongoDB, JWTSecret: jwtSecret, TokenHours: tokenHours,
+		ChatEnabled:    parseBool(os.Getenv("CHAT_ENABLED")),
+		AllowedOrigins: parseCSVWithDefault(os.Getenv("ALLOWED_ORIGINS"), []string{"http://localhost:3000"}),
 	}, nil
+}
+
+func parseBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseCSVWithDefault(value string, fallback []string) []string {
+	var out []string
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimRight(strings.TrimSpace(item), "/")
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 func toPositiveInt(s string) (int, bool) {

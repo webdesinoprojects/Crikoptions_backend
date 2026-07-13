@@ -1,7 +1,9 @@
 package realtime
 
 import (
+	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -9,12 +11,29 @@ import (
 const sendBufferSize = 64
 
 type Client struct {
-	hub   *Hub
-	conn  *websocket.Conn
-	send  chan []byte
+	hub    *Hub
+	conn   *websocket.Conn
+	send   chan []byte
 	topics map[string]struct{}
 	userID string
 	mu     sync.RWMutex
+}
+
+func (c *Client) trySendPayload(value any) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	select {
+	case c.send <- payload:
+	default:
+	}
+}
+
+func (c *Client) rejectAuth() {
+	c.trySendPayload(map[string]any{"event": "auth.error", "data": map[string]string{"code": "UNAUTHORIZED"}})
+	_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4401, "unauthorized"), time.Now().Add(time.Second))
+	_ = c.conn.Close()
 }
 
 func newClient(hub *Hub, conn *websocket.Conn) *Client {

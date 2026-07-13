@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/chat"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/health"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
@@ -30,6 +31,7 @@ func NewRouter(
 	executionsHandler *executions.Handler,
 	realtimeHandler *realtime.Handler,
 	simulatorHandler *simulator.Handler,
+	chatHandler *chat.Handler,
 ) http.Handler {
 	mux := http.NewServeMux()
 
@@ -79,6 +81,10 @@ func NewRouter(
 
 	if simulatorHandler != nil && authHandler != nil {
 		simulator.RegisterRoutes(mux, simulatorHandler, authHandler)
+	}
+
+	if chatHandler != nil && authHandler != nil {
+		chat.RegisterRoutes(mux, chatHandler, authHandler)
 	}
 
 	return mux
