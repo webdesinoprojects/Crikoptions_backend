@@ -36,6 +36,7 @@ var (
 	errInvalidClientID   = domainError(http.StatusBadRequest, "INVALID_CLIENT_MESSAGE_ID", "clientMessageId must be a UUID")
 	errInvalidReport     = domainError(http.StatusBadRequest, "INVALID_REPORT", "Invalid report reason or note")
 	errReportForbidden   = domainError(http.StatusForbidden, "REPORT_FORBIDDEN", "You cannot report this message")
+	errReportExists      = domainError(http.StatusConflict, "REPORT_ALREADY_EXISTS", "You have already reported this message")
 	errReportNotFound    = domainError(http.StatusNotFound, "REPORT_NOT_FOUND", "Report not found")
 	errInvalidResolution = domainError(http.StatusBadRequest, "INVALID_RESOLUTION", "Resolution must be dismiss or delete_message")
 )

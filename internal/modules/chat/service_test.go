@@ -280,7 +280,7 @@ func TestCreateMessageCanonicalIdempotentAndArchived(t *testing.T) {
 }
 
 func TestUnreadReadReportAndDeletePermissions(t *testing.T) {
-	service, _, _ := newTestService()
+	service, repo, _ := newTestService()
 	message, _, domainErr, err := service.CreateMessage(context.Background(), GlobalRoomID, userOneID, "123e4567-e89b-42d3-a456-426614174010", "hello")
 	if err != nil || domainErr != nil {
 		t.Fatal(err, domainErr)
@@ -303,13 +303,36 @@ func TestUnreadReadReportAndDeletePermissions(t *testing.T) {
 	if err != nil || domainErr != nil || !created || report.Status != "open" {
 		t.Fatalf("report = created:%v domain:%v err:%v", created, domainErr, err)
 	}
+	if _, created, domainErr, err := service.ReportMessage(context.Background(), message.ID, userTwoID, "spam", "duplicate links"); err != nil || created || domainErr == nil || domainErr.Code != "REPORT_ALREADY_EXISTS" {
+		t.Fatalf("duplicate report = created:%v domain:%v err:%v", created, domainErr, err)
+	}
 	resolved, domainErr, err := service.ResolveReport(context.Background(), report.ID, adminID, "delete_message")
-	if err != nil || domainErr != nil || resolved.Status != "resolved" {
+	if err != nil || domainErr != nil || resolved.Status != "resolved" || resolved.Resolution != "delete_message" {
 		t.Fatalf("resolve = %+v domain:%v err:%v", resolved, domainErr, err)
 	}
 	page, domainErr, err := service.ListMessages(context.Background(), GlobalRoomID, "", 50)
 	if err != nil || domainErr != nil || len(page.Items) != 1 || !page.Items[0].Deleted || page.Items[0].Text != "" {
 		t.Fatalf("tombstone = %+v domain:%v err:%v", page, domainErr, err)
+	}
+
+	selfDeleted, _, domainErr, err := service.CreateMessage(context.Background(), GlobalRoomID, userOneID, "123e4567-e89b-42d3-a456-426614174011", "remove my reported message")
+	if err != nil || domainErr != nil {
+		t.Fatal(err, domainErr)
+	}
+	selfReport, _, domainErr, err := service.ReportMessage(context.Background(), selfDeleted.ID, userTwoID, "abuse", "review this")
+	if err != nil || domainErr != nil {
+		t.Fatal(err, domainErr)
+	}
+	if _, _, domainErr, err := service.DeleteMessage(context.Background(), selfDeleted.ID, userOneID, "user"); err != nil || domainErr != nil {
+		t.Fatal(err, domainErr)
+	}
+	selfReportID, err := primitive.ObjectIDFromHex(selfReport.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedSelfReport, found, err := repo.FindReport(context.Background(), selfReportID)
+	if err != nil || !found || resolvedSelfReport.Status != "resolved" || resolvedSelfReport.Resolution != "message_deleted" {
+		t.Fatalf("self-delete report resolution = %+v found:%v err:%v", resolvedSelfReport, found, err)
 	}
 }
 

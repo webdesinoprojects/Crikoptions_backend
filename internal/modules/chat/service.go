@@ -226,6 +226,10 @@ func (s *Service) MarkRead(ctx context.Context, rawRoomID string, userID primiti
 }
 
 func (s *Service) DeleteMessage(ctx context.Context, messageID string, userID primitive.ObjectID, role string) (MessageResponse, bool, *DomainError, error) {
+	return s.deleteMessage(ctx, messageID, userID, role, "message_deleted")
+}
+
+func (s *Service) deleteMessage(ctx context.Context, messageID string, userID primitive.ObjectID, role, reportResolution string) (MessageResponse, bool, *DomainError, error) {
 	id, err := primitive.ObjectIDFromHex(strings.TrimSpace(messageID))
 	if err != nil {
 		return MessageResponse{}, false, errMessageNotFound, nil
@@ -245,8 +249,13 @@ func (s *Service) DeleteMessage(ctx context.Context, messageID string, userID pr
 		return MessageResponse{}, false, nil, err
 	}
 	response := messageResponse(deleted)
-	if changed && s.publisher != nil {
-		s.publisher.Publish(ChatRoomTopic(message.RoomID), ChatEvent{Type: "message.deleted", Message: response})
+	if changed {
+		if err := s.repo.ResolveReportsForMessage(ctx, id, userID, reportResolution); err != nil {
+			return MessageResponse{}, false, nil, err
+		}
+		if s.publisher != nil {
+			s.publisher.Publish(ChatRoomTopic(message.RoomID), ChatEvent{Type: "message.deleted", Message: response})
+		}
 	}
 	return response, changed, nil, nil
 }
@@ -286,6 +295,9 @@ func (s *Service) ReportMessage(ctx context.Context, messageID string, reporterI
 	createdReport, created, err := s.repo.CreateReport(ctx, report)
 	if err != nil {
 		return ReportResponse{}, false, nil, err
+	}
+	if !created {
+		return ReportResponse{}, false, errReportExists, nil
 	}
 	return reportResponse(createdReport), created, nil, nil
 }
@@ -335,11 +347,8 @@ func (s *Service) ResolveReport(ctx context.Context, reportID string, adminID pr
 		return ReportResponse{}, errReportNotFound, nil
 	}
 	if action == "delete_message" {
-		if _, _, domainErr, err := s.DeleteMessage(ctx, report.MessageID.Hex(), adminID, "admin"); err != nil || domainErr != nil && domainErr != errMessageNotFound {
+		if _, _, domainErr, err := s.deleteMessage(ctx, report.MessageID.Hex(), adminID, "admin", action); err != nil || domainErr != nil && domainErr != errMessageNotFound {
 			return ReportResponse{}, domainErr, err
-		}
-		if err := s.repo.ResolveReportsForMessage(ctx, report.MessageID, adminID, action); err != nil {
-			return ReportResponse{}, nil, err
 		}
 		resolved, _, err := s.repo.FindReport(ctx, id)
 		return reportResponse(resolved), nil, err
