@@ -56,6 +56,7 @@ type LeaderboardEntry struct {
 	Name    string  `json:"name"`
 	Country string  `json:"country"`
 	ROI     float64 `json:"roi"`
+	UserID  string  `json:"userId,omitempty"`
 }
 
 type PortfolioSummary struct {
