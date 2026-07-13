@@ -50,6 +50,14 @@ type RiskMetrics struct {
 	StressTestLoss       float64 `json:"stressTestLoss"`
 }
 
+// LeaderboardEntry is one ranked row: rank, name, country, roi.
+type LeaderboardEntry struct {
+	Rank    int     `json:"rank"`
+	Name    string  `json:"name"`
+	Country string  `json:"country"`
+	ROI     float64 `json:"roi"`
+}
+
 type PortfolioSummary struct {
 	TotalEquity        float64             `json:"totalEquity"`
 	BaseCapital        float64             `json:"baseCapital"`

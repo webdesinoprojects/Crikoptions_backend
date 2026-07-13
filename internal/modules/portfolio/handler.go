@@ -87,6 +87,24 @@ func (h *Handler) GetRiskSummary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetLeaderboard returns all users ranked by portfolio ROI (public).
+func (h *Handler) GetLeaderboard(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	rows, err := h.service.GetLeaderboard(ctx)
+	if err != nil {
+		writeServiceError(w, "Failed to fetch leaderboard", err)
+		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Leaderboard fetched successfully",
+		"data":    rows,
+	})
+}
+
 func (h *Handler) GetMarketPnL(w http.ResponseWriter, r *http.Request) {
 	userID, ok := auth.UserIDFromContext(r)
 	if !ok {

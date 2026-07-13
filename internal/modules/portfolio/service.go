@@ -10,6 +10,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
@@ -45,19 +46,25 @@ type BatchMatchReader interface {
 	GetMatchesByIDs(ctx context.Context, ids []string) (map[string]*matches.Match, error)
 }
 
+type UserLister interface {
+	ListAll(ctx context.Context) ([]auth.User, error)
+}
+
 type Service struct {
 	positions PositionReader
 	wallets   WalletReader
 	markets   MarketReader
 	matches   MatchReader
+	users     UserLister
 }
 
-func NewService(positions PositionReader, wallets WalletReader, markets MarketReader, matches MatchReader) *Service {
+func NewService(positions PositionReader, wallets WalletReader, markets MarketReader, matches MatchReader, users UserLister) *Service {
 	return &Service{
 		positions: positions,
 		wallets:   wallets,
 		markets:   markets,
 		matches:   matches,
+		users:     users,
 	}
 }
 

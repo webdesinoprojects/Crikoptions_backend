@@ -99,6 +99,7 @@ func TestSummaryAggregatesPortfolioMetrics(t *testing.T) {
 		stubMatches{items: map[string]*matches.Match{
 			"match-1": {TeamAName: "CSK", TeamBName: "MI"},
 		}},
+		nil,
 	)
 
 	summary, err := svc.GetSummary(context.Background(), userID)
@@ -177,6 +178,7 @@ func TestSummaryHandlesShortPositionsAndClosedShortTrades(t *testing.T) {
 		stubMatches{items: map[string]*matches.Match{
 			"match-1": {TeamAName: "RCB", TeamBName: "KKR"},
 		}},
+		nil,
 	)
 
 	summary, err := svc.GetSummary(context.Background(), userID)

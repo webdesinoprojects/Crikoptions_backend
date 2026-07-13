@@ -7,6 +7,7 @@ import (
 )
 
 func RegisterRoutes(mux *http.ServeMux, handler *Handler, authHandler *auth.Handler) {
+	mux.HandleFunc("GET /api/v1/leaderboard", handler.GetLeaderboard)
 	mux.HandleFunc("GET /api/v1/portfolio/summary", authHandler.RequireAuth(handler.GetSummary))
 	mux.HandleFunc("GET /api/v1/portfolio/daily-pnl", authHandler.RequireAuth(handler.GetDailyPnL))
 	mux.HandleFunc("GET /api/v1/portfolio/risk-summary", authHandler.RequireAuth(handler.GetRiskSummary))

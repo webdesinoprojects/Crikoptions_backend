@@ -17,6 +17,7 @@ type UserRepository interface {
 	FindByEmail(ctx context.Context, email string) (userRecord, bool, error)
 	FindByID(ctx context.Context, id primitive.ObjectID) (User, bool, error)
 	UpdateMe(ctx context.Context, id primitive.ObjectID, name *string, phone *string, settings *UserSettings) (User, error)
+	ListAll(ctx context.Context) ([]User, error)
 	EnsureIndexes(ctx context.Context) error
 }
 
@@ -92,6 +93,27 @@ func (r *MongoUserRepository) FindByID(ctx context.Context, id primitive.ObjectI
 		return User{}, false, err
 	}
 	return rec.User, true, nil
+}
+
+func (r *MongoUserRepository) ListAll(ctx context.Context) ([]User, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cur, err := r.col.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "createdAt", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	var out []User
+	for cur.Next(ctx) {
+		var rec userRecord
+		if err := cur.Decode(&rec); err != nil {
+			return nil, err
+		}
+		out = append(out, rec.User)
+	}
+	return out, cur.Err()
 }
 
 func (r *MongoUserRepository) UpdateMe(ctx context.Context, id primitive.ObjectID, name *string, phone *string, settings *UserSettings) (User, error) {
@@ -196,6 +218,14 @@ func (r *InMemoryUserRepository) FindByID(ctx context.Context, id primitive.Obje
 		return User{}, false, nil
 	}
 	return rec.User, true, nil
+}
+
+func (r *InMemoryUserRepository) ListAll(ctx context.Context) ([]User, error) {
+	out := make([]User, 0, len(r.usersByID))
+	for _, rec := range r.usersByID {
+		out = append(out, rec.User)
+	}
+	return out, nil
 }
 
 func (r *InMemoryUserRepository) UpdateMe(ctx context.Context, id primitive.ObjectID, name *string, phone *string, settings *UserSettings) (User, error) {

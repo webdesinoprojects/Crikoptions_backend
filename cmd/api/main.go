@@ -109,7 +109,7 @@ func main() {
 
 	// Portfolio aggregates wallet, positions, markets, and matches server-side so
 	// dashboard/portfolio calculations are not duplicated in frontend clients.
-	portfolioService := portfolio.NewService(positionsService, walletService, marketsService, matchesService)
+	portfolioService := portfolio.NewService(positionsService, walletService, marketsService, matchesService, authRepo)
 	portfolioHandler := portfolio.NewHandler(portfolioService)
 
 	// Watchlist.
