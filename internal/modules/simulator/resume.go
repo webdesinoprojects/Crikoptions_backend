@@ -131,17 +131,6 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 		return nil, fmt.Errorf("dataset %q is for match %s, not %s", scriptName, ds.MatchID, matchID)
 	}
 
-	lease, err := s.acquireLease(ctx, matchID)
-	if err != nil {
-		return nil, err
-	}
-	leaseTransferred := false
-	defer func() {
-		if !leaseTransferred {
-			lease.Release(context.Background())
-		}
-	}()
-
 	match, err := s.svc.GetMatchByID(ctx, matchID)
 	if err != nil || match == nil {
 		return nil, fmt.Errorf("match not found: %s", matchID)
@@ -178,12 +167,7 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 	}
 
 	if plan.freshStart {
-		status, err := s.startWithLease(ctx, matchID, req, ds, lease)
-		if err != nil {
-			return nil, err
-		}
-		leaseTransferred = true
-		return status, nil
+		return s.startReplay(ctx, matchID, req, ds)
 	}
 
 	// Stop any in-process worker without touching persisted match state.
@@ -241,9 +225,7 @@ func (s *Service) ResumeOrStart(ctx context.Context, matchID string, req StartRe
 		plan.innings, plan.cursor,
 		match.CurrentScore, match.WicketsLost, match.OversText, match.TargetScore,
 	)
-	w.lease = lease
 	s.attachWorker(matchID, ds, w)
-	leaseTransferred = true
 
 	log.Printf("simulator[%s]: resumed script=%s innings=%d cursor=%d/%d score=%d/%d",
 		matchID, scriptName, plan.innings, plan.cursor, len(ds.Events[plan.innings]),

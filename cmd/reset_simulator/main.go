@@ -12,7 +12,6 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/simulator"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 const defaultMatchSpecs = "0000000000000000000000aa=csk_vs_mi,0000000000000000000000bb=rcb_vs_kkr"
@@ -61,57 +60,14 @@ func main() {
 	if err := eventsRepo.EnsureIndexes(ctx); err != nil {
 		log.Fatalf("ensure match_events indexes: %v", err)
 	}
-	lockStore := simulator.NewMongoLockStore(mongo.DB)
-	if err := lockStore.EnsureIndexes(ctx); err != nil {
-		log.Fatalf("ensure simulator_locks indexes: %v", err)
-	}
 	matchesService := matches.NewService(matchesRepo, eventsRepo, nil)
 
 	log.Printf("reset simulator target database=%q dryRun=%v", cfg.MongoDB, *dryRun)
 	for _, spec := range specs {
-		if !*dryRun {
-			token := primitive.NewObjectID().Hex()
-			ok, err := lockStore.Acquire(ctx, spec.matchID, "reset_simulator:"+simCfg.InstanceID, token, simCfg.LockTTL)
-			if err != nil {
-				log.Fatalf("acquire simulator lock %s: %v", spec.matchID, err)
-			}
-			if !ok {
-				log.Fatalf("simulator lock is held for %s; stop the active writer or wait for the lease to expire", spec.matchID)
-			}
-			defer func(matchID, token string) {
-				if err := lockStore.Release(context.Background(), matchID, "reset_simulator:"+simCfg.InstanceID, token); err != nil {
-					log.Printf("release simulator lock %s: %v", matchID, err)
-				}
-			}(spec.matchID, token)
-		}
 		if err := resetOne(ctx, matchesService, simCfg.DataDir, spec, *dryRun); err != nil {
 			log.Fatalf("reset %s (%s): %v", spec.matchID, spec.script, err)
 		}
-		if *dryRun {
-			if err := printLock(ctx, lockStore, spec.matchID); err != nil {
-				log.Fatalf("read simulator lock %s: %v", spec.matchID, err)
-			}
-		}
 	}
-}
-
-func printLock(ctx context.Context, store *simulator.MongoLockStore, matchID string) error {
-	record, ok, err := store.Get(ctx, matchID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		log.Printf("match=%s lock=none", matchID)
-		return nil
-	}
-	log.Printf(
-		"match=%s lock=owner:%s expiresAt:%s updatedAt:%s",
-		matchID,
-		record.OwnerID,
-		record.ExpiresAt.Format(time.RFC3339),
-		record.UpdatedAt.Format(time.RFC3339),
-	)
-	return nil
 }
 
 func resetOne(ctx context.Context, svc *matches.Service, dataDir string, spec resetSpec, dryRun bool) error {
