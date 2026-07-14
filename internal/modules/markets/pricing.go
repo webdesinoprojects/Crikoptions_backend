@@ -281,10 +281,3 @@ func round2(v float64) float64 {
 	return math.Round(v*100) / 100
 }
 
-func zeroPremiumChain(cfg PricingConfig) []StrikePremium {
-	chain := make([]StrikePremium, 0, int(cfg.MaxStrike/cfg.StrikeStep))
-	for K := cfg.StrikeStep; K <= cfg.MaxStrike; K += cfg.StrikeStep {
-		chain = append(chain, StrikePremium{Strike: K, Premium: 0})
-	}
-	return chain
-}

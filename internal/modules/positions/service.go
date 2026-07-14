@@ -540,25 +540,6 @@ func derivePositionID(userID primitive.ObjectID, matchID, marketID string, strik
 	return hex.EncodeToString(h.Sum(nil))[:24]
 }
 
-func filterOpen(in []Position) []Position {
-	out := make([]Position, 0, len(in))
-	for _, p := range in {
-		if p.Status == "open" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func filterClosed(in []Position) []Position {
-	out := make([]Position, 0, len(in))
-	for _, p := range in {
-		if p.Status == "closed" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
 
 func applyStaticFilters(in []Position, f PositionFilter) []Position {
 	out := make([]Position, 0, len(in))

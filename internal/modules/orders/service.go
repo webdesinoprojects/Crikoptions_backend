@@ -822,10 +822,6 @@ func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, orde
 	err := s.repo.DoTx(ctx, func(txCtx context.Context) error {
 		switch order.Side {
 		case "buy":
-			reserveRelease := order.ReservedReleaseForQuantity(openLongQty)
-			if _, txErr := s.wallets.SettleBuyFill(txCtx, userID, fillNotional, reserveRelease, order.ID.Hex(), fmt.Sprintf("Buy fill for order %s", order.ID.Hex())); txErr != nil {
-				return txErr
-			}
 			if coverShortQty > 0 {
 				release := shortCollateralRelease(before.AvgSellPrice, fillPrice, coverShortQty)
 				if release > 0 {
@@ -833,6 +829,10 @@ func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, orde
 						return txErr
 					}
 				}
+			}
+			reserveRelease := order.ReservedReleaseForQuantity(openLongQty)
+			if _, txErr := s.wallets.SettleBuyFill(txCtx, userID, fillNotional, reserveRelease, order.ID.Hex(), fmt.Sprintf("Buy fill for order %s", order.ID.Hex())); txErr != nil {
+				return txErr
 			}
 		case "sell":
 			if closeLongQty > 0 {

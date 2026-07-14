@@ -247,7 +247,6 @@ func (r *MongoRepository) EnsureDefaultMatches(ctx context.Context) error {
 		if match.CreatedAt.IsZero() {
 			match.CreatedAt = now
 		}
-		match.UpdatedAt = now
 
 		filter := bson.M{"_id": match.ID}
 		update := bson.M{
