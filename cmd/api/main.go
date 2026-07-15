@@ -146,8 +146,11 @@ func main() {
 
 	// Simulator — replay ball events from CSV datasets automatically.
 	simCfg := simulator.LoadConfig()
+	simLocks := simulator.NewMongoLockStore(mongo.DB)
+	mustEnsureIndexes(context.Background(), "simulator_locks", simLocks.EnsureIndexes)
 	simService := simulator.NewService(simCfg, matchesService)
 	simService.SetSquareOff(ordersService)
+	simService.SetLockStore(simLocks)
 	simHandler := simulator.NewHandler(simService)
 	defer simService.Shutdown()
 	simService.AutoStartOnBoot(context.Background())

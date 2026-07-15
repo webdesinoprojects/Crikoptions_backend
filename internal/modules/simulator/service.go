@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 )
@@ -34,6 +35,8 @@ type Config struct {
 	AutoStart          bool
 	AutoLoop           bool // restart from 0/0 when a replay finishes
 	ResetOnBoot        bool
+	InstanceID         string
+	LockTTL            time.Duration
 }
 
 // AutoStartSpec pairs a match hex id with its CSV script folder.
@@ -79,6 +82,20 @@ func LoadConfig() Config {
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("SIMULATOR_RESET_ON_BOOT"))); v == "false" || v == "0" {
 		resetOnBoot = false
 	}
+	instanceID := strings.TrimSpace(os.Getenv("SIMULATOR_INSTANCE_ID"))
+	if instanceID == "" {
+		host, _ := os.Hostname()
+		if strings.TrimSpace(host) == "" {
+			host = "unknown-host"
+		}
+		instanceID = fmt.Sprintf("%s:%d", host, os.Getpid())
+	}
+	lockTTL := time.Duration(max(90, interval*4)) * time.Second
+	if v := strings.TrimSpace(os.Getenv("SIMULATOR_LOCK_TTL_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lockTTL = time.Duration(n) * time.Second
+		}
+	}
 	return Config{
 		DataDir:            dir,
 		DefaultIntervalSec: interval,
@@ -86,6 +103,8 @@ func LoadConfig() Config {
 		AutoStart:          autoStart,
 		AutoLoop:           autoLoop,
 		ResetOnBoot:        resetOnBoot,
+		InstanceID:         instanceID,
+		LockTTL:            lockTTL,
 	}
 }
 
@@ -133,6 +152,7 @@ type Service struct {
 	cfg       Config
 	svc       MatchService
 	squareOff SquareOffPort
+	lockStore LockStore
 	workers   sync.Map // map[matchID string]*Worker
 }
 
@@ -144,6 +164,11 @@ func NewService(cfg Config, svc MatchService) *Service {
 // SetSquareOff wires auto square-off when innings 1 ends.
 func (s *Service) SetSquareOff(port SquareOffPort) {
 	s.squareOff = port
+}
+
+// SetLockStore enables distributed simulator ownership across API instances.
+func (s *Service) SetLockStore(store LockStore) {
+	s.lockStore = store
 }
 
 // Start loads the CSV dataset, resets the match to a clean state, and launches
@@ -169,10 +194,26 @@ func (s *Service) Start(ctx context.Context, matchID string, req StartRequest) (
 		return nil, fmt.Errorf("dataset %q is for match %s, not %s", scriptName, ds.MatchID, matchID)
 	}
 
-	return s.startReplay(ctx, matchID, req, ds)
+	lease, err := s.acquireLease(ctx, matchID)
+	if err != nil {
+		return nil, err
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred {
+			lease.Release(context.Background())
+		}
+	}()
+
+	status, err := s.startWithLease(ctx, matchID, req, ds, lease)
+	if err != nil {
+		return nil, err
+	}
+	leaseTransferred = true
+	return status, nil
 }
 
-func (s *Service) startReplay(ctx context.Context, matchID string, req StartRequest, ds *CSVDataset) (*SimStatus, error) {
+func (s *Service) startWithLease(ctx context.Context, matchID string, req StartRequest, ds *CSVDataset, lease *LockLease) (*SimStatus, error) {
 	// Stop any existing worker for this match.
 	if prev, ok := s.workers.Load(matchID); ok {
 		prev.(*Worker).Stop()
@@ -188,6 +229,7 @@ func (s *Service) startReplay(ctx context.Context, matchID string, req StartRequ
 	intervalSec := s.resolveIntervalSec(req.IntervalSec, ds.Innings1.ReplayIntervalSec)
 
 	w := newWorker(matchID, ds, s.svc, intervalSec)
+	w.lease = lease
 	s.attachWorker(matchID, ds, w)
 
 	return s.statusFrom(matchID, w), nil
@@ -262,6 +304,12 @@ func (s *Service) Resume(matchID string) (*SimStatus, error) {
 
 // Reset stops the worker and clears match state back to 0/0.
 func (s *Service) Reset(ctx context.Context, matchID string) (*SimStatus, error) {
+	lease, err := s.acquireLease(ctx, matchID)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.Release(context.Background())
+
 	if prev, ok := s.workers.Load(matchID); ok {
 		prev.(*Worker).Stop()
 		s.workers.Delete(matchID)
@@ -300,6 +348,35 @@ func (s *Service) Status(matchID string) *SimStatus {
 	return s.statusFrom(matchID, w.(*Worker))
 }
 
+func (s *Service) acquireLease(ctx context.Context, matchID string) (*LockLease, error) {
+	if s.lockStore == nil {
+		return nil, nil
+	}
+	ttl := s.cfg.LockTTL
+	if ttl <= 0 {
+		ttl = 90 * time.Second
+	}
+	ownerID := strings.TrimSpace(s.cfg.InstanceID)
+	if ownerID == "" {
+		ownerID = "unknown-instance"
+	}
+	token := newLeaseToken()
+	ok, err := s.lockStore.Acquire(ctx, matchID, ownerID, token, ttl)
+	if err != nil {
+		return nil, fmt.Errorf("acquire simulator lock for %s: %w", matchID, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w for match %s", ErrLockHeld, matchID)
+	}
+	return &LockLease{
+		store:   s.lockStore,
+		matchID: matchID,
+		ownerID: ownerID,
+		token:   token,
+		ttl:     ttl,
+	}, nil
+}
+
 // Shutdown stops all active workers gracefully (call on server shutdown).
 func (s *Service) Shutdown() {
 	s.workers.Range(func(_, v any) bool {
@@ -308,7 +385,7 @@ func (s *Service) Shutdown() {
 	})
 }
 
-// AutoStartOnBoot launches the default CSV replays (CSK vs MI + RCB vs KKR) when
+// AutoStartOnBoot launches the default CSV replays when
 // SIMULATOR_ENABLED and SIMULATOR_AUTO_START are true.
 func (s *Service) AutoStartOnBoot(ctx context.Context) {
 	if !s.cfg.Enabled || !s.cfg.AutoStart {
