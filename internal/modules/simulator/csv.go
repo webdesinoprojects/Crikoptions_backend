@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 )
 
 // InningsConfig holds per-innings configuration from matches_config.csv.
@@ -19,6 +21,7 @@ type InningsConfig struct {
 	StartNonStriker   string
 	StartBowler       string
 	TargetScore       int
+	TotalBalls        int // legal balls per innings (120 T20, 300 ODI); 0 → 120
 }
 
 // BallRow holds one delivery row from a ball_events CSV.
@@ -43,6 +46,7 @@ type BallRow struct {
 // CSVDataset is the fully loaded script for one match.
 type CSVDataset struct {
 	MatchID     string
+	TotalBalls  int // legal balls per innings
 	Innings1    InningsConfig
 	Innings2    InningsConfig
 	HasInnings2 bool
@@ -61,9 +65,20 @@ func LoadDataset(dataDir, scriptName string) (*CSVDataset, error) {
 		return nil, fmt.Errorf("matches_config.csv is empty")
 	}
 
+	totalBalls := matches.BallsT20
+	for _, cfg := range configs {
+		if cfg.TotalBalls > totalBalls {
+			totalBalls = cfg.TotalBalls
+		}
+	}
+	if configs[0].TotalBalls > 0 {
+		totalBalls = configs[0].TotalBalls
+	}
+
 	ds := &CSVDataset{
-		MatchID: configs[0].MatchID,
-		Events:  make(map[int][]BallRow),
+		MatchID:    configs[0].MatchID,
+		TotalBalls: totalBalls,
+		Events:     make(map[int][]BallRow),
 	}
 	for _, cfg := range configs {
 		switch cfg.Innings {
@@ -75,7 +90,7 @@ func LoadDataset(dataDir, scriptName string) (*CSVDataset, error) {
 		}
 	}
 
-	rows, err := loadBallEvents(dir)
+	rows, err := loadBallEvents(dir, totalBalls)
 	if err != nil {
 		return nil, fmt.Errorf("ball_events: %w", err)
 	}
@@ -119,17 +134,21 @@ func loadMatchesConfig(path string) ([]InningsConfig, error) {
 			StartNonStriker:   field(rec, idx, "start_non_striker"),
 			StartBowler:       field(rec, idx, "start_bowler"),
 			TargetScore:       intField(rec, idx, "target_score"),
+			TotalBalls:        intField(rec, idx, "total_balls"),
 		})
 	}
 	return out, nil
 }
 
 // loadBallEvents loads the single full-match source-of-truth CSV for a script.
-func loadBallEvents(dir string) ([]BallRow, error) {
-	return readBallCSV(filepath.Join(dir, "ball_events_full_match.csv"))
+func loadBallEvents(dir string, totalBalls int) ([]BallRow, error) {
+	return readBallCSV(filepath.Join(dir, "ball_events_full_match.csv"), totalBalls)
 }
 
-func readBallCSV(path string) ([]BallRow, error) {
+func readBallCSV(path string, totalBalls int) ([]BallRow, error) {
+	if totalBalls <= 0 {
+		totalBalls = matches.BallsT20
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -189,7 +208,7 @@ func readBallCSV(path string) ([]BallRow, error) {
 			DelaySec:       delay,
 			ScoreAfter:     intField(rec, idx, "score_after"),
 			WicketsAfter:   intField(rec, idx, "wickets_after"),
-			BallsLeftAfter: max(0, 120-legalByInnings[innings]),
+			BallsLeftAfter: max(0, totalBalls-legalByInnings[innings]),
 			Commentary:     field(rec, idx, "commentary"),
 			EndInnings:     boolField(rec, idx, "end_innings"),
 			EndMatch:       boolField(rec, idx, "end_match"),

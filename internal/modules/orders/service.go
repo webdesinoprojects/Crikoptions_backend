@@ -579,14 +579,15 @@ func normalizePricingSnapshot(snapshot markets.PriceCalculationInput) markets.Pr
 	if snapshot.BallsLeft < 0 {
 		snapshot.BallsLeft = 0
 	}
-	if snapshot.BallsLeft > 120 {
-		snapshot.BallsLeft = 120
+	maxBalls := matches.BallsODI
+	if snapshot.BallsLeft > maxBalls {
+		snapshot.BallsLeft = maxBalls
 	}
 	if snapshot.BallsBowled < 0 {
 		snapshot.BallsBowled = 0
 	}
-	if snapshot.BallsBowled > 120 {
-		snapshot.BallsBowled = 120
+	if snapshot.BallsBowled > maxBalls {
+		snapshot.BallsBowled = maxBalls
 	}
 	return snapshot
 }

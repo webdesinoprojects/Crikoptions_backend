@@ -47,6 +47,7 @@ func DefaultAutoStartSpecs() []AutoStartSpec {
 	return []AutoStartSpec{
 		{MatchID: "0000000000000000000000aa", ScriptName: "csk_vs_mi"},
 		{MatchID: "0000000000000000000000bb", ScriptName: "rcb_vs_kkr"},
+		{MatchID: "0000000000000000000000dd", ScriptName: "ind_vs_aus_odi"},
 	}
 }
 
@@ -202,12 +203,16 @@ func (s *Service) resetMatchForReplay(ctx context.Context, matchID string, ds *C
 	if err := s.svc.ClearMatchEvents(ctx, matchID); err != nil {
 		log.Printf("simulator[%s]: ClearMatchEvents: %v", matchID, err)
 	}
+	ballsLeft := ds.TotalBalls
+	if ballsLeft <= 0 {
+		ballsLeft = matches.BallsT20
+	}
 	targetZero := 0
 	if _, err := s.svc.UpdateMatchScore(ctx, matchID, matches.UpdateScoreRequest{
 		Innings:      1,
 		CurrentScore: 0,
 		WicketsLost:  0,
-		BallsLeft:    120,
+		BallsLeft:    ballsLeft,
 		TargetScore:  &targetZero,
 		Status:       matches.StatusLive,
 	}); err != nil {
@@ -265,12 +270,16 @@ func (s *Service) Reset(ctx context.Context, matchID string) (*SimStatus, error)
 	if err := s.svc.ClearMatchEvents(ctx, matchID); err != nil {
 		log.Printf("simulator[%s]: Reset ClearMatchEvents: %v", matchID, err)
 	}
+	ballsLeft := matches.BallsT20
+	if match, err := s.svc.GetMatchByID(ctx, matchID); err == nil && match != nil {
+		ballsLeft = matches.TotalBallsForFormat(match.Format)
+	}
 	targetZero := 0
 	_, _ = s.svc.UpdateMatchScore(ctx, matchID, matches.UpdateScoreRequest{
 		Innings:      1,
 		CurrentScore: 0,
 		WicketsLost:  0,
-		BallsLeft:    120,
+		BallsLeft:    ballsLeft,
 		TargetScore:  &targetZero,
 		Status:       "live",
 	})

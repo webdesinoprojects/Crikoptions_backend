@@ -72,6 +72,9 @@ func main() {
 	marketsRepo := markets.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "markets", marketsRepo.EnsureIndexes)
 	seedMongoDefaults(context.Background(), "markets", marketsRepo.SeedDefaults)
+	if err := marketsRepo.EnsureDefaultMarkets(context.Background()); err != nil {
+		log.Printf("markets EnsureDefaultMarkets: %v", err)
+	}
 	marketsService := markets.NewService(marketsRepo)
 	marketsHandler := markets.NewHandler(marketsService, matchesService)
 

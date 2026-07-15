@@ -68,6 +68,8 @@ var legacyMatchIDMap = map[string]string{
 	"bb": "0000000000000000000000bb",
 	"3":  "0000000000000000000000cc",
 	"cc": "0000000000000000000000cc",
+	"4":  "0000000000000000000000dd",
+	"dd": "0000000000000000000000dd",
 }
 
 type Service struct {
@@ -90,7 +92,7 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	all := s.repo.GetAll(ctx)
 	for i := range all {
 		all[i].Status = NormalizeStatus(all[i].Status)
-		all[i].OversText = calculateOvers(all[i].BallsLeft)
+		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)
 	}
 	return SortHomeMatches(all)
 }
@@ -105,7 +107,7 @@ func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
 		return match, err
 	}
 	match.Status = NormalizeStatus(match.Status)
-	match.OversText = calculateOvers(match.BallsLeft)
+	match.OversText = calculateOvers(match.BallsLeft, match.Format)
 	return match, nil
 }
 
@@ -141,7 +143,7 @@ func (s *Service) GetMatchesByIDs(ctx context.Context, ids []string) (map[string
 	}
 	for objID, match := range matchesByID {
 		match.Status = NormalizeStatus(match.Status)
-		match.OversText = calculateOvers(match.BallsLeft)
+		match.OversText = calculateOvers(match.BallsLeft, match.Format)
 		matchCopy := match
 		out[byHex[objID]] = &matchCopy
 		out[objID.Hex()] = &matchCopy

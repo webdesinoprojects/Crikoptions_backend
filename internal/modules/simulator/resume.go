@@ -45,7 +45,7 @@ func deriveResumePlan(match *matches.Match, ds *CSVDataset, counts map[int]int, 
 	if innings < 1 {
 		innings = 1
 	}
-	expectedLegal := 120 - match.BallsLeft
+	expectedLegal := matches.TotalBallsForFormat(match.Format) - match.BallsLeft
 	if expectedLegal < 0 {
 		expectedLegal = 0
 	}
@@ -87,11 +87,16 @@ func beginInnings2(ctx context.Context, svc MatchService, matchID string, ds *CS
 		targetScore = firstInningsScore + 1
 	}
 
+	ballsLeft := ds.TotalBalls
+	if ballsLeft <= 0 {
+		ballsLeft = matches.BallsT20
+	}
+
 	if _, err := svc.UpdateMatchScore(ctx, matchID, matches.UpdateScoreRequest{
 		Innings:      2,
 		CurrentScore: 0,
 		WicketsLost:  0,
-		BallsLeft:    120,
+		BallsLeft:    ballsLeft,
 		TargetScore:  &targetScore,
 		Status:       matches.StatusLive,
 	}); err != nil {

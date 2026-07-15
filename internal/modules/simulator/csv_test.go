@@ -69,6 +69,40 @@ func TestLoadDataset_rcb_vs_kkr(t *testing.T) {
 	}
 }
 
+func TestLoadDataset_ind_vs_aus_odi(t *testing.T) {
+	dataDir := filepath.Join("..", "..", "..", "data", "simulator")
+	ds, err := LoadDataset(dataDir, "ind_vs_aus_odi")
+	if err != nil {
+		t.Fatalf("LoadDataset: %v", err)
+	}
+	if ds.MatchID != "0000000000000000000000dd" {
+		t.Fatalf("MatchID = %q, want …dd", ds.MatchID)
+	}
+	if ds.TotalBalls != 300 {
+		t.Fatalf("TotalBalls = %d, want 300", ds.TotalBalls)
+	}
+	if !ds.HasInnings2 {
+		t.Fatal("expected innings 2 config")
+	}
+	if len(ds.Events[1]) == 0 || len(ds.Events[2]) == 0 {
+		t.Fatal("expected events for both innings")
+	}
+	lastI1 := ds.Events[1][len(ds.Events[1])-1]
+	if !lastI1.EndInnings {
+		t.Fatal("innings 1 should end_innings=true")
+	}
+	if lastI1.BallsLeftAfter != 0 && lastI1.WicketsAfter < 10 {
+		t.Fatalf("innings 1 should finish overs or all out; ballsLeft=%d wickets=%d", lastI1.BallsLeftAfter, lastI1.WicketsAfter)
+	}
+	lastI2 := ds.Events[2][len(ds.Events[2])-1]
+	if !lastI2.EndMatch {
+		t.Fatal("last innings-2 row should end_match=true")
+	}
+	if ds.Innings1.StartStriker != "Rohit Sharma" {
+		t.Fatalf("striker = %q, want Rohit Sharma", ds.Innings1.StartStriker)
+	}
+}
+
 func TestLoadDataset_csk_vs_mi(t *testing.T) {
 	dataDir := filepath.Join("..", "..", "..", "data", "simulator")
 	ds, err := LoadDataset(dataDir, "csk_vs_mi")
@@ -85,15 +119,25 @@ func TestLoadDataset_csk_vs_mi(t *testing.T) {
 
 func TestSimulatorCSVHeadersAreClean(t *testing.T) {
 	dataDir := filepath.Join("..", "..", "..", "data", "simulator")
-	for _, script := range []string{"csk_vs_mi", "rcb_vs_kkr"} {
+	for _, script := range []string{"csk_vs_mi", "rcb_vs_kkr", "ind_vs_aus_odi"} {
 		ballPath := filepath.Join(dataDir, script, "ball_events_full_match.csv")
 		if got := readCSVHeader(t, ballPath); !reflect.DeepEqual(got, cleanBallHeaders) {
 			t.Fatalf("%s header = %#v, want %#v", ballPath, got, cleanBallHeaders)
 		}
 
 		configPath := filepath.Join(dataDir, script, "matches_config.csv")
-		if got := readCSVHeader(t, configPath); !reflect.DeepEqual(got, cleanConfigHeaders) {
-			t.Fatalf("%s header = %#v, want %#v", configPath, got, cleanConfigHeaders)
+		got := readCSVHeader(t, configPath)
+		for _, col := range cleanConfigHeaders {
+			found := false
+			for _, h := range got {
+				if h == col {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s missing required column %q (got %#v)", configPath, col, got)
+			}
 		}
 
 		for _, removed := range []string{"ball_events.csv", "ball_events_innings1.csv", "ball_events_innings2.csv"} {

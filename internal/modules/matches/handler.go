@@ -97,10 +97,10 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.BallsLeft > 120 {
+	if req.BallsLeft > BallsODI {
 		httpjson.Write(w, http.StatusBadRequest, map[string]any{
 			"success": false,
-			"message": "Balls left cannot exceed 120 for T20",
+			"message": "Balls left cannot exceed format maximum",
 		})
 		return
 	}

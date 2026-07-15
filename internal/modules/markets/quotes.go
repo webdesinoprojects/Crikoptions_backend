@@ -10,15 +10,17 @@ const (
 
 // PricingInputFromMatch maps live match state into pricing-engine input.
 func PricingInputFromMatch(match matches.Match) PriceCalculationInput {
+	totalBalls := matches.TotalBallsForFormat(match.Format)
 	input := PriceCalculationInput{
 		MatchID:      match.ID.Hex(),
+		Format:       match.Format,
 		Innings:      match.Innings,
 		CurrentScore: match.CurrentScore,
 		WicketsLost:  match.WicketsLost,
 		TargetScore:  match.TargetScore,
 	}
 	if match.Innings == 2 {
-		input.BallsBowled = 120 - match.BallsLeft
+		input.BallsBowled = totalBalls - match.BallsLeft
 		if input.BallsBowled < 0 {
 			input.BallsBowled = 0
 		}

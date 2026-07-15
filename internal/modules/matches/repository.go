@@ -100,7 +100,7 @@ func (r *MemoryRepository) UpdateScore(ctx context.Context, id primitive.ObjectI
 			r.matches[i].BallsLeft = score.BallsLeft
 			r.matches[i].TargetScore = score.TargetScore
 			r.matches[i].Status = score.Status
-			r.matches[i].OversText = calculateOvers(score.BallsLeft)
+			r.matches[i].OversText = calculateOvers(score.BallsLeft, r.matches[i].Format)
 			if score.LiveContext != nil {
 				liveContext := *score.LiveContext
 				r.matches[i].LiveContext = &liveContext
@@ -122,7 +122,7 @@ func (r *MemoryRepository) demoteOtherLiveLocked(keepID primitive.ObjectID) {
 			r.matches[i].Status = StatusUpcoming
 			r.matches[i].CurrentScore = 0
 			r.matches[i].WicketsLost = 0
-			r.matches[i].BallsLeft = 120
+			r.matches[i].BallsLeft = TotalBallsForFormat(r.matches[i].Format)
 			r.matches[i].Innings = 1
 			r.matches[i].TargetScore = 0
 			r.matches[i].OversText = "0.0"
@@ -236,8 +236,8 @@ func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
 	return len(docs), nil
 }
 
-// EnsureDefaultMatches upserts the built-in CSK/MI, RCB/KKR, and DC/SRH matches so
-// hex ids …aa and …bb always exist even when the collection was seeded earlier.
+// EnsureDefaultMatches upserts the built-in sample matches (T20 + ODI) so
+// hex ids …aa / …bb / …cc / …dd always exist even when the collection was seeded earlier.
 func (r *MongoRepository) EnsureDefaultMatches(ctx context.Context) error {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
@@ -367,6 +367,12 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 
 	score.Status = NormalizeStatus(score.Status)
 
+	var existing Match
+	format := ""
+	if err := r.col.FindOne(ctx, bson.M{"_id": id}).Decode(&existing); err == nil {
+		format = existing.Format
+	}
+
 	set := bson.M{
 		"innings":      score.Innings,
 		"currentScore": score.CurrentScore,
@@ -374,7 +380,7 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 		"ballsLeft":    score.BallsLeft,
 		"targetScore":  score.TargetScore,
 		"status":       score.Status,
-		"oversText":    calculateOvers(score.BallsLeft),
+		"oversText":    calculateOvers(score.BallsLeft, format),
 		"updatedAt":    time.Now().UTC(),
 	}
 	if score.LiveContext != nil {
@@ -418,13 +424,14 @@ func (r *MongoRepository) DemoteOtherLiveMatches(ctx context.Context, keepID pri
 			"status":       StatusUpcoming,
 			"currentScore": 0,
 			"wicketsLost":  0,
-			"ballsLeft":    120,
 			"innings":      1,
 			"targetScore":  0,
 			"oversText":    "0.0",
 			"liveContext":  nil,
 			"updatedAt":    now,
 		}},
+		// ballsLeft is not bulk-reset here — formats differ (T20=120, ODI=300).
+		// Callers that need a full reset should UpdateScore per match.
 	)
 	return err
 }
@@ -452,6 +459,7 @@ func getSampleMatches() []Match {
 	one, _ := primitive.ObjectIDFromHex("0000000000000000000000aa")
 	two, _ := primitive.ObjectIDFromHex("0000000000000000000000bb")
 	three, _ := primitive.ObjectIDFromHex("0000000000000000000000cc")
+	four, _ := primitive.ObjectIDFromHex("0000000000000000000000dd")
 	return []Match{
 		{
 			ID:           one,
@@ -514,11 +522,31 @@ func getSampleMatches() []Match {
 			CreatedAt:    now.Add(-9 * time.Hour),
 			UpdatedAt:    now,
 		},
+		{
+			ID:           four,
+			TournamentID: "tournament-odi-1",
+			Format:       "ODI",
+			TeamAID:      "team-ind",
+			TeamBID:      "team-aus",
+			TeamAName:    "IND",
+			TeamBName:    "AUS",
+			TeamALogo:    "/assets/ind-logo.png",
+			TeamBLogo:    "/assets/aus-logo.png",
+			StartTime:    now.Add(-15 * time.Minute),
+			Status:       "live",
+			Innings:      1,
+			CurrentScore: 0,
+			WicketsLost:  0,
+			BallsLeft:    BallsODI,
+			OversText:    "0.0",
+			CreatedAt:    now.Add(-1 * time.Hour),
+			UpdatedAt:    now,
+		},
 	}
 }
 
-func calculateOvers(ballsLeft int) string {
-	const totalBalls = 120
+func calculateOvers(ballsLeft int, format string) string {
+	totalBalls := TotalBallsForFormat(format)
 	ballsPlayed := totalBalls - ballsLeft
 	if ballsPlayed < 0 {
 		ballsPlayed = 0

@@ -418,11 +418,12 @@ func (s *Service) marketPrices(ctx context.Context, ids []string) map[string]*ma
 					if pricer, ok := s.markets.(MarketPricer); ok {
 						if res, err := pricer.CalculatePrice(markets.PriceCalculationInput{
 							MatchID:      market.MatchID,
+							Format:       match.Format,
 							Innings:      match.Innings,
 							CurrentScore: match.CurrentScore,
 							WicketsLost:  match.WicketsLost,
 							BallsLeft:    match.BallsLeft,
-							BallsBowled:  120 - match.BallsLeft,
+							BallsBowled:  matches.TotalBallsForFormat(match.Format) - match.BallsLeft,
 							TargetScore:  match.TargetScore,
 						}); err == nil {
 							price = &res

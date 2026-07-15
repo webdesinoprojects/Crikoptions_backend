@@ -160,6 +160,42 @@ func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
 	return len(docs), nil
 }
 
+// EnsureDefaultMarkets upserts built-in sample markets so ODI (and other) markets
+// appear even when the collection was seeded before they existed.
+func (r *MongoRepository) EnsureDefaultMarkets(ctx context.Context) error {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	now := time.Now().UTC()
+	for _, market := range getSampleMarkets() {
+		filter := bson.M{"_id": market.ID}
+		update := bson.M{
+			"$setOnInsert": bson.M{
+				"_id":            market.ID,
+				"matchId":        market.MatchID,
+				"title":          market.Title,
+				"type":           market.Type,
+				"status":         market.Status,
+				"buyerPrice":     market.BuyerPrice,
+				"sellerPrice":    market.SellerPrice,
+				"ltp":            market.LTP,
+				"open":           market.Open,
+				"high":           market.High,
+				"low":            market.Low,
+				"quantityLadder": market.QuantityLadder,
+				"createdAt":      market.CreatedAt,
+			},
+			"$set": bson.M{
+				"updatedAt": now,
+			},
+		}
+		if _, err := r.col.UpdateOne(ctx, filter, update, options.Update().SetUpsert(true)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *MongoRepository) GetAll(ctx context.Context) []Market {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
@@ -332,6 +368,18 @@ func getSampleMarkets() []Market {
 		mk("0000000000000000000000d7", "2", "RCB vs KKR - Wicket Fall", "technical", 52, 44, 60, 40, 51, 53, []LadderEntry{
 			{BuyerQty: 320, BuyerPrice: 51, SellerPrice: 52, SellerQty: 210},
 			{BuyerQty: 160, BuyerPrice: 52, SellerPrice: 53, SellerQty: 110},
+		}),
+		mk("0000000000000000000000d8", "4", "IND vs AUS ODI Match Depth", "match_depth", 278, 265, 290, 250, 277, 279, []LadderEntry{
+			{BuyerQty: 480, BuyerPrice: 277, SellerPrice: 278, SellerQty: 360},
+			{BuyerQty: 240, BuyerPrice: 278, SellerPrice: 279, SellerQty: 180},
+		}),
+		mk("0000000000000000000000d9", "4", "IND vs AUS - 1st Innings Score", "future", 285, 270, 300, 255, 284, 286, []LadderEntry{
+			{BuyerQty: 260, BuyerPrice: 284, SellerPrice: 285, SellerQty: 190},
+			{BuyerQty: 140, BuyerPrice: 285, SellerPrice: 286, SellerQty: 100},
+		}),
+		mk("0000000000000000000000da", "4", "IND vs AUS - Wicket Fall", "technical", 48, 40, 58, 35, 47, 49, []LadderEntry{
+			{BuyerQty: 300, BuyerPrice: 47, SellerPrice: 48, SellerQty: 210},
+			{BuyerQty: 150, BuyerPrice: 48, SellerPrice: 49, SellerQty: 100},
 		}),
 		{
 			ID:          closedID,

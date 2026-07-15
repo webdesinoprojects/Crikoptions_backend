@@ -31,6 +31,8 @@ var legacyMatchIDMap = map[string]string{
 	"bb":                       "2",
 	"0000000000000000000000cc": "3",
 	"cc":                       "3",
+	"0000000000000000000000dd": "4",
+	"dd":                       "4",
 }
 
 type Service struct {
@@ -206,12 +208,17 @@ func normalizeLegacyMatchID(id string) string {
 	return id
 }
 
-// CalculatePrice runs the T20 option-chain engine and returns a PriceResponse
+// CalculatePrice runs the option-chain engine (T20 or ODI) and returns a PriceResponse
 // containing buyer/seller/LTP/Open/High/Low plus the full strike chain.
 //
 // The shape mirrors the previous placeholder so existing frontend code keeps
 // working; the optionChain + projectedS0 fields are additive.
 func (s *Service) CalculatePrice(input PriceCalculationInput) (PriceResponse, error) {
+	cfg := s.pricingConfig
+	if IsODIFormat(input.Format, input.BallsLeft, input.BallsBowled) {
+		cfg = DefaultODIPricingConfig()
+	}
+
 	pricingIn := PricingInput{
 		Innings:     input.Innings,
 		Wickets:     input.WicketsLost,
@@ -226,25 +233,22 @@ func (s *Service) CalculatePrice(input PriceCalculationInput) (PriceResponse, er
 
 	switch input.Innings {
 	case 1:
-		res := CalculateFirstInnings(pricingIn, s.pricingConfig)
+		res := CalculateFirstInnings(pricingIn, cfg)
 		chain = res.Chain
 		projectedS0 = res.S0
 	case 2:
-		res := CalculateSecondInnings(pricingIn, s.pricingConfig)
+		res := CalculateSecondInnings(pricingIn, cfg)
 		chain = res.Chain
 		projectedS0 = res.S0
 	default:
-		// Unknown innings: return an empty chain rather than failing.
 		chain = []StrikePremium{}
 	}
 
 	ltp, open, high, low := AggregateChainToOHLC(chain)
 
-	// Buyer/seller spread: 1 Rs wide around LTP (matches existing convention).
 	buyer := ltp
 	seller := round2(ltp + 1)
 	if ltp == 0 {
-		// Empty chain: fall back to whatever the market currently has cached.
 		buyer, seller = 0, 0
 	}
 
@@ -255,8 +259,8 @@ func (s *Service) CalculatePrice(input PriceCalculationInput) (PriceResponse, er
 		Open:        open,
 		High:        high,
 		Low:         low,
-		StrikeStep:  s.pricingConfig.StrikeStep,
-		MaxStrike:   s.pricingConfig.MaxStrike,
+		StrikeStep:  cfg.StrikeStep,
+		MaxStrike:   cfg.MaxStrike,
 		ProjectedS0: round2(projectedS0),
 		OptionChain: chain,
 	}, nil
@@ -278,9 +282,10 @@ func (s *Service) BuildOptionChainHistory(market Market, match matches.Match, ev
 		targetScore: match.TargetScore,
 	}
 
-	points := make([]OptionChainHistoryPoint, 0, (len(events)+1)*int(s.pricingConfig.MaxStrike/s.pricingConfig.StrikeStep))
+	odiOrT20 := PricingConfigForFormat(match.Format)
+	points := make([]OptionChainHistoryPoint, 0, (len(events)+1)*int(odiOrT20.MaxStrike/odiOrT20.StrikeStep))
 	appendSnapshot := func(timestamp time.Time) error {
-		priced, err := s.CalculatePrice(state.priceInput(match.ID.Hex(), totalBalls))
+		priced, err := s.CalculatePrice(state.priceInput(match.ID.Hex(), match.Format, totalBalls))
 		if err != nil {
 			return err
 		}
@@ -318,6 +323,7 @@ func (s *Service) BuildOptionChainHistory(market Market, match matches.Match, ev
 // Innings 2: pass Innings=2, TargetScore, CurrentScore, WicketsLost, BallsBowled.
 type PriceCalculationInput struct {
 	MatchID      string `json:"matchId"`
+	Format       string `json:"format,omitempty"`
 	Innings      int    `json:"innings"`
 	CurrentScore int    `json:"currentScore"`
 	WicketsLost  int    `json:"wicketsLost"`
@@ -352,9 +358,10 @@ func (s *inningsHistoryState) apply(event matches.BallEvent, totalBalls int) {
 	}
 }
 
-func (s inningsHistoryState) priceInput(matchID string, totalBalls int) PriceCalculationInput {
+func (s inningsHistoryState) priceInput(matchID, format string, totalBalls int) PriceCalculationInput {
 	input := PriceCalculationInput{
 		MatchID:      matchID,
+		Format:       format,
 		Innings:      s.innings,
 		CurrentScore: s.score,
 		WicketsLost:  s.wickets,
@@ -468,11 +475,7 @@ func inferInningsStart(match matches.Match, events []matches.BallEvent, step tim
 }
 
 func totalBallsForFormat(format string) int {
-	upper := strings.ToUpper(format)
-	if strings.Contains(upper, "ODI") || strings.Contains(upper, "ONE") {
-		return 300
-	}
-	return 120
+	return matches.TotalBallsForFormat(format)
 }
 
 func abs(value float64) float64 {

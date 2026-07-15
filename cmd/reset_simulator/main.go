@@ -14,7 +14,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/simulator"
 )
 
-const defaultMatchSpecs = "0000000000000000000000aa=csk_vs_mi,0000000000000000000000bb=rcb_vs_kkr"
+const defaultMatchSpecs = "0000000000000000000000aa=csk_vs_mi,0000000000000000000000bb=rcb_vs_kkr,0000000000000000000000dd=ind_vs_aus_odi"
 
 type resetSpec struct {
 	matchID string
@@ -117,12 +117,13 @@ func resetOne(ctx context.Context, svc *matches.Service, dataDir string, spec re
 		return fmt.Errorf("clear match_events: %w", err)
 	}
 
+	ballsLeft := matches.TotalBallsForFormat(current.Format)
 	targetZero := 0
 	if _, err := svc.UpdateMatchScore(ctx, spec.matchID, matches.UpdateScoreRequest{
 		Innings:      1,
 		CurrentScore: 0,
 		WicketsLost:  0,
-		BallsLeft:    120,
+		BallsLeft:    ballsLeft,
 		TargetScore:  &targetZero,
 		Status:       matches.StatusLive,
 	}); err != nil {

@@ -1,0 +1,3 @@
+match_id,innings,replay_interval_sec,start_striker,start_non_striker,start_bowler,target_score,total_balls
+0000000000000000000000dd,1,15,Rohit Sharma,Shubman Gill,Mitchell Starc,0,300
+0000000000000000000000dd,2,15,David Warner,Travis Head,Mohammed Siraj,237,300

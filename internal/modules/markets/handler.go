@@ -233,12 +233,13 @@ func (h *Handler) CalculatePrice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Innings      int `json:"innings"`
-		CurrentScore int `json:"currentScore"`
-		WicketsLost  int `json:"wicketsLost"`
-		BallsLeft    int `json:"ballsLeft"`
-		BallsBowled  int `json:"ballsBowled"`
-		TargetScore  int `json:"targetScore"`
+		Innings      int    `json:"innings"`
+		CurrentScore int    `json:"currentScore"`
+		WicketsLost  int    `json:"wicketsLost"`
+		BallsLeft    int    `json:"ballsLeft"`
+		BallsBowled  int    `json:"ballsBowled"`
+		TargetScore  int    `json:"targetScore"`
+		Format       string `json:"format"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpjson.Write(w, http.StatusBadRequest, map[string]any{
@@ -262,10 +263,10 @@ func (h *Handler) CalculatePrice(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if req.Innings == 1 && (req.BallsLeft < 0 || req.BallsLeft > 120) {
+	if req.Innings == 1 && (req.BallsLeft < 0 || req.BallsLeft > matches.BallsODI) {
 		httpjson.Write(w, http.StatusBadRequest, map[string]any{
 			"success": false,
-			"message": "ballsLeft must be between 0 and 120 for 1st innings",
+			"message": "ballsLeft must be between 0 and 300",
 		})
 		return
 	}
@@ -277,17 +278,27 @@ func (h *Handler) CalculatePrice(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if req.BallsBowled < 0 || req.BallsBowled > 120 {
+		if req.BallsBowled < 0 || req.BallsBowled > matches.BallsODI {
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{
 				"success": false,
-				"message": "ballsBowled must be between 0 and 120 for 2nd innings",
+				"message": "ballsBowled must be between 0 and 300",
 			})
 			return
 		}
 	}
 
+	format := strings.TrimSpace(req.Format)
+	if format == "" {
+		if market, err := h.service.GetMarketByID(r.Context(), marketID); err == nil && market != nil && h.matchHistory != nil {
+			if match, err := h.matchHistory.GetMatchByID(r.Context(), market.MatchID); err == nil && match != nil {
+				format = match.Format
+			}
+		}
+	}
+
 	result, err := h.service.CalculatePrice(PriceCalculationInput{
 		MatchID:      marketID,
+		Format:       format,
 		Innings:      req.Innings,
 		CurrentScore: req.CurrentScore,
 		WicketsLost:  req.WicketsLost,
