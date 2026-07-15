@@ -1,4 +1,4 @@
-﻿package simulator
+package simulator
 
 import (
 	"context"
@@ -47,6 +47,18 @@ func (f *fakeLockStore) releases() int {
 	return f.releaseCalls
 }
 
+func (f *fakeLockStore) setAcquireOK(ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acquireOK = ok
+}
+
+func (f *fakeLockStore) acquires() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.acquireCalls
+}
+
 func TestStartDoesNotResetWhenLockHeld(t *testing.T) {
 	dataDir := t.TempDir()
 	matchID := "match-1"
@@ -65,8 +77,8 @@ func TestStartDoesNotResetWhenLockHeld(t *testing.T) {
 	if !errors.Is(err, ErrLockHeld) {
 		t.Fatalf("Start error = %v, want ErrLockHeld", err)
 	}
-	if locks.acquireCalls != 1 {
-		t.Fatalf("Acquire calls = %d, want 1", locks.acquireCalls)
+	if locks.acquires() != 1 {
+		t.Fatalf("Acquire calls = %d, want 1", locks.acquires())
 	}
 	if len(svc.updateReqs) != 0 {
 		t.Fatalf("UpdateMatchScore calls = %d, want 0", len(svc.updateReqs))
@@ -74,6 +86,50 @@ func TestStartDoesNotResetWhenLockHeld(t *testing.T) {
 	if svc.eventCounts[1] != 12 {
 		t.Fatalf("event count changed to %d, want 12", svc.eventCounts[1])
 	}
+}
+
+func TestAutoStartRetriesAfterLockRelease(t *testing.T) {
+	dataDir := t.TempDir()
+	matchID := "match-1"
+	writeCleanDataset(t, dataDir, "clean", matchID)
+
+	svc := &fakeCSVMatchService{
+		match:       &matches.Match{Status: matches.StatusLive, Innings: 1, BallsLeft: 120},
+		eventCounts: map[int]int{},
+		legalCounts: map[int]int{},
+	}
+	locks := &fakeLockStore{acquireOK: false}
+	sim := NewService(Config{
+		DataDir:            dataDir,
+		DefaultIntervalSec: 3600,
+		Enabled:            true,
+		AutoStart:          true,
+		AutoStartRetry:     10 * time.Millisecond,
+	}, svc)
+	sim.autoStartSpecs = []AutoStartSpec{{MatchID: matchID, ScriptName: "clean"}}
+	sim.SetLockStore(locks)
+	t.Cleanup(sim.Shutdown)
+
+	sim.AutoStartOnBoot(context.Background())
+	if locks.acquires() != 1 {
+		t.Fatalf("initial Acquire calls = %d, want 1", locks.acquires())
+	}
+	if _, ok := sim.workers.Load(matchID); ok {
+		t.Fatal("worker started while another instance held the lock")
+	}
+
+	locks.setAcquireOK(true)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if value, ok := sim.workers.Load(matchID); ok && value.(*Worker).Snapshot().Status == StatusRunning {
+			if locks.acquires() < 2 {
+				t.Fatalf("Acquire calls = %d, want at least 2", locks.acquires())
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("standby simulator did not take over after the lock was released")
 }
 
 func TestWorkerReleasesLockOnStop(t *testing.T) {

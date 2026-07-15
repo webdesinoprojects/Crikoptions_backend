@@ -2,6 +2,7 @@ package simulator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -37,6 +38,7 @@ type Config struct {
 	ResetOnBoot        bool
 	InstanceID         string
 	LockTTL            time.Duration
+	AutoStartRetry     time.Duration
 }
 
 // AutoStartSpec pairs a match hex id with its CSV script folder.
@@ -96,6 +98,12 @@ func LoadConfig() Config {
 			lockTTL = time.Duration(n) * time.Second
 		}
 	}
+	autoStartRetry := 15 * time.Second
+	if v := strings.TrimSpace(os.Getenv("SIMULATOR_AUTO_START_RETRY_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			autoStartRetry = time.Duration(n) * time.Second
+		}
+	}
 	return Config{
 		DataDir:            dir,
 		DefaultIntervalSec: interval,
@@ -105,6 +113,7 @@ func LoadConfig() Config {
 		ResetOnBoot:        resetOnBoot,
 		InstanceID:         instanceID,
 		LockTTL:            lockTTL,
+		AutoStartRetry:     autoStartRetry,
 	}
 }
 
@@ -154,11 +163,22 @@ type Service struct {
 	squareOff SquareOffPort
 	lockStore LockStore
 	workers   sync.Map // map[matchID string]*Worker
+
+	autoStartSpecs []AutoStartSpec
+	autoStartOnce  sync.Once
+	shutdownOnce   sync.Once
+	shutdownCh     chan struct{}
+	backgroundWG   sync.WaitGroup
 }
 
 // NewService creates a new simulator service.
 func NewService(cfg Config, svc MatchService) *Service {
-	return &Service{cfg: cfg, svc: svc}
+	return &Service{
+		cfg:            cfg,
+		svc:            svc,
+		autoStartSpecs: DefaultAutoStartSpecs(),
+		shutdownCh:     make(chan struct{}),
+	}
 }
 
 // SetSquareOff wires auto square-off when innings 1 ends.
@@ -379,19 +399,58 @@ func (s *Service) acquireLease(ctx context.Context, matchID string) (*LockLease,
 
 // Shutdown stops all active workers gracefully (call on server shutdown).
 func (s *Service) Shutdown() {
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+	})
+	s.backgroundWG.Wait()
+
 	s.workers.Range(func(_, v any) bool {
 		v.(*Worker).Stop()
 		return true
 	})
 }
 
-// AutoStartOnBoot launches the default CSV replays when
-// SIMULATOR_ENABLED and SIMULATOR_AUTO_START are true.
+// AutoStartOnBoot launches the default CSV replays and keeps retrying matches
+// owned by another instance. This lets rolling deploys take over after the old
+// instance releases its lease without ever running two writers for one match.
 func (s *Service) AutoStartOnBoot(ctx context.Context) {
 	if !s.cfg.Enabled || !s.cfg.AutoStart {
 		return
 	}
-	for _, spec := range DefaultAutoStartSpecs() {
+
+	s.autoStartOnce.Do(func() {
+		s.runAutoStartPass(ctx)
+		s.backgroundWG.Add(1)
+		go s.autoStartLoop()
+	})
+}
+
+func (s *Service) autoStartLoop() {
+	defer s.backgroundWG.Done()
+
+	retry := s.cfg.AutoStartRetry
+	if retry <= 0 {
+		retry = 15 * time.Second
+	}
+	ticker := time.NewTicker(retry)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.runAutoStartPass(context.Background())
+		case <-s.shutdownCh:
+			return
+		}
+	}
+}
+
+func (s *Service) runAutoStartPass(ctx context.Context) {
+	for _, spec := range s.autoStartSpecs {
+		if s.hasActiveOrCompletedWorker(spec.MatchID) {
+			continue
+		}
+
 		req := StartRequest{ScriptName: spec.ScriptName}
 		mode := "resume"
 		start := s.ResumeOrStart
@@ -401,12 +460,24 @@ func (s *Service) AutoStartOnBoot(ctx context.Context) {
 		}
 		status, err := start(ctx, spec.MatchID, req)
 		if err != nil {
+			if errors.Is(err, ErrLockHeld) {
+				continue
+			}
 			log.Printf("simulator auto-start %s (%s): %v", spec.MatchID, spec.ScriptName, err)
 			continue
 		}
 		log.Printf("simulator auto-start %s script=%s mode=%s status=%s cursor=%d/%d score=%s",
 			spec.MatchID, spec.ScriptName, mode, status.Status, status.Cursor, status.TotalEvents, status.CurrentScore)
 	}
+}
+
+func (s *Service) hasActiveOrCompletedWorker(matchID string) bool {
+	value, ok := s.workers.Load(matchID)
+	if !ok {
+		return false
+	}
+	status := value.(*Worker).Snapshot().Status
+	return status == StatusRunning || status == StatusPaused || status == StatusCompleted
 }
 
 func (s *Service) mustWorker(matchID string) (*Worker, error) {
