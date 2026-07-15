@@ -403,8 +403,9 @@ func (s *Service) recordBall(ctx context.Context, id string, req BallEventReques
 	return match, event, nil
 }
 
-// GetRecentEvents returns the last `limit` legal deliveries (plus interleaved
-// extras) for a match's current innings, oldest → newest.
+// GetRecentEvents returns deliveries for the current over only (plus extras in
+// that over), oldest → newest — used by "This over" / recent-balls UI.
+// limit is retained for API compatibility; current-over length is at most ~6 legal + extras.
 func (s *Service) GetRecentEvents(ctx context.Context, id string, limit int) ([]BallEventResponse, error) {
 	if limit <= 0 {
 		limit = 6
@@ -421,13 +422,31 @@ func (s *Service) GetRecentEvents(ctx context.Context, id string, limit int) ([]
 		return []BallEventResponse{}, nil
 	}
 
-	events, err := s.events.RecentEvents(ctx, match.ID.Hex(), match.Innings, limit)
+	matchID := match.ID.Hex()
+	legalCount, err := s.events.LegalBallCount(ctx, matchID, match.Innings)
+	if err != nil {
+		return nil, err
+	}
+	if legalCount == 0 {
+		return []BallEventResponse{}, nil
+	}
+
+	// Fetch enough of the trail so filtering to the current over still includes
+	// that over's balls when we are only a few deliveries into it.
+	fetchLegal := limit
+	if fetchLegal < 12 {
+		fetchLegal = 12
+	}
+	events, err := s.events.RecentEvents(ctx, matchID, match.Innings, fetchLegal)
 	if err != nil {
 		return nil, err
 	}
 
-	out := make([]BallEventResponse, 0, len(events))
-	for _, e := range events {
+	currentOver := currentOverIndex(legalCount)
+	filtered := filterEventsByOver(events, currentOver)
+
+	out := make([]BallEventResponse, 0, len(filtered))
+	for _, e := range filtered {
 		out = append(out, BallEventResponse{
 			Innings:     e.Innings,
 			Over:        e.Over,
@@ -441,6 +460,25 @@ func (s *Service) GetRecentEvents(ctx context.Context, id string, limit int) ([]
 		})
 	}
 	return out, nil
+}
+
+// currentOverIndex is the 0-based over that contains the latest legal delivery.
+// After 3 balls → 0; after 6 → 0 (over just completed); after 7 → 1.
+func currentOverIndex(legalBalls int) int {
+	if legalBalls <= 0 {
+		return 0
+	}
+	return (legalBalls - 1) / 6
+}
+
+func filterEventsByOver(events []BallEvent, over int) []BallEvent {
+	out := make([]BallEvent, 0, 8)
+	for _, e := range events {
+		if e.Over == over {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func (s *Service) GetInningsEvents(ctx context.Context, id string, innings, limit int) ([]BallEvent, error) {
@@ -505,7 +543,7 @@ func (s *Service) publishScore(match *Match) {
 	if s.publisher == nil || match == nil {
 		return
 	}
-	s.publisher.Publish(realtime.MatchScoreTopic(match.ID.Hex()), map[string]any{
+	payload := map[string]any{
 		"matchId":      match.ID.Hex(),
 		"innings":      match.Innings,
 		"currentScore": match.CurrentScore,
@@ -515,7 +553,42 @@ func (s *Service) publishScore(match *Match) {
 		"oversText":    match.OversText,
 		"status":       NormalizeStatus(match.Status),
 		"liveContext":  match.LiveContext,
-	})
+	}
+	if balls := s.currentOverBallsPayload(context.Background(), match); balls != nil {
+		payload["thisOver"] = balls
+	}
+	s.publisher.Publish(realtime.MatchScoreTopic(match.ID.Hex()), payload)
+}
+
+// currentOverBallsPayload builds the balls for the active over (same rules as GetRecentEvents).
+func (s *Service) currentOverBallsPayload(ctx context.Context, match *Match) []map[string]any {
+	if s.events == nil || match == nil {
+		return nil
+	}
+	legalCount, err := s.events.LegalBallCount(ctx, match.ID.Hex(), match.Innings)
+	if err != nil || legalCount <= 0 {
+		return nil
+	}
+	events, err := s.events.RecentEvents(ctx, match.ID.Hex(), match.Innings, 12)
+	if err != nil {
+		return nil
+	}
+	filtered := filterEventsByOver(events, currentOverIndex(legalCount))
+	out := make([]map[string]any, 0, len(filtered))
+	for _, e := range filtered {
+		item := map[string]any{
+			"over":      e.Over,
+			"ball":      e.Ball,
+			"runs":      e.Runs,
+			"isWicket":  e.IsWicket,
+			"legalBall": e.LegalBall,
+		}
+		if e.Extra != nil {
+			item["extra"] = *e.Extra
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func validLiveContext(value LiveMatchContext) bool {

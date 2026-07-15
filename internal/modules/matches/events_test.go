@@ -105,14 +105,44 @@ func TestEvents_ExtraDoesNotConsumeLegalBall(t *testing.T) {
 	}
 }
 
-func TestEvents_LimitReturnsLastN(t *testing.T) {
+func TestEvents_LimitReturnsCurrentOverOnly(t *testing.T) {
 	svc := liveSeedService(t)
-	for _, r := range []int{1, 2, 3, 4, 6, 0, 1} { // 7 legal balls
+	for _, r := range []int{1, 2, 3, 4, 6, 0, 1} { // 7 legal balls → over 1 ball 1
 		feedBall(t, svc, "2", r, false, "")
 	}
 	got, _ := svc.GetRecentEvents(context.Background(), "2", 6)
-	if want := []int{2, 3, 4, 6, 0, 1}; !equalInts(runsOf(got), want) {
-		t.Fatalf("runs = %v, want last 6 %v", runsOf(got), want)
+	if want := []int{1}; !equalInts(runsOf(got), want) {
+		t.Fatalf("runs = %v, want current over only %v", runsOf(got), want)
+	}
+	if got[0].Over != 1 || got[0].Ball != 1 {
+		t.Fatalf("over/ball = %d/%d, want 1/1", got[0].Over, got[0].Ball)
+	}
+}
+
+func TestEvents_CurrentOverMidOverMatchesOversText(t *testing.T) {
+	svc := liveSeedService(t)
+	// Bowl 2.3 overs worth of balls (15 legal) — this over should have 3 balls.
+	for i := 0; i < 15; i++ {
+		runs := i % 3
+		feedBall(t, svc, "2", runs, false, "")
+	}
+	match, err := svc.GetMatchByID(context.Background(), "2")
+	if err != nil || match == nil {
+		t.Fatalf("GetMatchByID: %v", err)
+	}
+	// Seeded T20 ballsLeft starts at 78 for RCB; after 15 legal → 63 left → overs from calculateOvers.
+	// Event-based this-over must still be the last 3 of over index 2.
+	got, err := svc.GetRecentEvents(context.Background(), "2", 6)
+	if err != nil {
+		t.Fatalf("GetRecentEvents: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("this over len = %d, want 3 (mirrors x.3 overs)", len(got))
+	}
+	for i, e := range got {
+		if e.Over != 2 || e.Ball != i+1 {
+			t.Fatalf("event %d over/ball = %d/%d, want 2/%d", i, e.Over, e.Ball, i+1)
+		}
 	}
 }
 

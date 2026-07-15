@@ -169,8 +169,8 @@ func (h *Handler) UpdateLiveContext(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetMatchEvents returns recent per-ball events for a match's current innings
-// so a late-joining client can render "This over" correctly.
+// GetMatchEvents returns per-ball events for the match's current over
+// so a late-joining client can render "This over" in sync with oversText.
 // GET /api/v1/matches/{id}/events?limit=6
 func (h *Handler) GetMatchEvents(w http.ResponseWriter, r *http.Request) {
 	limit := 6
