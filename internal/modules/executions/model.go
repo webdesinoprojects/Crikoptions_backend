@@ -6,7 +6,10 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-const LiquiditySystemMarketMaker = "SYSTEM_MARKET_MAKER"
+const (
+	LiquiditySystemMarketMaker   = "SYSTEM_MARKET_MAKER"
+	LiquidityProviderVoidReverse = "PROVIDER_VOID_REVERSAL"
+)
 
 type Execution struct {
 	ID              primitive.ObjectID `json:"_id" bson:"_id,omitempty"`
@@ -23,9 +26,10 @@ type Execution struct {
 }
 
 type Filter struct {
-	UserID   primitive.ObjectID
-	MatchID  string
-	MarketID string
-	OrderID  primitive.ObjectID
-	Limit    int64
+	UserID                 primitive.ObjectID
+	MatchID                string
+	MarketID               string
+	OrderID                primitive.ObjectID
+	ExcludeLiquiditySource string
+	Limit                  int64
 }

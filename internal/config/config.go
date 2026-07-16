@@ -18,23 +18,39 @@ type Config struct {
 	AllowedOrigins []string
 }
 
+type MongoConfig struct {
+	URI      string
+	Database string
+}
+
+// LoadMongo loads only the settings required by background services. It keeps
+// feedworker independent from API-only PORT and JWT configuration.
+func LoadMongo() (MongoConfig, error) {
+	_ = loadDotEnv(".env")
+	_ = loadDotEnv(filepath.Join("backend", ".env"))
+	uri := strings.TrimSpace(os.Getenv("MONGO_DB"))
+	if uri == "" {
+		return MongoConfig{}, errors.New("MONGO_DB is required")
+	}
+	database := strings.TrimSpace(os.Getenv("MONGO_DB_NAME"))
+	if database == "" {
+		database = "crikoptions"
+	}
+	return MongoConfig{URI: uri, Database: database}, nil
+}
+
 func Load() (Config, error) {
 	_ = loadDotEnv(".env")
-	_ = loadDotEnv(filepath.Join("Backend", ".env"))
+	_ = loadDotEnv(filepath.Join("backend", ".env"))
 
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		return Config{}, errors.New("PORT is required")
 	}
 
-	mongoURI := strings.TrimSpace(os.Getenv("MONGO_DB"))
-	if mongoURI == "" {
-		return Config{}, errors.New("MONGO_DB is required")
-	}
-
-	mongoDB := strings.TrimSpace(os.Getenv("MONGO_DB_NAME"))
-	if mongoDB == "" {
-		mongoDB = "crikoptions"
+	mongoConfig, err := LoadMongo()
+	if err != nil {
+		return Config{}, err
 	}
 
 	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
@@ -52,7 +68,7 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Port: port, MongoURI: mongoURI, MongoDB: mongoDB, JWTSecret: jwtSecret, TokenHours: tokenHours,
+		Port: port, MongoURI: mongoConfig.URI, MongoDB: mongoConfig.Database, JWTSecret: jwtSecret, TokenHours: tokenHours,
 		ChatEnabled:    parseBool(os.Getenv("CHAT_ENABLED")),
 		AllowedOrigins: parseCSVWithDefault(os.Getenv("ALLOWED_ORIGINS"), []string{"http://localhost:3000"}),
 	}, nil

@@ -15,6 +15,7 @@ const (
 	LedgerOrderRelease = "ORDER_RELEASE"
 	LedgerTradeDebit   = "TRADE_DEBIT"
 	LedgerTradeCredit  = "TRADE_CREDIT"
+	LedgerProviderVoid = "PROVIDER_VOID_REVERSAL"
 	LedgerWelcomeBonus = "WELCOME_BONUS"
 	LedgerUserTopUp    = "USER_TOPUP"
 
@@ -48,6 +49,8 @@ type LedgerEntry struct {
 	Description    string             `json:"description" bson:"description"`
 	CreatedBy      primitive.ObjectID `json:"createdBy" bson:"createdBy"`
 	CreatedAt      time.Time          `json:"createdAt" bson:"createdAt"`
+	IdempotencyKey string             `json:"-" bson:"idempotencyKey,omitempty"`
+	OperationHash  string             `json:"-" bson:"operationHash,omitempty"`
 }
 
 type LedgerFilter struct {
@@ -107,6 +110,19 @@ type SellFillOp struct {
 type ShortOpenFillOp struct {
 	UserID        primitive.ObjectID
 	Proceeds      float64
+	ReferenceType string
+	ReferenceID   string
+	Description   string
+	CreatedBy     primitive.ObjectID
+}
+
+// ProviderVoidOp reverses the net cash and collateral effects of one voided
+// provider contract. Deltas are signed because a losing contract may require
+// a credit while a profitable contract may require a forced paper-cash debit.
+type ProviderVoidOp struct {
+	UserID        primitive.ObjectID
+	CashDelta     float64
+	ReservedDelta float64
 	ReferenceType string
 	ReferenceID   string
 	Description   string

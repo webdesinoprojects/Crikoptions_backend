@@ -83,5 +83,13 @@ func (c *Client) trySend(topic string, payload []byte) {
 	select {
 	case c.send <- payload:
 	default:
+		// Never hide a realtime gap. Disconnect slow consumers so they
+		// reconnect and hydrate the authoritative REST snapshot.
+		_ = c.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(1013, "client too slow; resync required"),
+			time.Now().Add(time.Second),
+		)
+		_ = c.conn.Close()
 	}
 }

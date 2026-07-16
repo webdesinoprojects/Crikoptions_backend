@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+.git
+.github
+*.log
+*.test
+coverage.out
+tmp/
+bin/

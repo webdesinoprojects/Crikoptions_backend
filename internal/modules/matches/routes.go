@@ -10,6 +10,7 @@ func RegisterRoutes(mux *http.ServeMux, handler *Handler, authHandler *auth.Hand
 	// Public endpoints - no auth required.
 	mux.HandleFunc("GET /api/v1/matches/home", handler.GetHomeMatches)
 	mux.HandleFunc("GET /api/v1/matches/{id}/events", handler.GetMatchEvents)
+	mux.HandleFunc("GET /api/v1/matches/{id}/live-state", handler.GetMatchDetail)
 	mux.HandleFunc("GET /api/v1/matches/{id}", handler.GetMatchDetail)
 
 	// Admin-only endpoints - require both auth and admin role.

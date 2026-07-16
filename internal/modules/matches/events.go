@@ -13,26 +13,67 @@ import (
 
 // Ball-event extras. nil/"" means a legal delivery.
 const (
-	ExtraWide   = "wide"
-	ExtraNoBall = "noball"
+	ExtraWide    = "wide"
+	ExtraNoBall  = "noball"
+	ExtraBye     = "bye"
+	ExtraLegBye  = "legbye"
+	ExtraPenalty = "penalty"
 )
+
+type DeliveryExtras struct {
+	Wides     int `json:"wides" bson:"wides"`
+	NoBalls   int `json:"noBalls" bson:"noBalls"`
+	Byes      int `json:"byes" bson:"byes"`
+	LegByes   int `json:"legByes" bson:"legByes"`
+	Penalties int `json:"penalties" bson:"penalties"`
+}
+
+func (e DeliveryExtras) Total() int {
+	return e.Wides + e.NoBalls + e.Byes + e.LegByes + e.Penalties
+}
+
+type Dismissal struct {
+	Kind         string `json:"kind,omitempty" bson:"kind,omitempty"`
+	PlayerID     int64  `json:"playerId,omitempty" bson:"playerId,omitempty"`
+	FielderID    int64  `json:"fielderId,omitempty" bson:"fielderId,omitempty"`
+	BowlerCredit bool   `json:"bowlerCredit" bson:"bowlerCredit"`
+}
 
 // BallEvent is one persisted delivery for a match, used to reconstruct the
 // "This over" view for clients that join after balls were already bowled.
 type BallEvent struct {
-	ID          primitive.ObjectID `bson:"_id,omitempty"`
-	MatchID     string             `bson:"matchId"`
-	Innings     int                `bson:"innings"`
-	Over        int                `bson:"over"`
-	Ball        int                `bson:"ball"`
-	LegalBall   bool               `bson:"legalBall"`
-	Runs        int                `bson:"runs"`
-	IsWicket    bool               `bson:"isWicket"`
-	Extra       *string            `bson:"extra"`
-	StrikerName string             `bson:"strikerName,omitempty"`
-	BowlerName  string             `bson:"bowlerName,omitempty"`
-	Commentary  string             `bson:"commentary,omitempty"`
-	CreatedAt   time.Time          `bson:"createdAt"`
+	ID          primitive.ObjectID `json:"_id" bson:"_id,omitempty"`
+	MatchID     string             `json:"matchId" bson:"matchId"`
+	Innings     int                `json:"innings" bson:"innings"`
+	Over        int                `json:"over" bson:"over"`
+	Ball        int                `json:"ball" bson:"ball"`
+	LegalBall   bool               `json:"legalBall" bson:"legalBall"`
+	Runs        int                `json:"runs" bson:"runs"`
+	IsWicket    bool               `json:"isWicket" bson:"isWicket"`
+	Extra       *string            `json:"extra" bson:"extra"`
+	StrikerName string             `json:"strikerName,omitempty" bson:"strikerName,omitempty"`
+	BowlerName  string             `json:"bowlerName,omitempty" bson:"bowlerName,omitempty"`
+	Commentary  string             `json:"commentary,omitempty" bson:"commentary,omitempty"`
+
+	Provider           string         `json:"provider,omitempty" bson:"provider,omitempty"`
+	ProviderFixtureID  int64          `json:"providerFixtureId,omitempty" bson:"providerFixtureId,omitempty"`
+	ProviderEventID    string         `json:"providerEventId,omitempty" bson:"providerEventId,omitempty"`
+	ProviderScoreID    int64          `json:"providerScoreId,omitempty" bson:"providerScoreId,omitempty"`
+	ProviderBall       string         `json:"providerBall,omitempty" bson:"providerBall,omitempty"`
+	Sequence           int64          `json:"sequence,omitempty" bson:"sequence,omitempty"`
+	Revision           int64          `json:"revision,omitempty" bson:"revision,omitempty"`
+	PayloadHash        string         `json:"-" bson:"payloadHash,omitempty"`
+	TeamRuns           int            `json:"teamRuns,omitempty" bson:"teamRuns,omitempty"`
+	BatterRuns         int            `json:"batterRuns,omitempty" bson:"batterRuns,omitempty"`
+	Extras             DeliveryExtras `json:"extras,omitempty" bson:"extras,omitempty"`
+	Dismissal          *Dismissal     `json:"dismissal,omitempty" bson:"dismissal,omitempty"`
+	Active             bool           `json:"active,omitempty" bson:"active,omitempty"`
+	Tombstoned         bool           `json:"tombstoned,omitempty" bson:"tombstoned,omitempty"`
+	SupersededRevision int64          `json:"supersededRevision,omitempty" bson:"supersededRevision,omitempty"`
+	MissingPolls       int            `json:"-" bson:"missingPolls,omitempty"`
+	ProviderUpdatedAt  *time.Time     `json:"providerUpdatedAt,omitempty" bson:"providerUpdatedAt,omitempty"`
+	ReceivedAt         *time.Time     `json:"receivedAt,omitempty" bson:"receivedAt,omitempty"`
+	CreatedAt          time.Time      `json:"createdAt" bson:"createdAt"`
 }
 
 // EventRepository persists and reads per-ball events. AppendEvent must preserve
@@ -45,6 +86,10 @@ type EventRepository interface {
 	InningsEvents(ctx context.Context, matchID string, innings, limit int) ([]BallEvent, error)
 	DeleteByMatchID(ctx context.Context, matchID string) error
 	EnsureIndexes(ctx context.Context) error
+}
+
+type CursorEventRepository interface {
+	InningsEventsAfter(ctx context.Context, matchID string, innings int, afterSequence int64, limit int) ([]BallEvent, error)
 }
 
 // recentFromDescending takes events ordered newest → oldest and returns the
@@ -102,7 +147,7 @@ func (r *MemoryEventRepository) LegalBallCount(_ context.Context, matchID string
 	defer r.mu.RUnlock()
 	count := 0
 	for _, e := range r.events {
-		if e.MatchID == matchID && e.Innings == innings && e.LegalBall {
+		if e.MatchID == matchID && e.Innings == innings && visibleEvent(e) && e.LegalBall {
 			count++
 		}
 	}
@@ -114,7 +159,7 @@ func (r *MemoryEventRepository) EventCount(_ context.Context, matchID string, in
 	defer r.mu.RUnlock()
 	count := 0
 	for _, e := range r.events {
-		if e.MatchID == matchID && e.Innings == innings {
+		if e.MatchID == matchID && e.Innings == innings && visibleEvent(e) {
 			count++
 		}
 	}
@@ -127,7 +172,7 @@ func (r *MemoryEventRepository) RecentEvents(_ context.Context, matchID string, 
 
 	var filtered []BallEvent
 	for _, e := range r.events {
-		if e.MatchID == matchID && e.Innings == innings {
+		if e.MatchID == matchID && e.Innings == innings && visibleEvent(e) {
 			filtered = append(filtered, e)
 		}
 	}
@@ -149,11 +194,30 @@ func (r *MemoryEventRepository) InningsEvents(_ context.Context, matchID string,
 
 	filtered := make([]BallEvent, 0, limit)
 	for _, e := range r.events {
-		if e.MatchID != matchID || e.Innings != innings {
+		if e.MatchID != matchID || e.Innings != innings || !visibleEvent(e) {
 			continue
 		}
 		filtered = append(filtered, e)
 		if len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered, nil
+}
+
+func (r *MemoryEventRepository) InningsEventsAfter(_ context.Context, matchID string, innings int, afterSequence int64, limit int) ([]BallEvent, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if limit <= 0 {
+		limit = len(r.events)
+	}
+	filtered := make([]BallEvent, 0, limit)
+	for _, event := range r.events {
+		if event.MatchID != matchID || event.Innings != innings || event.Sequence <= afterSequence || !visibleEvent(event) {
+			continue
+		}
+		filtered = append(filtered, event)
+		if len(filtered) == limit {
 			break
 		}
 	}
@@ -190,6 +254,15 @@ func (r *MongoEventRepository) EnsureIndexes(ctx context.Context) error {
 	_, err := r.col.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "matchId", Value: 1}, {Key: "innings", Value: 1}, {Key: "_id", Value: 1}}},
 		{Keys: bson.D{{Key: "matchId", Value: 1}, {Key: "innings", Value: 1}, {Key: "createdAt", Value: 1}, {Key: "_id", Value: 1}}},
+		{
+			Keys: bson.D{{Key: "provider", Value: 1}, {Key: "providerFixtureId", Value: 1}, {Key: "providerEventId", Value: 1}},
+			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.M{
+				"provider":          bson.M{"$type": "string"},
+				"providerFixtureId": bson.M{"$type": "long"},
+				"providerEventId":   bson.M{"$type": "string"},
+			}),
+		},
+		{Keys: bson.D{{Key: "matchId", Value: 1}, {Key: "innings", Value: 1}, {Key: "sequence", Value: 1}}},
 	})
 	return err
 }
@@ -210,7 +283,9 @@ func (r *MongoEventRepository) AppendEvent(ctx context.Context, event BallEvent)
 func (r *MongoEventRepository) LegalBallCount(ctx context.Context, matchID string, innings int) (int, error) {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
-	count, err := r.col.CountDocuments(ctx, bson.M{"matchId": matchID, "innings": innings, "legalBall": true})
+	filter := visibleEventFilter(matchID, innings)
+	filter["legalBall"] = true
+	count, err := r.col.CountDocuments(ctx, filter)
 	if err != nil {
 		return 0, err
 	}
@@ -220,7 +295,7 @@ func (r *MongoEventRepository) LegalBallCount(ctx context.Context, matchID strin
 func (r *MongoEventRepository) EventCount(ctx context.Context, matchID string, innings int) (int, error) {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
-	count, err := r.col.CountDocuments(ctx, bson.M{"matchId": matchID, "innings": innings})
+	count, err := r.col.CountDocuments(ctx, visibleEventFilter(matchID, innings))
 	if err != nil {
 		return 0, err
 	}
@@ -247,8 +322,8 @@ func (r *MongoEventRepository) RecentEvents(ctx context.Context, matchID string,
 
 	cur, err := r.col.Find(
 		ctx,
-		bson.M{"matchId": matchID, "innings": innings},
-		options.Find().SetSort(bson.D{{Key: "_id", Value: -1}}).SetLimit(fetch),
+		visibleEventFilter(matchID, innings),
+		options.Find().SetSort(bson.D{{Key: "sequence", Value: -1}, {Key: "_id", Value: -1}}).SetLimit(fetch),
 	)
 	if err != nil {
 		return nil, err
@@ -272,9 +347,9 @@ func (r *MongoEventRepository) InningsEvents(ctx context.Context, matchID string
 
 	cur, err := r.col.Find(
 		ctx,
-		bson.M{"matchId": matchID, "innings": innings},
+		visibleEventFilter(matchID, innings),
 		options.Find().
-			SetSort(bson.D{{Key: "createdAt", Value: 1}, {Key: "_id", Value: 1}}).
+			SetSort(bson.D{{Key: "sequence", Value: 1}, {Key: "createdAt", Value: 1}, {Key: "_id", Value: 1}}).
 			SetLimit(int64(limit)),
 	)
 	if err != nil {
@@ -287,4 +362,42 @@ func (r *MongoEventRepository) InningsEvents(ctx context.Context, matchID string
 		return nil, err
 	}
 	return events, nil
+}
+
+func (r *MongoEventRepository) InningsEventsAfter(ctx context.Context, matchID string, innings int, afterSequence int64, limit int) ([]BallEvent, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+	if limit <= 0 {
+		limit = 100
+	}
+	filter := visibleEventFilter(matchID, innings)
+	filter["sequence"] = bson.M{"$gt": afterSequence}
+	cur, err := r.col.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "sequence", Value: 1}, {Key: "_id", Value: 1}}).
+		SetLimit(int64(limit)))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var events []BallEvent
+	if err := cur.All(ctx, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func visibleEvent(event BallEvent) bool {
+	return event.Provider == "" || (event.Active && !event.Tombstoned)
+}
+
+func visibleEventFilter(matchID string, innings int) bson.M {
+	return bson.M{
+		"matchId": matchID,
+		"innings": innings,
+		"$or": bson.A{
+			bson.M{"provider": bson.M{"$exists": false}},
+			bson.M{"provider": ""},
+			bson.M{"active": true, "tombstoned": bson.M{"$ne": true}},
+		},
+	}
 }

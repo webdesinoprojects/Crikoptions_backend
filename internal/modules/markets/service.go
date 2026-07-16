@@ -3,6 +3,7 @@ package markets
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,9 +12,10 @@ import (
 )
 
 var (
-	errMarketNotFound = errors.New("market not found")
-	errInvalidMarket  = errors.New("invalid market payload")
-	errInvalidStatus  = errors.New("invalid market status")
+	errMarketNotFound        = errors.New("market not found")
+	errInvalidMarket         = errors.New("invalid market payload")
+	errInvalidStatus         = errors.New("invalid market status")
+	ErrFinalRevisionConflict = errors.New("final score conflicts with the stored revision")
 )
 
 var legacyMarketIDMap = map[string]string{
@@ -36,8 +38,27 @@ var legacyMatchIDMap = map[string]string{
 }
 
 type Service struct {
-	repo          Repository
-	pricingConfig PricingConfig
+	repo                         Repository
+	pricingConfig                PricingConfig
+	providerManualGateController ProviderManualGateController
+}
+
+type ProviderManualGateController interface {
+	SetProviderManualGate(context.Context, string, primitive.ObjectID, bool) (*Market, error)
+}
+
+// ProviderInningsMarketSpec is the immutable contract identity and initial
+// trading projection supplied by the live-feed worker.
+type ProviderInningsMarketSpec struct {
+	MatchID         string
+	Innings         int
+	BattingTeamName string
+	Format          string
+	ScheduledBalls  int
+	StateVersion    int64
+	TradingVersion  int64
+	FeedState       string
+	Blockers        []string
 }
 
 func NewService(repo Repository) *Service {
@@ -54,8 +75,115 @@ func NewServiceWithConfig(repo Repository, cfg PricingConfig) *Service {
 	}
 }
 
+func (s *Service) SetProviderManualGateController(controller ProviderManualGateController) {
+	s.providerManualGateController = controller
+}
+
+func (s *Service) SetProviderManualBlocker(ctx context.Context, id primitive.ObjectID, blocked bool) (*Market, error) {
+	return s.repo.SetProviderManualBlocker(ctx, id, blocked)
+}
+
 func (s *Service) GetMarketsByMatchID(ctx context.Context, matchID string) []Market {
 	return s.repo.GetByMatchID(ctx, normalizeLegacyMatchID(matchID))
+}
+
+// ListMarketsByMatchID is the error-preserving variant for provider and
+// financial workflows. HTTP compatibility callers continue to use
+// GetMarketsByMatchID.
+func (s *Service) ListMarketsByMatchID(ctx context.Context, matchID string) ([]Market, error) {
+	matchID = normalizeLegacyMatchID(strings.TrimSpace(matchID))
+	if matchID == "" {
+		return nil, errInvalidMarket
+	}
+	return s.repo.ListByMatchID(ctx, matchID)
+}
+
+// GetProviderSettlementMarket resolves one immutable provider contract and
+// preserves storage errors so settlement cannot treat a failed read as empty.
+func (s *Service) GetProviderSettlementMarket(ctx context.Context, matchID string, innings int, finalRevision int64) (*Market, error) {
+	matchID = normalizeLegacyMatchID(strings.TrimSpace(matchID))
+	if matchID == "" || innings < 1 || innings > 2 || finalRevision <= 0 {
+		return nil, errInvalidMarket
+	}
+	return s.repo.GetProviderSettlementMarket(ctx, matchID, innings, finalRevision)
+}
+
+// EnsureProviderInningsMarket idempotently creates an innings score contract.
+// The context may be a mongo.SessionContext so this write can participate in
+// the same transaction as the authoritative match projection.
+func (s *Service) EnsureProviderInningsMarket(ctx context.Context, spec ProviderInningsMarketSpec) error {
+	spec.MatchID = normalizeLegacyMatchID(strings.TrimSpace(spec.MatchID))
+	spec.BattingTeamName = strings.TrimSpace(spec.BattingTeamName)
+	spec.Format = strings.TrimSpace(spec.Format)
+	spec.Blockers = normalizeBlockers(spec.Blockers)
+	if spec.MatchID == "" || spec.BattingTeamName == "" || spec.Innings < 1 || spec.Innings > 2 || spec.ScheduledBalls <= 0 {
+		return errInvalidMarket
+	}
+
+	strikeMax, ok := providerStrikeMax(spec.Format)
+	if !ok {
+		return errInvalidMarket
+	}
+	lifecycle := MarketLifecyclePending
+	status := MarketStatusSuspended
+	if strings.EqualFold(strings.TrimSpace(spec.FeedState), matches.FeedStateHealthy) && len(spec.Blockers) == 0 {
+		lifecycle = MarketLifecycleOpen
+		status = MarketStatusActive
+	}
+
+	return s.repo.UpsertProviderInningsMarket(ctx, Market{
+		MatchID:           spec.MatchID,
+		Title:             fmt.Sprintf("%s Innings %d Score", spec.BattingTeamName, spec.Innings),
+		Type:              "match_depth",
+		Status:            status,
+		Kind:              MarketKindInningsScore,
+		Innings:           spec.Innings,
+		Format:            spec.Format,
+		ScheduledBalls:    spec.ScheduledBalls,
+		StrikeMin:         10,
+		StrikeMax:         strikeMax,
+		StrikeStep:        10,
+		FormulaVersion:    FormulaVersionInningsScoreV1,
+		Lifecycle:         lifecycle,
+		Blockers:          spec.Blockers,
+		MatchStateVersion: spec.StateVersion,
+		TradingVersion:    spec.TradingVersion,
+	})
+}
+
+// SetProviderMarketGate changes only mutable provider-market state. Final
+// inputs are stored monotonically by revision for deterministic settlement.
+func (s *Service) SetProviderMarketGate(ctx context.Context, matchID string, innings int, lifecycle string, blockers []string, finalScore *int, finalRevision int64) error {
+	matchID = normalizeLegacyMatchID(strings.TrimSpace(matchID))
+	lifecycle = strings.TrimSpace(lifecycle)
+	blockers = normalizeBlockers(blockers)
+	if matchID == "" || innings < 1 || innings > 2 || !isValidMarketLifecycle(lifecycle) {
+		return errInvalidMarket
+	}
+	if finalScore != nil && (*finalScore < 0 || finalRevision <= 0) {
+		return errInvalidMarket
+	}
+	return s.repo.UpdateProviderMarketGate(ctx, matchID, innings, lifecycle, blockers, finalScore, finalRevision)
+}
+
+// ClaimProviderSettlement freezes the final revision before any wallet write.
+func (s *Service) ClaimProviderSettlement(ctx context.Context, matchID string, innings int, finalRevision int64) (bool, error) {
+	matchID = normalizeLegacyMatchID(strings.TrimSpace(matchID))
+	if matchID == "" || innings < 1 || innings > 2 || finalRevision <= 0 {
+		return false, errInvalidMarket
+	}
+	return s.repo.ClaimProviderSettlement(ctx, matchID, innings, finalRevision)
+}
+
+func providerStrikeMax(format string) (float64, bool) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "t20", "t20i":
+		return 250, true
+	case "odi", "list a", "lista", "list_a":
+		return 350, true
+	default:
+		return 0, false
+	}
 }
 
 // GetMarketByID accepts either a full hex ObjectID or a short hex tail
@@ -66,6 +194,17 @@ func (s *Service) GetMarketByID(ctx context.Context, id string) (*Market, error)
 		return nil, err
 	}
 	return s.repo.GetByID(ctx, objID)
+}
+
+// VerifyProviderMarketGate conditionally touches an open provider market. It
+// must be called with the order transaction context to conflict atomically
+// with a concurrent provider/admin gate update.
+func (s *Service) VerifyProviderMarketGate(ctx context.Context, id string, stateVersion, tradingVersion int64) (*Market, bool, error) {
+	objID, err := resolveMarketID(ctx, s.repo, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.repo.VerifyProviderMarketGate(ctx, objID, stateVersion, tradingVersion)
 }
 
 func (s *Service) GetMarketsByIDs(ctx context.Context, ids []string) (map[string]*Market, error) {
@@ -122,7 +261,31 @@ func (s *Service) CreateMarket(ctx context.Context, req CreateMarketRequest) (*M
 	}
 
 	status := strings.TrimSpace(req.Status)
-	if status == "" {
+	kind := strings.TrimSpace(req.Kind)
+	lifecycle := strings.TrimSpace(req.Lifecycle)
+	formulaVersion := strings.TrimSpace(req.FormulaVersion)
+	if kind == MarketKindInningsScore {
+		if req.Innings < 1 || req.Innings > 2 || req.ScheduledBalls <= 0 || req.StrikeMin <= 0 || req.StrikeMax < req.StrikeMin || req.StrikeStep <= 0 {
+			return nil, errInvalidMarket
+		}
+		if formulaVersion == "" {
+			formulaVersion = FormulaVersionInningsScoreV1
+		}
+		if formulaVersion != FormulaVersionInningsScoreV1 {
+			return nil, errInvalidMarket
+		}
+		if lifecycle == "" {
+			lifecycle = MarketLifecyclePending
+		}
+		if !isValidMarketLifecycle(lifecycle) {
+			return nil, errInvalidMarket
+		}
+		if status == "" {
+			status = compatibilityStatus(lifecycle, req.Blockers)
+		}
+	} else if lifecycle != "" || formulaVersion != "" || req.Innings != 0 {
+		return nil, errInvalidMarket
+	} else if status == "" {
 		status = MarketStatusActive
 	}
 	if !isValidMarketStatus(status) {
@@ -138,6 +301,16 @@ func (s *Service) CreateMarket(ctx context.Context, req CreateMarketRequest) (*M
 		Title:          title,
 		Type:           mtype,
 		Status:         status,
+		Kind:           kind,
+		Innings:        req.Innings,
+		Format:         strings.TrimSpace(req.Format),
+		ScheduledBalls: req.ScheduledBalls,
+		StrikeMin:      round2(req.StrikeMin),
+		StrikeMax:      round2(req.StrikeMax),
+		StrikeStep:     round2(req.StrikeStep),
+		FormulaVersion: formulaVersion,
+		Lifecycle:      lifecycle,
+		Blockers:       normalizeBlockers(req.Blockers),
 		BuyerPrice:     round2(req.BuyerPrice),
 		SellerPrice:    round2(req.SellerPrice),
 		LTP:            round2(req.LTP),
@@ -147,6 +320,45 @@ func (s *Service) CreateMarket(ctx context.Context, req CreateMarketRequest) (*M
 		QuantityLadder: req.QuantityLadder,
 	}
 	return s.repo.Create(ctx, market)
+}
+
+func isValidMarketLifecycle(lifecycle string) bool {
+	switch lifecycle {
+	case MarketLifecyclePending, MarketLifecycleOpen, MarketLifecycleSettling, MarketLifecycleSettled, MarketLifecycleVoid:
+		return true
+	default:
+		return false
+	}
+}
+
+func compatibilityStatus(lifecycle string, blockers []string) string {
+	if lifecycle == MarketLifecycleOpen && len(normalizeBlockers(blockers)) == 0 {
+		return MarketStatusActive
+	}
+	if lifecycle == MarketLifecycleSettled || lifecycle == MarketLifecycleVoid {
+		return MarketStatusClosed
+	}
+	return MarketStatusSuspended
+}
+
+func normalizeBlockers(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, blocker := range in {
+		blocker = strings.ToLower(strings.TrimSpace(blocker))
+		if blocker == "" {
+			continue
+		}
+		if _, ok := seen[blocker]; ok {
+			continue
+		}
+		seen[blocker] = struct{}{}
+		out = append(out, blocker)
+	}
+	return out
 }
 
 // SetMarketStatus suspends/resumes/closes a market. Returns errMarketNotFound
@@ -159,6 +371,29 @@ func (s *Service) SetMarketStatus(ctx context.Context, id, status string) (*Mark
 	objID, err := resolveMarketID(ctx, s.repo, id)
 	if err != nil {
 		return nil, err
+	}
+	existing, err := s.repo.GetByID(ctx, objID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, errMarketNotFound
+	}
+	if existing.Kind == MarketKindInningsScore {
+		if status == MarketStatusClosed {
+			return nil, errInvalidStatus
+		}
+		if s.providerManualGateController != nil {
+			return s.providerManualGateController.SetProviderManualGate(ctx, existing.MatchID, objID, status == MarketStatusSuspended)
+		}
+		updated, err := s.repo.SetProviderManualBlocker(ctx, objID, status == MarketStatusSuspended)
+		if err != nil {
+			return nil, err
+		}
+		if updated == nil {
+			return nil, errMarketNotFound
+		}
+		return updated, nil
 	}
 	updated, err := s.repo.UpdateStatus(ctx, objID, status)
 	if err != nil {

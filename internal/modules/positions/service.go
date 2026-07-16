@@ -14,8 +14,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
 )
 
@@ -229,27 +229,62 @@ func (s *Service) ListOpenByMatch(ctx context.Context, matchID string) ([]orders
 	return out, nil
 }
 
-func (s *Service) ApplyExecution(ctx context.Context, exec executions.Execution) error {
+func (s *Service) ApplyExecution(ctx context.Context, exec executions.Execution, effect string) (orders.PositionTransition, error) {
 	if s.projections == nil {
-		return nil
+		return orders.PositionTransition{}, nil
 	}
-	return s.projections.ApplyExecution(ctx, exec)
+
+	constraint := ProjectionConstraint{}
+	switch strings.ToUpper(strings.TrimSpace(effect)) {
+	case orders.PositionEffectClose:
+		if strings.EqualFold(exec.Side, "sell") {
+			constraint.MinLots = intPtr(exec.Quantity)
+		} else {
+			constraint.MaxLots = intPtr(-exec.Quantity)
+		}
+	case orders.PositionEffectOpen:
+		if strings.EqualFold(exec.Side, "sell") {
+			constraint.MaxLots = intPtr(0)
+		} else {
+			constraint.MinLots = intPtr(0)
+		}
+	}
+
+	transition, err := s.projections.ApplyExecution(ctx, exec, constraint)
+	if errors.Is(err, ErrProjectionConstraint) {
+		return orders.PositionTransition{}, orders.ErrInsufficientPosition
+	}
+	if err != nil {
+		return orders.PositionTransition{}, err
+	}
+	return orders.PositionTransition{
+		NetLotsBefore:          transition.Before.Lots,
+		AverageSellBefore:      transition.Before.SellPrice,
+		ShortCollateralBefore:  transition.Before.ShortCollateral,
+		ShortCollateralRelease: transition.ShortCollateralRelease,
+		ProjectionRevision:     transition.After.Revision,
+	}, nil
+}
+
+func intPtr(value int) *int {
+	return &value
 }
 
 func toSnapshot(p Position) orders.PositionSnapshot {
 	return orders.PositionSnapshot{
-		UserID:      p.UserID,
-		ID:          p.ID,
-		MatchID:     p.MatchID,
-		MarketID:    p.MarketID,
-		Strike:      p.Strike,
-		Lots:        p.Lots,
-		BuyPrice:    p.BuyPrice,
-		SellPrice:   p.SellPrice,
-		LTP:         p.LTP,
-		PnL:         p.PnL,
-		RealizedPnL: p.RealizedPnL,
-		Status:      p.Status,
+		UserID:          p.UserID,
+		ID:              p.ID,
+		MatchID:         p.MatchID,
+		MarketID:        p.MarketID,
+		Strike:          p.Strike,
+		Lots:            p.Lots,
+		BuyPrice:        p.BuyPrice,
+		SellPrice:       p.SellPrice,
+		LTP:             p.LTP,
+		PnL:             p.PnL,
+		RealizedPnL:     p.RealizedPnL,
+		ShortCollateral: p.ShortCollateral,
+		Status:          p.Status,
 	}
 }
 
@@ -524,7 +559,7 @@ func computePnL(p Position, matched int) float64 {
 }
 
 func round2(f float64) float64 {
-	return float64(int64(f*100+0.5)) / 100
+	return math.Round(f*100) / 100
 }
 
 func derivePositionID(userID primitive.ObjectID, matchID, marketID string, strike float64, firstSeen time.Time) string {
@@ -540,7 +575,6 @@ func derivePositionID(userID primitive.ObjectID, matchID, marketID string, strik
 	h.Write([]byte(firstSeen.UTC().Format(time.RFC3339Nano)))
 	return hex.EncodeToString(h.Sum(nil))[:24]
 }
-
 
 func applyStaticFilters(in []Position, f PositionFilter) []Position {
 	out := make([]Position, 0, len(in))

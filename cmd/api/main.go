@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -28,12 +29,21 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/routes"
+	sportmonksadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/admin"
+	sportmonksclient "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/client"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/settlement"
+	sportmonksstore "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/store"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/watchdog"
 )
 
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config load: %v", err)
+	}
+	providerConfig, err := sportmonksclient.LoadConfigFromEnv()
+	if err != nil {
+		log.Fatalf("Sportmonks config: %v", err)
 	}
 
 	mongo, err := database.ConnectMongo(context.Background(), cfg.MongoURI, cfg.MongoDB)
@@ -42,6 +52,17 @@ func main() {
 	}
 	defer func() { _ = mongo.Close(context.Background()) }()
 	log.Printf("MongoDB connected; no in-memory fallback enabled; using database %q", cfg.MongoDB)
+	checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = mongo.RequireTransactions(checkCtx)
+	cancel()
+	if err != nil {
+		log.Fatalf("transactional persistence prerequisite: %v", err)
+	}
+	providerCtx := context.Background()
+	var stopProvider context.CancelFunc
+	if providerConfig.Mode == sportmonksclient.ModeLive {
+		providerCtx, stopProvider = context.WithCancel(context.Background())
+	}
 
 	authRepo := auth.NewMongoUserRepository(mongo.DB)
 	adminEmails := parseAdminEmails(os.Getenv("ADMIN_EMAILS"))
@@ -55,13 +76,33 @@ func main() {
 	// Matches.
 	matchesRepo := matches.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
-	seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
-	if err := matchesRepo.EnsureDefaultMatches(context.Background()); err != nil {
-		log.Fatalf("MongoDB ensure default matches: %v", err)
+	if providerConfig.Mode != sportmonksclient.ModeLive {
+		seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
+		if err := matchesRepo.EnsureDefaultMatches(context.Background()); err != nil {
+			log.Fatalf("MongoDB ensure default matches: %v", err)
+		}
 	}
 	matchEventsRepo := matches.NewMongoEventRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "match_events", matchEventsRepo.EnsureIndexes)
 	realtimeHub := realtime.NewHub()
+	var stopOutboxWatcher context.CancelFunc
+	var outboxWatcher *realtime.OutboxWatcher
+	if providerConfig.Mode == sportmonksclient.ModeLive {
+		outboxCtx, cancel := context.WithCancel(providerCtx)
+		stopOutboxWatcher = cancel
+		outboxWatcher = realtime.NewOutboxWatcher(mongo.DB, realtimeHub)
+		go func() {
+			if err := outboxWatcher.Run(outboxCtx); err != nil && outboxCtx.Err() == nil {
+				log.Printf("realtime outbox watcher stopped: %v", err)
+			}
+		}()
+		readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := outboxWatcher.WaitReady(readyCtx)
+		readyCancel()
+		if err != nil {
+			log.Fatalf("realtime outbox prerequisite: %v", err)
+		}
+	}
 	matchesService := matches.NewService(matchesRepo, matchEventsRepo, realtimeHub)
 	if err := matchesService.ReconcileOnStartup(context.Background()); err != nil {
 		log.Printf("matches reconcile: %v", err)
@@ -71,17 +112,28 @@ func main() {
 	// Markets.
 	marketsRepo := markets.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "markets", marketsRepo.EnsureIndexes)
-	seedMongoDefaults(context.Background(), "markets", marketsRepo.SeedDefaults)
-	if err := marketsRepo.EnsureDefaultMarkets(context.Background()); err != nil {
-		log.Printf("markets EnsureDefaultMarkets: %v", err)
+	if providerConfig.Mode != sportmonksclient.ModeLive {
+		seedMongoDefaults(context.Background(), "markets", marketsRepo.SeedDefaults)
+		if err := marketsRepo.EnsureDefaultMarkets(context.Background()); err != nil {
+			log.Printf("markets EnsureDefaultMarkets: %v", err)
+		}
 	}
 	marketsService := markets.NewService(marketsRepo)
 	marketsHandler := markets.NewHandler(marketsService, matchesService)
+	feedStore := sportmonksstore.New(mongo.DB, marketsService)
+	marketsService.SetProviderManualGateController(feedStore)
+	mustEnsureIndexes(context.Background(), "Sportmonks provider", feedStore.EnsureIndexes)
+	sportmonksAdminHandler := sportmonksadmin.NewHandler(feedStore)
+	if providerConfig.Mode == sportmonksclient.ModeLive {
+		go watchdog.Run(providerCtx, feedStore, 5*time.Second)
+	}
 
 	// Orders.
 	ordersRepo := orders.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "orders", ordersRepo.EnsureIndexes)
-	seedMongoDefaults(context.Background(), "orders", ordersRepo.SeedDefaults)
+	if providerConfig.Mode != sportmonksclient.ModeLive {
+		seedMongoDefaults(context.Background(), "orders", ordersRepo.SeedDefaults)
+	}
 
 	// Executions.
 	executionsRepo := executions.NewMongoRepository(mongo.DB)
@@ -109,6 +161,17 @@ func main() {
 	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService, positionsService, realtimeHub)
 	ordersHandler := orders.NewHandler(ordersService)
 	matchesService.SetSettlement(ordersService)
+	if providerConfig.Mode == sportmonksclient.ModeLive {
+		processor, processorErr := settlement.NewProcessor(feedStore, ordersService, processInstanceID(), providerConfig.LeaseTTL)
+		if processorErr != nil {
+			log.Fatalf("Sportmonks settlement processor: %v", processorErr)
+		}
+		go func() {
+			if runErr := processor.Run(providerCtx); runErr != nil && providerCtx.Err() == nil {
+				log.Printf("Sportmonks settlement processor stopped: %v", runErr)
+			}
+		}()
+	}
 
 	// Portfolio aggregates wallet, positions, markets, and matches server-side so
 	// dashboard/portfolio calculations are not duplicated in frontend clients.
@@ -118,11 +181,22 @@ func main() {
 	// Watchlist.
 	watchlistRepo := watchlist.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "watchlist", watchlistRepo.EnsureIndexes)
-	seedMongoDefaults(context.Background(), "watchlist", watchlistRepo.SeedDefaults)
+	if providerConfig.Mode != sportmonksclient.ModeLive {
+		seedMongoDefaults(context.Background(), "watchlist", watchlistRepo.SeedDefaults)
+	}
 	watchlistService := watchlist.NewService(watchlistRepo, marketsService)
 	watchlistHandler := watchlist.NewHandler(watchlistService)
 
-	healthHandler := health.NewHandler()
+	readinessCheck := mongo.Ping
+	if outboxWatcher != nil {
+		readinessCheck = func(ctx context.Context) error {
+			if err := mongo.Ping(ctx); err != nil {
+				return err
+			}
+			return outboxWatcher.Ready(ctx)
+		}
+	}
+	healthHandler := health.NewHandler(readinessCheck)
 	realtimeHandler := realtime.NewHandler(realtimeHub, func(token string) (string, error) {
 		id, _, err := authService.ParseToken(token)
 		if err != nil {
@@ -155,7 +229,7 @@ func main() {
 	defer simService.Shutdown()
 	simService.AutoStartOnBoot(context.Background())
 
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, sportmonksAdminHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS(cfg.AllowedOrigins))
 
 	srv := &http.Server{
@@ -174,11 +248,25 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+	if stopOutboxWatcher != nil {
+		stopOutboxWatcher()
+	}
+	if stopProvider != nil {
+		stopProvider()
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	_ = srv.Shutdown(ctx)
+}
+
+func processInstanceID() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "unknown-host"
+	}
+	return fmt.Sprintf("%s:%d", host, os.Getpid())
 }
 
 func parseAdminEmails(s string) []string {

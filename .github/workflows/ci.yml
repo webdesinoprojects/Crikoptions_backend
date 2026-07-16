@@ -1,0 +1,72 @@
+name: backend-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Start Mongo replica set
+        run: |
+          docker run --detach --rm --name mongo-rs --publish 27017:27017 \
+            mongo:7.0 --replSet rs0 --bind_ip_all
+          for attempt in {1..30}; do
+            if docker exec mongo-rs mongosh --quiet --eval 'db.adminCommand({ping: 1}).ok' >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker logs mongo-rs
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec mongo-rs mongosh --quiet --eval \
+            'rs.initiate({_id: "rs0", members: [{_id: 0, host: "127.0.0.1:27017"}]})'
+          for attempt in {1..30}; do
+            if docker exec mongo-rs mongosh --quiet --eval \
+              'quit(db.hello().isWritablePrimary ? 0 : 1)' >/dev/null 2>&1; then
+              exit 0
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker logs mongo-rs
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Replica-set integration test
+        env:
+          MONGO_INTEGRATION_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
+        run: |
+          go test ./internal/sportmonks/store -run '^TestMongoLiveProjectionTransaction$' -count=1
+          go test ./internal/modules/wallet -run '^TestMongoWalletOperationIdempotency$' -count=1
+      - name: Race test
+        run: go test -race ./...
+      - name: Build production commands
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          go build -trimpath -o /tmp/crikoptions-api ./cmd/api
+          go build -trimpath -o /tmp/crikoptions-feedworker ./cmd/feedworker
+      - name: Build production image
+        run: docker build --tag crikoptions-backend:ci .

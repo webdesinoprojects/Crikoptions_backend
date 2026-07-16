@@ -1,7 +1,9 @@
 package health
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -33,5 +35,15 @@ func TestHealthIncludesRenderDeploymentMetadata(t *testing.T) {
 		if response[field] != expected {
 			t.Errorf("%s = %q, want %q", field, response[field], expected)
 		}
+	}
+}
+
+func TestReadyFailsClosedWhenDependencyFails(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	NewHandler(func(context.Context) error { return errors.New("unavailable") }).Ready(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
 	}
 }

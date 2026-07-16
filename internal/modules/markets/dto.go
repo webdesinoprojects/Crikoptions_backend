@@ -62,6 +62,16 @@ type CreateMarketRequest struct {
 	Title          string        `json:"title"`
 	Type           string        `json:"type"`
 	Status         string        `json:"status"`
+	Kind           string        `json:"kind,omitempty"`
+	Innings        int           `json:"innings,omitempty"`
+	Format         string        `json:"format,omitempty"`
+	ScheduledBalls int           `json:"scheduledBalls,omitempty"`
+	StrikeMin      float64       `json:"strikeMin,omitempty"`
+	StrikeMax      float64       `json:"strikeMax,omitempty"`
+	StrikeStep     float64       `json:"strikeStep,omitempty"`
+	FormulaVersion string        `json:"formulaVersion,omitempty"`
+	Lifecycle      string        `json:"lifecycle,omitempty"`
+	Blockers       []string      `json:"blockers,omitempty"`
 	BuyerPrice     float64       `json:"buyerPrice"`
 	SellerPrice    float64       `json:"sellerPrice"`
 	LTP            float64       `json:"ltp"`

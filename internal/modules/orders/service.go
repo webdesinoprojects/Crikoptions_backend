@@ -20,29 +20,52 @@ import (
 )
 
 var (
-	ErrMarketNotFound       = errors.New("market not found")
-	ErrMatchNotFound        = errors.New("match not found")
-	ErrInvalidSide          = errors.New("invalid side, must be 'buy' or 'sell'")
-	ErrInvalidQuantity      = errors.New("quantity must be positive")
-	ErrInvalidPrice         = errors.New("price must be positive")
-	ErrInvalidStrike        = errors.New("strike must be positive")
-	ErrMarketNotTradable    = errors.New("market is not open for trading")
-	ErrMatchNotTradable     = errors.New("match is not live for trading")
-	ErrInsufficientBalance  = errors.New("insufficient available wallet balance")
-	ErrInsufficientPosition = errors.New("insufficient position to sell")
-	ErrStrikeNotFound       = errors.New("strike not found in option chain")
-	ErrNoLiquidity          = errors.New("no executable market quote available")
+	ErrMarketNotFound         = errors.New("market not found")
+	ErrMatchNotFound          = errors.New("match not found")
+	ErrInvalidSide            = errors.New("invalid side, must be 'buy' or 'sell'")
+	ErrInvalidQuantity        = errors.New("quantity must be positive")
+	ErrInvalidPrice           = errors.New("price must be positive")
+	ErrInvalidStrike          = errors.New("strike must be positive")
+	ErrMarketNotTradable      = errors.New("market is not open for trading")
+	ErrMatchNotTradable       = errors.New("match is not live for trading")
+	ErrInsufficientBalance    = errors.New("insufficient available wallet balance")
+	ErrInsufficientPosition   = errors.New("insufficient position to sell")
+	ErrStrikeNotFound         = errors.New("strike not found in option chain")
+	ErrNoLiquidity            = errors.New("no executable market quote available")
+	ErrTradingStateChanged    = newCodedAPIError(http.StatusConflict, "TRADING_STATE_CHANGED", "Trading state changed; refresh the quote and try again")
+	ErrMarketContractMismatch = newCodedAPIError(http.StatusConflict, "MARKET_CONTRACT_MISMATCH", "Market does not belong to the current match innings")
+	ErrReservedClientOrderID  = newCodedAPIError(http.StatusBadRequest, "RESERVED_CLIENT_ORDER_ID", "clientOrderId uses a reserved system prefix")
+	ErrInternalOrderCancel    = newCodedAPIError(http.StatusConflict, "ORDER_NOT_CANCELLABLE", "System settlement orders cannot be cancelled")
 )
 
 const ShortInitialMarginRate = 1.0
+
+const (
+	settlementClientOrderPrefix       = "settlement:"
+	voidClientOrderPrefix             = "void:"
+	positionIntentProviderVoidReverse = "PROVIDER_VOID_REVERSAL"
+)
 
 type MatchReader interface {
 	GetMatchByID(ctx context.Context, id string) (*matches.Match, error)
 }
 
+// TradingGateVerifier conditionally touches the provider match gate inside the
+// caller's transaction. The write makes a concurrent suspension/version bump
+// conflict with order reservation or execution instead of allowing a stale
+// snapshot-isolation read to commit.
+type TradingGateVerifier interface {
+	VerifyTradingGate(ctx context.Context, id string, stateVersion, tradingVersion int64) (*matches.Match, bool, error)
+}
+
+type ProviderMarketGateVerifier interface {
+	VerifyProviderMarketGate(ctx context.Context, id string, stateVersion, tradingVersion int64) (*markets.Market, bool, error)
+}
+
 type MarketReader interface {
 	GetMarketByID(ctx context.Context, id string) (*markets.Market, error)
 	GetMarketsByMatchID(ctx context.Context, matchID string) []markets.Market
+	ListMarketsByMatchID(ctx context.Context, matchID string) ([]markets.Market, error)
 	SetMarketStatus(ctx context.Context, id, status string) (*markets.Market, error)
 	StrikeQuote(input markets.PriceCalculationInput, strike float64) (bid, ask float64, ok bool)
 	IsTradable(market *markets.Market) bool
@@ -55,12 +78,16 @@ type WalletPort interface {
 	SettleBuyFill(ctx context.Context, userID primitive.ObjectID, fillCost, reserveRelease float64, orderID, description string) (*wallet.AdjustmentResult, error)
 	SettleSellFill(ctx context.Context, userID primitive.ObjectID, proceeds float64, orderID, description string) (*wallet.AdjustmentResult, error)
 	SettleShortOpenFill(ctx context.Context, userID primitive.ObjectID, proceeds float64, orderID, description string) (*wallet.AdjustmentResult, error)
+	SettleForcedBuyFill(ctx context.Context, userID primitive.ObjectID, fillCost, reserveRelease float64, orderID, description string) (*wallet.AdjustmentResult, error)
+	ReverseProviderContract(ctx context.Context, userID primitive.ObjectID, cashDelta, reservedDelta float64, marketID, description string) (*wallet.AdjustmentResult, error)
 }
 
 type ExecutionWriter interface {
 	Create(ctx context.Context, exec executions.Execution) (*executions.Execution, error)
+	ListWithError(ctx context.Context, filter executions.Filter) ([]executions.Execution, error)
 	OpenLongQty(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) int
 	PositionSummary(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) executions.PositionSummary
+	PositionSummaryWithError(ctx context.Context, userID primitive.ObjectID, matchID, marketID string, strike float64) (executions.PositionSummary, error)
 }
 
 // EventPublisher streams realtime updates (implemented by realtime.Hub). It is
@@ -72,18 +99,19 @@ type EventPublisher interface {
 // PositionSnapshot is the post-fill view of a user's position for a strike,
 // used both for WebSocket broadcasts and the close endpoint.
 type PositionSnapshot struct {
-	UserID      primitive.ObjectID
-	ID          string
-	MatchID     string
-	MarketID    string
-	Strike      float64
-	Lots        int
-	BuyPrice    float64
-	SellPrice   float64
-	LTP         float64
-	PnL         float64
-	RealizedPnL float64
-	Status      string
+	UserID          primitive.ObjectID
+	ID              string
+	MatchID         string
+	MarketID        string
+	Strike          float64
+	Lots            int
+	BuyPrice        float64
+	SellPrice       float64
+	LTP             float64
+	PnL             float64
+	RealizedPnL     float64
+	ShortCollateral float64
+	Status          string
 }
 
 // PositionView reads derived positions for a user. Implemented by
@@ -97,7 +125,15 @@ type PositionView interface {
 }
 
 type PositionProjectionWriter interface {
-	ApplyExecution(ctx context.Context, exec executions.Execution) error
+	ApplyExecution(ctx context.Context, exec executions.Execution, effect string) (PositionTransition, error)
+}
+
+type PositionTransition struct {
+	NetLotsBefore          int
+	AverageSellBefore      float64
+	ShortCollateralBefore  float64
+	ShortCollateralRelease float64
+	ProjectionRevision     int64
 }
 
 type Service struct {
@@ -279,12 +315,64 @@ func shortInitialMarginTopUp(order Order, fillPrice float64, openShortQty int) f
 	required := round2(fillPrice * float64(openShortQty) * ShortInitialMarginRate)
 	reserved := 0.0
 	if order.ReservedAmount > 0 && order.ReservedQuantity > 0 {
-		reserved = round2(order.ReservedAmount * float64(openShortQty) / float64(order.ReservedQuantity))
+		reservedQty := minInt(openShortQty, order.ReservedQuantity)
+		reserved = round2(order.ReservedAmount * float64(reservedQty) / float64(order.ReservedQuantity))
 	}
 	if required <= reserved {
 		return 0
 	}
 	return round2(required - reserved)
+}
+
+func futureOrderReserve(side string, remainingQty, projectedLots int, orderPrice float64) float64 {
+	if remainingQty <= 0 || orderPrice <= 0 {
+		return 0
+	}
+	openQty := remainingQty
+	switch side {
+	case "buy":
+		if projectedLots < 0 {
+			openQty = remainingQty + projectedLots
+		}
+	case "sell":
+		if projectedLots > 0 {
+			openQty = remainingQty - projectedLots
+		}
+	default:
+		return 0
+	}
+	if openQty < 0 {
+		openQty = 0
+	}
+	rate := 1.0
+	if side == "sell" {
+		rate = ShortInitialMarginRate
+	}
+	return round2(orderPrice * float64(openQty) * rate)
+}
+
+func orderFundsOperationContext(ctx context.Context, userID, orderID primitive.ObjectID, action string) context.Context {
+	key := fmt.Sprintf("wallet:user:%s:order:%s:%s", userID.Hex(), orderID.Hex(), action)
+	return wallet.WithOperationKey(ctx, key)
+}
+
+func fillWalletOperationContext(
+	ctx context.Context,
+	userID primitive.ObjectID,
+	order *Order,
+	executionID primitive.ObjectID,
+	providerContract bool,
+	action string,
+) context.Context {
+	scope := "execution:" + executionID.Hex()
+	if providerContract && order != nil {
+		clientOrderID := strings.TrimSpace(order.ClientOrderID)
+		if isInternalClientOrderID(clientOrderID) {
+			scope = "contract:" + clientOrderID
+		}
+	}
+	key := fmt.Sprintf("wallet:user:%s:%s:%s", userID.Hex(), scope, action)
+	return wallet.WithOperationKey(ctx, key)
 }
 
 func minInt(a, b int) int {
@@ -336,23 +424,32 @@ func (s *Service) PreviewOrder(ctx context.Context, userID primitive.ObjectID, r
 	if err != nil || market == nil {
 		return nil, ErrMarketNotFound
 	}
-	if !s.markets.IsTradable(market) {
-		if req.Side == "sell" {
-			return nil, newAPIError(http.StatusBadRequest, "Market not active")
-		}
-		return nil, ErrMarketNotTradable
-	}
 
 	match, err := s.matches.GetMatchByID(ctx, req.MatchID)
 	if err != nil || match == nil {
 		return nil, ErrMatchNotFound
 	}
+	if err := validateMarketContract(req.MatchID, market, match); err != nil {
+		return nil, err
+	}
+	if !s.markets.IsTradable(market) {
+		if isProviderMatch(match) {
+			return nil, ErrTradingStateChanged
+		}
+		if req.Side == "sell" {
+			return nil, newAPIError(http.StatusBadRequest, "Market not active")
+		}
+		return nil, ErrMarketNotTradable
+	}
 	if !isMatchTradable(match) {
+		if isProviderMatch(match) {
+			return nil, ErrTradingStateChanged
+		}
 		return nil, ErrMatchNotTradable
 	}
 
 	pricingInput := markets.PricingInputFromMatch(*match)
-	if req.PricingSnapshot != nil {
+	if req.PricingSnapshot != nil && !isProviderMatch(match) {
 		pricingInput = normalizePricingSnapshot(*req.PricingSnapshot)
 	}
 	bid, ask, ok := s.markets.StrikeQuote(pricingInput, req.Strike)
@@ -430,11 +527,17 @@ func (s *Service) PreviewOrder(ctx context.Context, userID primitive.ObjectID, r
 		SufficientBalance: sufficientBalance,
 		WillExecuteNow:    shouldFill,
 		Message:           message,
+		MatchStateVersion: match.StateVersion,
+		TradingVersion:    match.TradingVersion,
+		ExpiresAt:         time.Now().UTC().Add(5 * time.Second),
 	}, nil
 }
 
 func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, req CreateOrderRequest) (*Order, error) {
 	req = normalizeCreateRequest(req)
+	if isInternalClientOrderID(req.ClientOrderID) {
+		return nil, ErrReservedClientOrderID
+	}
 
 	if existing, err := s.repo.FindByClientOrderID(ctx, userID, req.ClientOrderID); err != nil {
 		return nil, err
@@ -450,13 +553,6 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	if err != nil || market == nil {
 		return nil, ErrMarketNotFound
 	}
-	if !s.markets.IsTradable(market) {
-		// Exit path uses the explicit error contract; buy path is unchanged.
-		if req.Side == "sell" {
-			return nil, newAPIError(http.StatusBadRequest, "Market not active")
-		}
-		return nil, ErrMarketNotTradable
-	}
 
 	// Serialize mutations for this (user, market, strike) so concurrent sells
 	// cannot oversell the same position.
@@ -467,12 +563,31 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	if err != nil || match == nil {
 		return nil, ErrMatchNotFound
 	}
+	if err := validateMarketContract(req.MatchID, market, match); err != nil {
+		return nil, err
+	}
+	if !s.markets.IsTradable(market) {
+		if isProviderMatch(match) {
+			return nil, ErrTradingStateChanged
+		}
+		// Exit path uses the explicit error contract; buy path is unchanged.
+		if req.Side == "sell" {
+			return nil, newAPIError(http.StatusBadRequest, "Market not active")
+		}
+		return nil, ErrMarketNotTradable
+	}
 	if !isMatchTradable(match) {
+		if isProviderMatch(match) {
+			return nil, ErrTradingStateChanged
+		}
 		return nil, ErrMatchNotTradable
+	}
+	if isProviderMatch(match) && !providerRequestMatchesGate(req, match) {
+		return nil, ErrTradingStateChanged
 	}
 
 	pricingInput := markets.PricingInputFromMatch(*match)
-	if req.PricingSnapshot != nil {
+	if req.PricingSnapshot != nil && !isProviderMatch(match) {
 		pricingInput = normalizePricingSnapshot(*req.PricingSnapshot)
 	}
 	bid, ask, ok := s.markets.StrikeQuote(pricingInput, req.Strike)
@@ -524,10 +639,16 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		FilledQuantity:    0,
 		RemainingQuantity: req.Quantity,
 		Status:            StatusOpen,
+		MatchStateVersion: match.StateVersion,
+		TradingVersion:    match.TradingVersion,
+		QuoteExpiresAt:    req.QuoteExpiresAt,
 	}
 
 	var created *Order
 	err = s.repo.DoTx(ctx, func(txCtx context.Context) error {
+		if err := s.verifyTradingGates(txCtx, match, market.ID.Hex(), match.StateVersion, match.TradingVersion); err != nil {
+			return err
+		}
 		var txErr error
 		created, txErr = s.repo.Create(txCtx, order)
 		if txErr != nil {
@@ -535,7 +656,8 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		}
 
 		if plan.ReservedAmount > 0 {
-			_, txErr = s.wallets.ReserveOrderMargin(txCtx, userID, plan.ReservedAmount, created.ID.Hex(), fmt.Sprintf("Reserve margin for order %s", created.ID.Hex()))
+			fundsCtx := orderFundsOperationContext(txCtx, userID, created.ID, "reserve")
+			_, txErr = s.wallets.ReserveOrderMargin(fundsCtx, userID, plan.ReservedAmount, created.ID.Hex(), fmt.Sprintf("Reserve margin for order %s", created.ID.Hex()))
 			if txErr != nil {
 				return txErr
 			}
@@ -557,6 +679,27 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 
 	filled, err := s.applyFill(ctx, userID, created, fillPrice, created.RemainingQuantity)
 	if err != nil {
+		// Reservation and execution are separately fenced transactions. If the
+		// provider gate or position changes between them, leave no marketable
+		// order or margin behind for a matcher to execute against stale state.
+		if shouldCancelFailedImmediateFill(err) {
+			cancelled, cancelErr := s.CancelOrder(ctx, created.ID, userID)
+			if cancelErr != nil {
+				return nil, fmt.Errorf("%w (failed to cancel fenced order: %v)", err, cancelErr)
+			}
+			if cancelled == nil {
+				current, lookupErr := s.repo.GetByID(ctx, created.ID)
+				if lookupErr != nil {
+					return nil, fmt.Errorf("%w (failed to confirm fenced order state: %v)", err, lookupErr)
+				}
+				if current != nil && (current.Status == StatusOpen || current.Status == StatusPartiallyFilled) {
+					return nil, fmt.Errorf("%w (fenced order remains cancellable)", err)
+				}
+			}
+		}
+		if errors.Is(err, wallet.ErrInsufficientFunds) {
+			return nil, ErrInsufficientBalance
+		}
 		return nil, err
 	}
 	s.broadcastOrderAndPosition(ctx, userID, filled)
@@ -592,6 +735,88 @@ func normalizePricingSnapshot(snapshot markets.PriceCalculationInput) markets.Pr
 	return snapshot
 }
 
+func isProviderMatch(match *matches.Match) bool {
+	return match != nil && strings.EqualFold(strings.TrimSpace(match.DataSource), matches.DataSourceSportmonks)
+}
+
+func providerRequestMatchesGate(req CreateOrderRequest, match *matches.Match) bool {
+	if !isProviderMatch(match) {
+		return true
+	}
+	now := time.Now().UTC()
+	return req.ExpectedMatchStateVersion == match.StateVersion &&
+		req.ExpectedTradingVersion == match.TradingVersion &&
+		!req.QuoteExpiresAt.IsZero() &&
+		now.Before(req.QuoteExpiresAt) &&
+		!req.QuoteExpiresAt.After(now.Add(6*time.Second))
+}
+
+func (s *Service) verifyTradingGates(ctx context.Context, match *matches.Match, marketID string, stateVersion, tradingVersion int64) error {
+	if !isProviderMatch(match) {
+		return nil
+	}
+	verifier, ok := s.matches.(TradingGateVerifier)
+	if !ok {
+		return ErrTradingStateChanged
+	}
+	verified, valid, err := verifier.VerifyTradingGate(ctx, match.ID.Hex(), stateVersion, tradingVersion)
+	if err != nil {
+		return err
+	}
+	if !valid || !isMatchTradable(verified) || verified.StateVersion != stateVersion || verified.TradingVersion != tradingVersion {
+		return ErrTradingStateChanged
+	}
+	marketVerifier, ok := s.markets.(ProviderMarketGateVerifier)
+	if !ok {
+		return ErrTradingStateChanged
+	}
+	verifiedMarket, valid, err := marketVerifier.VerifyProviderMarketGate(ctx, marketID, stateVersion, tradingVersion)
+	if err != nil {
+		return err
+	}
+	if !valid || !s.markets.IsTradable(verifiedMarket) || verifiedMarket.MatchStateVersion != stateVersion || verifiedMarket.TradingVersion != tradingVersion {
+		return ErrTradingStateChanged
+	}
+	if err := validateMarketContract(verified.ID.Hex(), verifiedMarket, verified); err != nil {
+		return ErrTradingStateChanged
+	}
+	return nil
+}
+
+func validateMarketContract(requestMatchID string, market *markets.Market, match *matches.Match) error {
+	if market == nil || match == nil {
+		return ErrMarketContractMismatch
+	}
+	requestMatchID = strings.TrimSpace(requestMatchID)
+	marketMatchID := strings.TrimSpace(market.MatchID)
+	if marketMatchID == "" {
+		// Test doubles and historical in-memory fixtures may omit ownership; a
+		// provider contract never may.
+		if isProviderMatch(match) {
+			return ErrMarketContractMismatch
+		}
+		return nil
+	}
+	providerMatch := isProviderMatch(match)
+	belongs := marketMatchID == requestMatchID || marketMatchID == match.ID.Hex()
+	if !belongs && !providerMatch && len(match.ID.Hex()) >= 2 {
+		belongs = marketMatchID == match.ID.Hex()[len(match.ID.Hex())-2:]
+	}
+	if !belongs {
+		return ErrMarketContractMismatch
+	}
+	if providerMatch {
+		if market.Kind != markets.MarketKindInningsScore ||
+			market.FormulaVersion != markets.FormulaVersionInningsScoreV1 ||
+			market.Innings != match.Innings {
+			return ErrMarketContractMismatch
+		}
+	} else if market.Innings > 0 && market.Innings != match.Innings {
+		return ErrMarketContractMismatch
+	}
+	return nil
+}
+
 func (s *Service) CancelOrder(ctx context.Context, id, userID primitive.ObjectID) (*Order, error) {
 	existing, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -603,21 +828,24 @@ func (s *Service) CancelOrder(ctx context.Context, id, userID primitive.ObjectID
 	if existing == nil || existing.UserID != userID {
 		return nil, nil
 	}
+	if isInternalClientOrderID(existing.ClientOrderID) {
+		return nil, ErrInternalOrderCancel
+	}
 	if existing.Status != StatusOpen && existing.Status != StatusPartiallyFilled {
 		return nil, nil
 	}
 
 	var cancelled *Order
 	err = s.repo.DoTx(ctx, func(txCtx context.Context) error {
-		if remainingReserve := existing.RemainingReservedAmount(); remainingReserve > 0 {
-			_, txErr := s.wallets.ReleaseOrderMargin(txCtx, userID, remainingReserve, existing.ID.Hex(), fmt.Sprintf("Release margin for cancelled order %s", existing.ID.Hex()))
-			if txErr != nil {
-				return txErr
-			}
-		}
-
 		var txErr error
 		cancelled, txErr = s.repo.Cancel(txCtx, id, userID)
+		if txErr != nil || cancelled == nil {
+			return txErr
+		}
+		if remainingReserve := cancelled.RemainingReservedAmount(); remainingReserve > 0 {
+			fundsCtx := orderFundsOperationContext(txCtx, userID, cancelled.ID, "cancel-release")
+			_, txErr = s.wallets.ReleaseOrderMargin(fundsCtx, userID, remainingReserve, cancelled.ID.Hex(), fmt.Sprintf("Release margin for cancelled order %s", cancelled.ID.Hex()))
+		}
 		return txErr
 	})
 	if err != nil {
@@ -660,7 +888,7 @@ func (s *Service) ClosePosition(ctx context.Context, userID primitive.ObjectID, 
 		side = "buy"
 	}
 
-	return s.CreateOrder(ctx, userID, CreateOrderRequest{
+	request := CreateOrderRequest{
 		MatchID:        target.MatchID,
 		MarketID:       target.MarketID,
 		Strike:         target.Strike,
@@ -669,7 +897,11 @@ func (s *Service) ClosePosition(ctx context.Context, userID primitive.ObjectID, 
 		PositionEffect: PositionEffectClose,
 		Quantity:       quantity,
 		Price:          price,
-	})
+	}
+	if err := s.attachProviderFence(ctx, &request); err != nil {
+		return nil, err
+	}
+	return s.CreateOrder(ctx, userID, request)
 }
 
 // CloseAllPositions submits MARKET close orders for every open position
@@ -709,7 +941,7 @@ func (s *Service) CloseAllPositions(ctx context.Context, userID primitive.Object
 		}
 		quantity := absInt(target.Lots)
 
-		order, err := s.CreateOrder(ctx, userID, CreateOrderRequest{
+		request := CreateOrderRequest{
 			MatchID:        target.MatchID,
 			MarketID:       target.MarketID,
 			Strike:         target.Strike,
@@ -717,7 +949,16 @@ func (s *Service) CloseAllPositions(ctx context.Context, userID primitive.Object
 			Type:           OrderTypeMarket,
 			PositionEffect: PositionEffectClose,
 			Quantity:       quantity,
-		})
+		}
+		if err := s.attachProviderFence(ctx, &request); err != nil {
+			result.Failed++
+			result.Failures = append(result.Failures, CloseAllPositionFailure{
+				MatchID: target.MatchID, MarketID: target.MarketID, Strike: target.Strike,
+				Quantity: quantity, Message: serviceErrorMessage(err),
+			})
+			continue
+		}
+		order, err := s.CreateOrder(ctx, userID, request)
 		if err != nil {
 			result.Failed++
 			result.Failures = append(result.Failures, CloseAllPositionFailure{
@@ -735,6 +976,26 @@ func (s *Service) CloseAllPositions(ctx context.Context, userID primitive.Object
 	}
 
 	return result, nil
+}
+
+func (s *Service) attachProviderFence(ctx context.Context, request *CreateOrderRequest) error {
+	if request == nil {
+		return errors.New("order request is required")
+	}
+	match, err := s.matches.GetMatchByID(ctx, request.MatchID)
+	if err != nil {
+		return err
+	}
+	if !isProviderMatch(match) {
+		return nil
+	}
+	if !isMatchTradable(match) {
+		return ErrTradingStateChanged
+	}
+	request.ExpectedMatchStateVersion = match.StateVersion
+	request.ExpectedTradingVersion = match.TradingVersion
+	request.QuoteExpiresAt = time.Now().UTC().Add(5 * time.Second)
+	return nil
 }
 
 func serviceErrorMessage(err error) string {
@@ -795,112 +1056,212 @@ func (s *Service) broadcastOrderAndPosition(ctx context.Context, userID primitiv
 }
 
 func (s *Service) applyFill(ctx context.Context, userID primitive.ObjectID, order *Order, fillPrice float64, fillQty int) (*Order, error) {
+	return s.applyFillWithTradingGate(ctx, userID, order, fillPrice, fillQty, true)
+}
+
+func (s *Service) applySettlementFill(ctx context.Context, userID primitive.ObjectID, order *Order, fillPrice float64, fillQty int) (*Order, error) {
+	return s.applyFillWithTradingGate(ctx, userID, order, fillPrice, fillQty, false)
+}
+
+func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive.ObjectID, order *Order, fillPrice float64, fillQty int, enforceTradingGate bool) (*Order, error) {
 	if fillQty <= 0 || fillQty > order.RemainingQuantity {
 		return order, nil
 	}
 
-	before := s.executions.PositionSummary(ctx, userID, order.MatchID, order.MarketID, order.Strike)
-	closeLongQty := 0
-	openShortQty := 0
-	coverShortQty := 0
-	openLongQty := 0
-	switch order.Side {
-	case "sell":
-		if before.NetLots > 0 {
-			closeLongQty = minInt(fillQty, before.NetLots)
-		}
-		openShortQty = fillQty - closeLongQty
-	case "buy":
-		if before.NetLots < 0 {
-			coverShortQty = minInt(fillQty, -before.NetLots)
-		}
-		openLongQty = fillQty - coverShortQty
-	}
-
 	fillNotional := round2(fillPrice * float64(fillQty))
+	newFilled := order.FilledQuantity + fillQty
+	newRemaining := order.RemainingQuantity - fillQty
+	avgFill := fillPrice
+	if newFilled > fillQty {
+		prevNotional := order.AverageFillPrice * float64(order.FilledQuantity)
+		avgFill = round2((prevNotional + fillPrice*float64(fillQty)) / float64(newFilled))
+	}
+	status := StatusPartiallyFilled
+	if newRemaining == 0 {
+		status = StatusExecuted
+	}
+	execution := executions.Execution{
+		ID:              primitive.NewObjectID(),
+		UserID:          userID,
+		OrderID:         order.ID,
+		MatchID:         order.MatchID,
+		MarketID:        order.MarketID,
+		Strike:          order.Strike,
+		Side:            order.Side,
+		Price:           fillPrice,
+		Quantity:        fillQty,
+		LiquiditySource: executions.LiquiditySystemMarketMaker,
+		CreatedAt:       time.Now().UTC(),
+	}
+	if !enforceTradingGate && strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.ClientOrderID)), voidClientOrderPrefix) {
+		execution.LiquiditySource = executions.LiquidityProviderVoidReverse
+	}
+	providerVoidReversal := execution.LiquiditySource == executions.LiquidityProviderVoidReverse
+	providerSettlement := !enforceTradingGate && strings.HasPrefix(strings.ToLower(strings.TrimSpace(order.ClientOrderID)), settlementClientOrderPrefix)
 
 	var updated *Order
 	err := s.repo.DoTx(ctx, func(txCtx context.Context) error {
-		switch order.Side {
-		case "buy":
-			if coverShortQty > 0 {
-				release := shortCollateralRelease(before.AvgSellPrice, fillPrice, coverShortQty)
-				if release > 0 {
-					if _, txErr := s.wallets.ReleaseOrderMargin(txCtx, userID, release, order.ID.Hex(), fmt.Sprintf("Release short collateral for cover order %s", order.ID.Hex())); txErr != nil {
-						return txErr
-					}
-				}
+		if enforceTradingGate {
+			match, txErr := s.matches.GetMatchByID(txCtx, order.MatchID)
+			if txErr != nil || match == nil {
+				return ErrTradingStateChanged
 			}
-			reserveRelease := order.ReservedReleaseForQuantity(openLongQty)
-			if _, txErr := s.wallets.SettleBuyFill(txCtx, userID, fillNotional, reserveRelease, order.ID.Hex(), fmt.Sprintf("Buy fill for order %s", order.ID.Hex())); txErr != nil {
+			if txErr := s.verifyTradingGates(txCtx, match, order.MarketID, order.MatchStateVersion, order.TradingVersion); txErr != nil {
 				return txErr
-			}
-		case "sell":
-			if closeLongQty > 0 {
-				proceeds := round2(fillPrice * float64(closeLongQty))
-				if _, txErr := s.wallets.SettleSellFill(txCtx, userID, proceeds, order.ID.Hex(), fmt.Sprintf("Sell fill for order %s", order.ID.Hex())); txErr != nil {
-					return txErr
-				}
-			}
-			if openShortQty > 0 {
-				if topUp := shortInitialMarginTopUp(*order, fillPrice, openShortQty); topUp > 0 {
-					if _, txErr := s.wallets.ReserveOrderMargin(txCtx, userID, topUp, order.ID.Hex(), fmt.Sprintf("Top up short margin for order %s", order.ID.Hex())); txErr != nil {
-						return txErr
-					}
-				}
-				proceeds := round2(fillPrice * float64(openShortQty))
-				if _, txErr := s.wallets.SettleShortOpenFill(txCtx, userID, proceeds, order.ID.Hex(), fmt.Sprintf("Short sale proceeds for order %s", order.ID.Hex())); txErr != nil {
-					return txErr
-				}
 			}
 		}
 
-		execution := executions.Execution{
-			UserID:          userID,
-			OrderID:         order.ID,
-			MatchID:         order.MatchID,
-			MarketID:        order.MarketID,
-			Strike:          order.Strike,
-			Side:            order.Side,
-			Price:           fillPrice,
-			Quantity:        fillQty,
-			LiquiditySource: executions.LiquiditySystemMarketMaker,
+		transition := PositionTransition{}
+		var txErr error
+		if s.positionWriter != nil {
+			transition, txErr = s.positionWriter.ApplyExecution(txCtx, execution, order.PositionEffect)
+			if txErr != nil {
+				return txErr
+			}
+		} else {
+			// Legacy/manual test wiring may omit the projection. Production API
+			// wiring always supplies the transactional projection writer.
+			before, summaryErr := s.executions.PositionSummaryWithError(txCtx, userID, order.MatchID, order.MarketID, order.Strike)
+			if summaryErr != nil {
+				return summaryErr
+			}
+			transition.NetLotsBefore = before.NetLots
+			transition.AverageSellBefore = before.AvgSellPrice
+			transition.ShortCollateralBefore = round2(before.OpenShortNotional * (1 + ShortInitialMarginRate))
 		}
-		createdExec, txErr := s.executions.Create(txCtx, execution)
+
+		plan, txErr := buildPositionPlan(
+			order.Side,
+			fillQty,
+			order.PositionEffect,
+			transition.NetLotsBefore,
+			order.Strike,
+			order.Price,
+		)
+		if txErr != nil {
+			return fmt.Errorf("%w: %v", ErrInsufficientPosition, txErr)
+		}
+		futureReserve := futureOrderReserve(order.Side, newRemaining, plan.ProjectedLots, order.Price)
+
+		updated, txErr = s.repo.UpdateFill(txCtx, order.ID, FillUpdate{
+			ExpectedFilledQuantity:    order.FilledQuantity,
+			ExpectedRemainingQuantity: order.RemainingQuantity,
+			ExpectedStatus:            order.Status,
+			FilledQuantity:            newFilled,
+			RemainingQuantity:         newRemaining,
+			AverageFillPrice:          avgFill,
+			OutstandingReserve:        futureReserve,
+			ReserveReconciled:         true,
+			Status:                    status,
+		})
 		if txErr != nil {
 			return txErr
 		}
-		if s.positionWriter != nil && createdExec != nil {
-			if txErr := s.positionWriter.ApplyExecution(txCtx, *createdExec); txErr != nil {
-				return txErr
+		if updated == nil {
+			return errors.New("order fill state changed")
+		}
+		if !providerVoidReversal {
+			switch order.Side {
+			case "buy":
+				if plan.CoverShortQty > 0 {
+					release := transition.ShortCollateralRelease
+					if release <= 0 && transition.ShortCollateralBefore > 0 {
+						release = proRataShortCollateralRelease(transition.ShortCollateralBefore, transition.NetLotsBefore, plan.CoverShortQty)
+					}
+					if release <= 0 {
+						release = shortCollateralRelease(transition.AverageSellBefore, fillPrice, plan.CoverShortQty)
+					}
+					if release > 0 {
+						fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "cover-collateral-release")
+						if _, txErr := s.wallets.ReleaseOrderMargin(fundsCtx, userID, release, order.ID.Hex(), fmt.Sprintf("Release short collateral for cover order %s", order.ID.Hex())); txErr != nil {
+							return txErr
+						}
+					}
+				}
+				heldReserve := order.RemainingReservedAmount()
+				fillReserve := round2(fillPrice * float64(plan.OpenLongQty))
+				targetReserve := round2(fillReserve + futureReserve)
+				if topUp := round2(targetReserve - heldReserve); topUp > 0 {
+					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "buy-margin-topup")
+					if _, txErr := s.wallets.ReserveOrderMargin(fundsCtx, userID, topUp, order.ID.Hex(), fmt.Sprintf("Top up buy margin for order %s", order.ID.Hex())); txErr != nil {
+						return txErr
+					}
+					heldReserve = round2(heldReserve + topUp)
+				}
+				reserveRelease := round2(heldReserve - futureReserve)
+				if fillNotional > 0 {
+					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "buy-fill")
+					settleBuy := s.wallets.SettleBuyFill
+					if providerSettlement && plan.CoverShortQty > 0 {
+						settleBuy = s.wallets.SettleForcedBuyFill
+					}
+					if _, txErr := settleBuy(fundsCtx, userID, fillNotional, reserveRelease, order.ID.Hex(), fmt.Sprintf("Buy fill for order %s", order.ID.Hex())); txErr != nil {
+						return txErr
+					}
+				} else if reserveRelease > 0 {
+					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "zero-price-reserve-release")
+					if _, txErr := s.wallets.ReleaseOrderMargin(fundsCtx, userID, reserveRelease, order.ID.Hex(), fmt.Sprintf("Release margin for zero-price fill %s", order.ID.Hex())); txErr != nil {
+						return txErr
+					}
+				}
+			case "sell":
+				heldReserve := order.RemainingReservedAmount()
+				requiredInitialMargin := round2(fillPrice * float64(plan.OpenShortQty) * ShortInitialMarginRate)
+				targetReserve := round2(requiredInitialMargin + futureReserve)
+				if heldReserve > targetReserve {
+					release := round2(heldReserve - targetReserve)
+					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "sell-reserve-release")
+					if _, txErr := s.wallets.ReleaseOrderMargin(fundsCtx, userID, release, order.ID.Hex(), fmt.Sprintf("Release unused sell margin for order %s", order.ID.Hex())); txErr != nil {
+						return txErr
+					}
+				}
+				if topUp := round2(targetReserve - heldReserve); topUp > 0 {
+					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "short-margin-topup")
+					if _, txErr := s.wallets.ReserveOrderMargin(fundsCtx, userID, topUp, order.ID.Hex(), fmt.Sprintf("Top up short margin for order %s", order.ID.Hex())); txErr != nil {
+						return txErr
+					}
+				}
+				if plan.CloseLongQty > 0 {
+					proceeds := round2(fillPrice * float64(plan.CloseLongQty))
+					if proceeds > 0 {
+						fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "sell-fill")
+						if _, txErr := s.wallets.SettleSellFill(fundsCtx, userID, proceeds, order.ID.Hex(), fmt.Sprintf("Sell fill for order %s", order.ID.Hex())); txErr != nil {
+							return txErr
+						}
+					}
+				}
+				if plan.OpenShortQty > 0 {
+					proceeds := round2(fillPrice * float64(plan.OpenShortQty))
+					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "short-open-proceeds")
+					if _, txErr := s.wallets.SettleShortOpenFill(fundsCtx, userID, proceeds, order.ID.Hex(), fmt.Sprintf("Short sale proceeds for order %s", order.ID.Hex())); txErr != nil {
+						return txErr
+					}
+				}
 			}
 		}
 
-		newFilled := order.FilledQuantity + fillQty
-		newRemaining := order.RemainingQuantity - fillQty
-		avgFill := fillPrice
-		if newFilled > fillQty {
-			prevNotional := order.AverageFillPrice * float64(order.FilledQuantity)
-			avgFill = round2((prevNotional + fillPrice*float64(fillQty)) / float64(newFilled))
+		_, txErr = s.executions.Create(txCtx, execution)
+		if txErr != nil {
+			return txErr
 		}
 
-		status := StatusPartiallyFilled
-		if newRemaining == 0 {
-			status = StatusExecuted
-		}
-
-		updated, txErr = s.repo.UpdateFill(txCtx, order.ID, FillUpdate{
-			FilledQuantity:    newFilled,
-			RemainingQuantity: newRemaining,
-			AverageFillPrice:  avgFill,
-			Status:            status,
-		})
-		return txErr
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return updated, nil
+}
+
+func proRataShortCollateralRelease(collateral float64, netLotsBefore, coverQty int) float64 {
+	if collateral <= 0 || netLotsBefore >= 0 || coverQty <= 0 {
+		return 0
+	}
+	shortLots := -netLotsBefore
+	if coverQty >= shortLots {
+		return round2(collateral)
+	}
+	return round2(collateral * float64(coverQty) / float64(shortLots))
 }
 
 func normalizeCreateRequest(req CreateOrderRequest) CreateOrderRequest {
@@ -920,6 +1281,9 @@ func normalizeCreateRequest(req CreateOrderRequest) CreateOrderRequest {
 }
 
 func validateCreateRequest(req CreateOrderRequest) error {
+	if isInternalClientOrderID(req.ClientOrderID) {
+		return ErrReservedClientOrderID
+	}
 	if req.MatchID == "" || req.MarketID == "" {
 		return errors.New("matchId and marketId are required")
 	}
@@ -944,9 +1308,28 @@ func validateCreateRequest(req CreateOrderRequest) error {
 	return nil
 }
 
+func shouldCancelFailedImmediateFill(err error) bool {
+	return errors.Is(err, ErrTradingStateChanged) ||
+		errors.Is(err, ErrInsufficientPosition) ||
+		errors.Is(err, wallet.ErrInsufficientFunds) ||
+		errors.Is(err, wallet.ErrIdempotencyConflict)
+}
+
+func isInternalClientOrderID(clientOrderID string) bool {
+	clientOrderID = strings.ToLower(strings.TrimSpace(clientOrderID))
+	return strings.HasPrefix(clientOrderID, settlementClientOrderPrefix) ||
+		strings.HasPrefix(clientOrderID, voidClientOrderPrefix)
+}
+
 func isMatchTradable(match *matches.Match) bool {
 	if match == nil {
 		return false
+	}
+	if isProviderMatch(match) {
+		return strings.EqualFold(strings.TrimSpace(match.Status), matches.StatusLive) &&
+			strings.EqualFold(strings.TrimSpace(match.FeedState), matches.FeedStateHealthy) &&
+			strings.EqualFold(strings.TrimSpace(match.TradingState), markets.MarketLifecycleOpen) &&
+			len(match.TradingBlockers) == 0
 	}
 	switch strings.ToLower(strings.TrimSpace(match.Status)) {
 	case "live", "innings_break":

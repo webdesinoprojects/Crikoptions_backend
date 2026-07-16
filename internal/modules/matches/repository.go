@@ -19,6 +19,7 @@ type Repository interface {
 	GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Match, error)
 	Create(ctx context.Context, match Match) (*Match, error)
 	UpdateScore(ctx context.Context, id primitive.ObjectID, score ScoreUpdate) (*Match, error)
+	VerifyTradingGate(ctx context.Context, id primitive.ObjectID, stateVersion, tradingVersion int64) (*Match, bool, error)
 	DemoteOtherLiveMatches(ctx context.Context, keepID primitive.ObjectID) error
 	NormalizeLegacyStatuses(ctx context.Context) error
 	EnsureDefaultMatches(ctx context.Context) error
@@ -112,6 +113,29 @@ func (r *MemoryRepository) UpdateScore(ctx context.Context, id primitive.ObjectI
 	return nil, nil
 }
 
+func (r *MemoryRepository) VerifyTradingGate(_ context.Context, id primitive.ObjectID, stateVersion, tradingVersion int64) (*Match, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i := range r.matches {
+		match := &r.matches[i]
+		if match.ID != id {
+			continue
+		}
+		if match.DataSource != DataSourceSportmonks || match.StateVersion != stateVersion ||
+			match.TradingVersion != tradingVersion || match.TradingState != "open" ||
+			match.FeedState != FeedStateHealthy || len(match.TradingBlockers) != 0 ||
+			match.FeedValidUntil == nil || !match.FeedValidUntil.After(time.Now().UTC()) {
+			return match, false, nil
+		}
+		now := time.Now().UTC()
+		match.TradingGateCheckedAt = &now
+		match.GateCheckSeq++
+		return match, true, nil
+	}
+	return nil, false, nil
+}
+
 func (r *MemoryRepository) demoteOtherLiveLocked(keepID primitive.ObjectID) {
 	now := time.Now().UTC()
 	for i := range r.matches {
@@ -144,6 +168,10 @@ func (r *MemoryRepository) NormalizeLegacyStatuses(_ context.Context) error {
 	defer r.mu.Unlock()
 	now := time.Now().UTC()
 	for i := range r.matches {
+		if r.matches[i].DataSource == "" {
+			r.matches[i].DataSource = DataSourceManual
+			r.matches[i].UpdatedAt = now
+		}
 		normalized := NormalizeStatus(r.matches[i].Status)
 		if normalized != r.matches[i].Status {
 			r.matches[i].Status = normalized
@@ -205,6 +233,13 @@ func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
 		{
 			Keys: bson.D{{Key: "status", Value: 1}},
 		},
+		{
+			Keys: bson.D{{Key: "provider", Value: 1}, {Key: "providerFixtureId", Value: 1}},
+			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.M{
+				"provider":          bson.M{"$type": "string"},
+				"providerFixtureId": bson.M{"$type": "long"},
+			}),
+		},
 	}
 	_, err := r.col.Indexes().CreateMany(ctx, indexes)
 	return err
@@ -252,6 +287,7 @@ func (r *MongoRepository) EnsureDefaultMatches(ctx context.Context) error {
 		update := bson.M{
 			"$setOnInsert": bson.M{
 				"_id":          match.ID,
+				"dataSource":   DataSourceManual,
 				"tournamentId": match.TournamentID,
 				"format":       match.Format,
 				"teamAId":      match.TeamAID,
@@ -407,6 +443,45 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 	return &match, nil
 }
 
+// VerifyTradingGate performs a write against the authoritative match document.
+// When called with a mongo.SessionContext inside an order transaction, this
+// creates a document-level write conflict with concurrent feed suspension.
+func (r *MongoRepository) VerifyTradingGate(ctx context.Context, id primitive.ObjectID, stateVersion, tradingVersion int64) (*Match, bool, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	now := time.Now().UTC()
+	result := r.col.FindOneAndUpdate(
+		ctx,
+		bson.M{
+			"_id":             id,
+			"dataSource":      DataSourceSportmonks,
+			"stateVersion":    stateVersion,
+			"tradingVersion":  tradingVersion,
+			"tradingState":    "open",
+			"feedState":       FeedStateHealthy,
+			"feedValidUntil":  bson.M{"$gt": now},
+			"tradingBlockers": bson.M{"$size": 0},
+		},
+		bson.M{
+			"$set": bson.M{"tradingGateCheckedAt": now},
+			"$inc": bson.M{"gateCheckSeq": 1},
+		},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	)
+	if err := result.Err(); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	var match Match
+	if err := result.Decode(&match); err != nil {
+		return nil, false, err
+	}
+	return &match, true, nil
+}
+
 func (r *MongoRepository) DemoteOtherLiveMatches(ctx context.Context, keepID primitive.ObjectID) error {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
@@ -441,6 +516,13 @@ func (r *MongoRepository) NormalizeLegacyStatuses(ctx context.Context) error {
 	defer cancel()
 
 	now := time.Now().UTC()
+	if _, err := r.col.UpdateMany(
+		ctx,
+		bson.M{"dataSource": bson.M{"$exists": false}},
+		bson.M{"$set": bson.M{"dataSource": DataSourceManual, "updatedAt": now}},
+	); err != nil {
+		return err
+	}
 	legacy := []string{"active", "ACTIVE", "scheduled", "SCHEDULED", "lIVE"}
 	_, err := r.col.UpdateMany(
 		ctx,
@@ -463,6 +545,7 @@ func getSampleMatches() []Match {
 	return []Match{
 		{
 			ID:           one,
+			DataSource:   DataSourceManual,
 			TournamentID: "tournament-1",
 			Format:       "T20",
 			TeamAID:      "team-1",
@@ -483,6 +566,7 @@ func getSampleMatches() []Match {
 		},
 		{
 			ID:           two,
+			DataSource:   DataSourceManual,
 			TournamentID: "tournament-1",
 			Format:       "T20",
 			TeamAID:      "team-3",
@@ -503,6 +587,7 @@ func getSampleMatches() []Match {
 		},
 		{
 			ID:           three,
+			DataSource:   DataSourceManual,
 			TournamentID: "tournament-1",
 			Format:       "T20",
 			TeamAID:      "team-5",
@@ -524,6 +609,7 @@ func getSampleMatches() []Match {
 		},
 		{
 			ID:           four,
+			DataSource:   DataSourceManual,
 			TournamentID: "tournament-odi-1",
 			Format:       "ODI",
 			TeamAID:      "team-ind",

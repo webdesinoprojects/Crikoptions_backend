@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -82,4 +83,31 @@ func (m *Mongo) Close(ctx context.Context) error {
 	closeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return m.Client.Disconnect(closeCtx)
+}
+
+func (m *Mongo) Ping(ctx context.Context) error {
+	if m == nil || m.Client == nil {
+		return errors.New("MongoDB client is unavailable")
+	}
+	return m.Client.Ping(ctx, readpref.Primary())
+}
+
+// RequireTransactions rejects standalone MongoDB. Replica sets and mongos
+// deployments support the transactions required by financial writes and the
+// live provider feed; live mode additionally uses change streams.
+func (m *Mongo) RequireTransactions(ctx context.Context) error {
+	if m == nil || m.DB == nil {
+		return errors.New("MongoDB database is unavailable")
+	}
+	var hello bson.M
+	if err := m.DB.RunCommand(ctx, bson.D{{Key: "hello", Value: 1}}).Decode(&hello); err != nil {
+		return fmt.Errorf("MongoDB hello: %w", err)
+	}
+	if setName, _ := hello["setName"].(string); strings.TrimSpace(setName) != "" {
+		return nil
+	}
+	if message, _ := hello["msg"].(string); message == "isdbgrid" {
+		return nil
+	}
+	return errors.New("live feed requires a MongoDB replica set or sharded cluster")
 }

@@ -3,7 +3,6 @@ package orders
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +10,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readconcern"
+	"go.mongodb.org/mongo-driver/mongo/writeconcern"
 )
 
 type OrderFilter struct {
@@ -30,26 +31,73 @@ type Repository interface {
 	Cancel(ctx context.Context, id primitive.ObjectID, userID primitive.ObjectID) (*Order, error)
 	GetAll(ctx context.Context) []Order
 	List(ctx context.Context, filter OrderFilter) []Order
+	ListWithError(ctx context.Context, filter OrderFilter) ([]Order, error)
 	EnsureIndexes(ctx context.Context) error
 	DoTx(ctx context.Context, fn func(ctx context.Context) error) error
+	FreezeProviderVoidCompensation(ctx context.Context, compensation ProviderVoidCompensation) (*ProviderVoidCompensation, error)
+}
+
+type ProviderVoidCompensation struct {
+	ID            primitive.ObjectID `bson:"_id,omitempty"`
+	MarketID      string             `bson:"marketId"`
+	UserID        primitive.ObjectID `bson:"userId"`
+	CashDelta     float64            `bson:"cashDelta"`
+	ReservedDelta float64            `bson:"reservedDelta"`
+	ExecutionHash string             `bson:"executionHash"`
+	CreatedAt     time.Time          `bson:"createdAt"`
 }
 
 type FillUpdate struct {
-	FilledQuantity    int
-	RemainingQuantity int
-	AverageFillPrice  float64
-	Status            string
+	ExpectedFilledQuantity    int
+	ExpectedRemainingQuantity int
+	ExpectedStatus            string
+	FilledQuantity            int
+	RemainingQuantity         int
+	AverageFillPrice          float64
+	OutstandingReserve        float64
+	ReserveReconciled         bool
+	Status                    string
 }
 
 type MemoryRepository struct {
-	orders []Order
-	mu     sync.RWMutex
+	orders            []Order
+	voidCompensations map[string]ProviderVoidCompensation
+	mu                sync.RWMutex
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		orders: getSampleOrders(),
+		orders:            getSampleOrders(),
+		voidCompensations: make(map[string]ProviderVoidCompensation),
 	}
+}
+
+func (r *MemoryRepository) FreezeProviderVoidCompensation(_ context.Context, candidate ProviderVoidCompensation) (*ProviderVoidCompensation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := validateProviderVoidCompensation(candidate); err != nil {
+		return nil, err
+	}
+	if r.voidCompensations == nil {
+		r.voidCompensations = make(map[string]ProviderVoidCompensation)
+	}
+	key := candidate.MarketID + "|" + candidate.UserID.Hex()
+	if existing, ok := r.voidCompensations[key]; ok {
+		if existing.ExecutionHash != candidate.ExecutionHash || existing.CashDelta != candidate.CashDelta {
+			return nil, errors.New("provider void compensation changed after it was frozen")
+		}
+		out := existing
+		return &out, nil
+	}
+	if candidate.ID.IsZero() {
+		candidate.ID = primitive.NewObjectID()
+	}
+	if candidate.CreatedAt.IsZero() {
+		candidate.CreatedAt = time.Now().UTC()
+	}
+	r.voidCompensations[key] = candidate
+	out := candidate
+	return &out, nil
 }
 
 func (r *MemoryRepository) GetByUserID(ctx context.Context, userID primitive.ObjectID, status, matchID string) []Order {
@@ -135,6 +183,11 @@ func (r *MemoryRepository) GetAll(ctx context.Context) []Order {
 }
 
 func (r *MemoryRepository) List(ctx context.Context, f OrderFilter) []Order {
+	orders, _ := r.ListWithError(ctx, f)
+	return orders
+}
+
+func (r *MemoryRepository) ListWithError(_ context.Context, f OrderFilter) ([]Order, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -158,7 +211,7 @@ func (r *MemoryRepository) List(ctx context.Context, f OrderFilter) []Order {
 		}
 		out = append(out, o)
 	}
-	return out
+	return out, nil
 }
 
 func (r *MemoryRepository) FindByClientOrderID(_ context.Context, userID primitive.ObjectID, clientOrderID string) (*Order, error) {
@@ -181,9 +234,16 @@ func (r *MemoryRepository) UpdateFill(_ context.Context, id primitive.ObjectID, 
 	defer r.mu.Unlock()
 	for i := range r.orders {
 		if r.orders[i].ID == id {
+			if r.orders[i].FilledQuantity != update.ExpectedFilledQuantity ||
+				r.orders[i].RemainingQuantity != update.ExpectedRemainingQuantity ||
+				r.orders[i].Status != update.ExpectedStatus {
+				return nil, nil
+			}
 			r.orders[i].FilledQuantity = update.FilledQuantity
 			r.orders[i].RemainingQuantity = update.RemainingQuantity
 			r.orders[i].AverageFillPrice = update.AverageFillPrice
+			r.orders[i].OutstandingReserve = update.OutstandingReserve
+			r.orders[i].ReserveReconciled = update.ReserveReconciled
 			r.orders[i].Status = update.Status
 			r.orders[i].UpdatedAt = time.Now().UTC()
 			out := r.orders[i]
@@ -202,11 +262,15 @@ func (r *MemoryRepository) DoTx(ctx context.Context, fn func(ctx context.Context
 }
 
 type MongoRepository struct {
-	col *mongo.Collection
+	col               *mongo.Collection
+	voidCompensations *mongo.Collection
 }
 
 func NewMongoRepository(db *mongo.Database) *MongoRepository {
-	return &MongoRepository{col: db.Collection("orders")}
+	return &MongoRepository{
+		col:               db.Collection("orders"),
+		voidCompensations: db.Collection("provider_void_compensations"),
+	}
 }
 
 func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
@@ -237,29 +301,68 @@ func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
 			}),
 		},
 	}
-	_, err := r.col.Indexes().CreateMany(ctx, indexes)
+	if _, err := r.col.Indexes().CreateMany(ctx, indexes); err != nil {
+		return err
+	}
+	_, err := r.voidCompensations.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "marketId", Value: 1}, {Key: "userId", Value: 1}},
+		Options: options.Index().SetName("uniq_provider_void_compensation").SetUnique(true),
+	})
 	return err
+}
+
+func (r *MongoRepository) FreezeProviderVoidCompensation(ctx context.Context, candidate ProviderVoidCompensation) (*ProviderVoidCompensation, error) {
+	if err := validateProviderVoidCompensation(candidate); err != nil {
+		return nil, err
+	}
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+	if candidate.ID.IsZero() {
+		candidate.ID = primitive.NewObjectID()
+	}
+	if candidate.CreatedAt.IsZero() {
+		candidate.CreatedAt = time.Now().UTC()
+	}
+	filter := bson.M{"marketId": candidate.MarketID, "userId": candidate.UserID}
+	res := r.voidCompensations.FindOneAndUpdate(
+		ctx,
+		filter,
+		bson.M{"$setOnInsert": candidate},
+		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
+	)
+	var frozen ProviderVoidCompensation
+	if err := res.Decode(&frozen); err != nil {
+		if !mongo.IsDuplicateKeyError(err) {
+			return nil, err
+		}
+		if err := r.voidCompensations.FindOne(ctx, filter).Decode(&frozen); err != nil {
+			return nil, err
+		}
+	}
+	if frozen.ExecutionHash != candidate.ExecutionHash || frozen.CashDelta != candidate.CashDelta {
+		return nil, errors.New("provider void compensation changed after it was frozen")
+	}
+	return &frozen, nil
+}
+
+func validateProviderVoidCompensation(candidate ProviderVoidCompensation) error {
+	if candidate.MarketID == "" || candidate.UserID.IsZero() || candidate.ExecutionHash == "" {
+		return errors.New("invalid provider void compensation")
+	}
+	return nil
 }
 
 func (r *MongoRepository) DoTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	session, err := r.col.Database().Client().StartSession()
 	if err != nil {
-		// Fallback if sessions are unsupported
-		return fn(ctx)
+		return err
 	}
 	defer session.EndSession(ctx)
 
 	_, err = session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
 		return nil, fn(sessCtx)
-	})
-	if err != nil {
-		if strings.Contains(err.Error(), "Transaction") || strings.Contains(err.Error(), "replica set") {
-			// Fallback for standalone mongo deployments
-			return fn(ctx)
-		}
-		return err
-	}
-	return nil
+	}, options.Transaction().SetReadConcern(readconcern.Snapshot()).SetWriteConcern(writeconcern.Majority()))
+	return err
 }
 
 func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
@@ -376,13 +479,20 @@ func (r *MongoRepository) UpdateFill(ctx context.Context, id primitive.ObjectID,
 
 	res := r.col.FindOneAndUpdate(
 		ctx,
-		bson.M{"_id": id},
+		bson.M{
+			"_id":               id,
+			"filledQuantity":    update.ExpectedFilledQuantity,
+			"remainingQuantity": update.ExpectedRemainingQuantity,
+			"status":            update.ExpectedStatus,
+		},
 		bson.M{"$set": bson.M{
-			"filledQuantity":    update.FilledQuantity,
-			"remainingQuantity": update.RemainingQuantity,
-			"averageFillPrice":  update.AverageFillPrice,
-			"status":            update.Status,
-			"updatedAt":         time.Now().UTC(),
+			"filledQuantity":     update.FilledQuantity,
+			"remainingQuantity":  update.RemainingQuantity,
+			"averageFillPrice":   update.AverageFillPrice,
+			"outstandingReserve": update.OutstandingReserve,
+			"reserveReconciled":  update.ReserveReconciled,
+			"status":             update.Status,
+			"updatedAt":          time.Now().UTC(),
 		}},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	)
@@ -441,6 +551,11 @@ func (r *MongoRepository) GetAll(ctx context.Context) []Order {
 }
 
 func (r *MongoRepository) List(ctx context.Context, f OrderFilter) []Order {
+	orders, _ := r.ListWithError(ctx, f)
+	return orders
+}
+
+func (r *MongoRepository) ListWithError(ctx context.Context, f OrderFilter) ([]Order, error) {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -463,15 +578,15 @@ func (r *MongoRepository) List(ctx context.Context, f OrderFilter) []Order {
 
 	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer cur.Close(ctx)
 
 	var out []Order
 	if err := cur.All(ctx, &out); err != nil {
-		return nil
+		return nil, err
 	}
-	return out
+	return out, nil
 }
 
 func timeoutCtx(parent context.Context) (context.Context, context.CancelFunc) {

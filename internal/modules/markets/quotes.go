@@ -75,10 +75,19 @@ func (s *Service) IsTradable(market *Market) bool {
 	if market == nil {
 		return false
 	}
-	switch market.Status {
-	case "", MarketStatusActive:
-		return true
-	default:
+
+	// New provider-backed contracts fail closed: their explicit lifecycle and
+	// blockers are authoritative, while status remains a compatibility view for
+	// existing clients. Legacy markets have no lifecycle and continue to use the
+	// old active/suspended/closed field, except that a missing status is no longer
+	// considered tradable.
+	if market.Kind == MarketKindInningsScore && market.Lifecycle == "" {
 		return false
 	}
+	if market.Lifecycle != "" {
+		return market.Lifecycle == MarketLifecycleOpen &&
+			market.Status == MarketStatusActive &&
+			len(market.Blockers) == 0
+	}
+	return market.Status == MarketStatusActive
 }

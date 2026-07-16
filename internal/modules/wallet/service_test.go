@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -152,5 +153,168 @@ func TestShortOpenFillCreditsCashAndReservesProceeds(t *testing.T) {
 	}
 	if wallet.CashBalance != 1020 || wallet.ReservedBalance != 0 || wallet.AvailableBalance != 1020 {
 		t.Fatalf("wallet after cover = cash %.2f reserved %.2f available %.2f, want 1020/0/1020", wallet.CashBalance, wallet.ReservedBalance, wallet.AvailableBalance)
+	}
+}
+
+func TestWalletOperationKeyReturnsPriorResultWithoutReapplyingBalance(t *testing.T) {
+	repo := NewMemoryRepository()
+	svc := NewService(repo)
+	userID := primitive.NewObjectID()
+	if _, err := svc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, FundingRequest{Amount: 1000}); err != nil {
+		t.Fatalf("AdminCredit: %v", err)
+	}
+
+	key := "wallet:user:" + userID.Hex() + ":contract:settlement:market:100:7:innings_score_v1:close:reserve"
+	ctx := WithOperationKey(context.Background(), key)
+	first, err := svc.ReserveOrderMargin(ctx, userID, 125, "settlement-order", "settlement reserve")
+	if err != nil {
+		t.Fatalf("first ReserveOrderMargin: %v", err)
+	}
+	second, err := svc.ReserveOrderMargin(ctx, userID, 125, "settlement-order", "settlement reserve")
+	if err != nil {
+		t.Fatalf("retry ReserveOrderMargin: %v", err)
+	}
+	if first.LedgerEntry.ID != second.LedgerEntry.ID {
+		t.Fatalf("retry ledger id = %s, want %s", second.LedgerEntry.ID.Hex(), first.LedgerEntry.ID.Hex())
+	}
+	if second.LedgerEntry.IdempotencyKey != key || second.LedgerEntry.OperationHash == "" {
+		t.Fatalf("idempotency metadata was not retained")
+	}
+
+	account, err := svc.GetWallet(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetWallet: %v", err)
+	}
+	if account.CashBalance != 1000 || account.ReservedBalance != 125 || account.AvailableBalance != 875 {
+		t.Fatalf("wallet = %.2f/%.2f/%.2f, want 1000/125/875", account.CashBalance, account.ReservedBalance, account.AvailableBalance)
+	}
+	ledger, err := svc.GetLedger(context.Background(), userID, 10)
+	if err != nil {
+		t.Fatalf("GetLedger: %v", err)
+	}
+	if len(ledger) != 2 {
+		t.Fatalf("ledger entries = %d, want funding plus one reserve", len(ledger))
+	}
+}
+
+func TestWalletOperationKeyRejectsDifferentFinancialInputs(t *testing.T) {
+	svc := NewService(NewMemoryRepository())
+	userID := primitive.NewObjectID()
+	key := "wallet:user:" + userID.Hex() + ":contract:void:market:100:0:innings_score_v1:close:sell-fill"
+	ctx := WithOperationKey(context.Background(), key)
+	if _, err := svc.SettleSellFill(ctx, userID, 50, "void-order", "void proceeds"); err != nil {
+		t.Fatalf("first SettleSellFill: %v", err)
+	}
+	if _, err := svc.SettleSellFill(ctx, userID, 60, "void-order", "void proceeds"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("retry err = %v, want ErrIdempotencyConflict", err)
+	}
+	account, err := svc.GetWallet(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetWallet: %v", err)
+	}
+	if account.CashBalance != 50 {
+		t.Fatalf("cash = %.2f, want one 50 credit", account.CashBalance)
+	}
+}
+
+func TestConcurrentWalletOperationKeyAppliesOnce(t *testing.T) {
+	svc := NewService(NewMemoryRepository())
+	userID := primitive.NewObjectID()
+	ctx := WithOperationKey(context.Background(), "wallet:user:"+userID.Hex()+":execution:abc:short-open-proceeds")
+
+	const callers = 16
+	results := make(chan *AdjustmentResult, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := svc.SettleShortOpenFill(ctx, userID, 40, "order-1", "short proceeds")
+			results <- result
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	var ledgerID primitive.ObjectID
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent mutation: %v", err)
+		}
+	}
+	for result := range results {
+		if result == nil {
+			t.Fatal("concurrent mutation returned nil result")
+		}
+		if ledgerID.IsZero() {
+			ledgerID = result.LedgerEntry.ID
+		} else if result.LedgerEntry.ID != ledgerID {
+			t.Fatalf("ledger id = %s, want %s", result.LedgerEntry.ID.Hex(), ledgerID.Hex())
+		}
+	}
+	account, err := svc.GetWallet(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("GetWallet: %v", err)
+	}
+	if account.CashBalance != 40 || account.ReservedBalance != 40 {
+		t.Fatalf("wallet = %.2f/%.2f, want one 40 short-open mutation", account.CashBalance, account.ReservedBalance)
+	}
+}
+
+func TestForcedProviderBuyCanSettleNegativeCashExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(NewMemoryRepository())
+	userID := primitive.NewObjectID()
+	if _, err := svc.AdminCredit(ctx, primitive.NewObjectID(), userID, FundingRequest{Amount: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ReserveOrderMargin(ctx, userID, 4, "short", "short collateral"); err != nil {
+		t.Fatal(err)
+	}
+
+	opCtx := WithOperationKey(ctx, "provider-settlement:"+userID.Hex())
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := svc.SettleForcedBuyFill(opCtx, userID, 100, 4, "settlement", "forced provider cover"); err != nil {
+			t.Fatalf("attempt %d: %v", attempt+1, err)
+		}
+	}
+	account, err := svc.GetWallet(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.CashBalance != -90 || account.ReservedBalance != 0 || account.AvailableBalance != -90 {
+		t.Fatalf("wallet = %+v, want -90/0/-90", account)
+	}
+	ledger, err := svc.GetLedger(ctx, userID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ledger) != 3 {
+		t.Fatalf("ledger entries = %d, want seed, reserve, and one forced debit", len(ledger))
+	}
+}
+
+func TestRegularBuyCannotConsumeFundsReservedForAnotherOrder(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(NewMemoryRepository())
+	userID := primitive.NewObjectID()
+	if _, err := svc.AdminCredit(ctx, primitive.NewObjectID(), userID, FundingRequest{Amount: 1000}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ReserveOrderMargin(ctx, userID, 900, "other", "other order"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SettleBuyFill(ctx, userID, 200, 0, "buy", "unreserved buy"); !errors.Is(err, ErrInsufficientFunds) {
+		t.Fatalf("SettleBuyFill error = %v, want ErrInsufficientFunds", err)
+	}
+	account, err := svc.GetWallet(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.CashBalance != 1000 || account.ReservedBalance != 900 || account.AvailableBalance != 100 {
+		t.Fatalf("wallet mutated on rejected buy: %+v", account)
 	}
 }

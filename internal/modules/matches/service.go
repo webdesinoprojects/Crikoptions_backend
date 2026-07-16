@@ -20,6 +20,7 @@ var (
 	errNextBatterRequired = errors.New("next batter is required for a wicket")
 	errInvalidLiveContext = errors.New("invalid live match context")
 	errInningsOver        = errors.New("innings over: no balls left")
+	errProviderOwnedMatch = errors.New("provider-owned match cannot be mutated manually")
 )
 
 // TerminalBallError reports whether a ball cannot be applied because the innings
@@ -90,11 +91,21 @@ func (s *Service) SetSettlement(runner SettlementRunner) {
 
 func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	all := s.repo.GetAll(ctx)
+	visible := make([]Match, 0, len(all))
 	for i := range all {
+		if all[i].Hidden {
+			continue
+		}
 		all[i].Status = NormalizeStatus(all[i].Status)
+		if all[i].DataSource == DataSourceSportmonks &&
+			all[i].Status != StatusLive &&
+			all[i].Status != StatusInningsBreak {
+			continue
+		}
 		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)
+		visible = append(visible, all[i])
 	}
-	return SortHomeMatches(all)
+	return SortHomeMatches(visible)
 }
 
 func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
@@ -109,6 +120,17 @@ func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
 	match.Status = NormalizeStatus(match.Status)
 	match.OversText = calculateOvers(match.BallsLeft, match.Format)
 	return match, nil
+}
+
+// VerifyTradingGate writes to the match document when the caller's versions
+// still describe a healthy, open Sportmonks match. Callers should invoke this
+// from their Mongo transaction so concurrent feed suspension forces a retry.
+func (s *Service) VerifyTradingGate(ctx context.Context, id string, stateVersion, tradingVersion int64) (*Match, bool, error) {
+	objID, err := resolveMatchID(ctx, s.repo, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return s.repo.VerifyTradingGate(ctx, objID, stateVersion, tradingVersion)
 }
 
 func (s *Service) GetMatchesByIDs(ctx context.Context, ids []string) (map[string]*Match, error) {
@@ -153,6 +175,7 @@ func (s *Service) GetMatchesByIDs(ctx context.Context, ids []string) (map[string
 
 func (s *Service) CreateMatch(ctx context.Context, req CreateMatchRequest) (*Match, error) {
 	match := Match{
+		DataSource:   DataSourceManual,
 		TournamentID: req.TournamentID,
 		Format:       "T20",
 		TeamAID:      req.TeamAID,
@@ -183,6 +206,9 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 	existing, err := s.repo.GetByID(ctx, objID)
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
+	}
+	if existing.DataSource == DataSourceSportmonks {
+		return nil, errProviderOwnedMatch
 	}
 
 	status := NormalizeStatus(existing.Status)
@@ -225,6 +251,9 @@ func (s *Service) UpdateLiveContext(ctx context.Context, id string, req UpdateLi
 	existing, err := s.repo.GetByID(ctx, objID)
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
+	}
+	if existing.DataSource == DataSourceSportmonks {
+		return nil, errProviderOwnedMatch
 	}
 
 	liveContext := LiveMatchContext{
@@ -303,6 +332,9 @@ func (s *Service) recordBall(ctx context.Context, id string, req BallEventReques
 	existing, err := s.repo.GetByID(ctx, objID)
 	if err != nil || existing == nil {
 		return nil, BallEvent{}, errMatchNotFound
+	}
+	if existing.DataSource == DataSourceSportmonks {
+		return nil, BallEvent{}, errProviderOwnedMatch
 	}
 
 	status := NormalizeStatus(existing.Status)
@@ -445,21 +477,41 @@ func (s *Service) GetRecentEvents(ctx context.Context, id string, limit int) ([]
 	currentOver := currentOverIndex(legalCount)
 	filtered := filterEventsByOver(events, currentOver)
 
-	out := make([]BallEventResponse, 0, len(filtered))
-	for _, e := range filtered {
+	return ballEventResponses(filtered), nil
+}
+
+func ballEventResponses(events []BallEvent) []BallEventResponse {
+	out := make([]BallEventResponse, 0, len(events))
+	for _, e := range events {
+		eventID := e.ProviderEventID
+		if eventID == "" {
+			eventID = e.ID.Hex()
+		}
 		out = append(out, BallEventResponse{
-			Innings:     e.Innings,
-			Over:        e.Over,
-			Ball:        e.Ball,
-			Runs:        e.Runs,
-			IsWicket:    e.IsWicket,
-			Extra:       e.Extra,
-			StrikerName: e.StrikerName,
-			BowlerName:  e.BowlerName,
-			Commentary:  e.Commentary,
+			EventID:            eventID,
+			Sequence:           e.Sequence,
+			Revision:           e.Revision,
+			Innings:            e.Innings,
+			Over:               e.Over,
+			Ball:               e.Ball,
+			LegalBall:          e.LegalBall,
+			Runs:               e.Runs,
+			BatterRuns:         e.BatterRuns,
+			IsWicket:           e.IsWicket,
+			Extra:              e.Extra,
+			Extras:             e.Extras,
+			Dismissal:          e.Dismissal,
+			StrikerName:        e.StrikerName,
+			BowlerName:         e.BowlerName,
+			Commentary:         e.Commentary,
+			ProviderModifiedAt: e.ProviderUpdatedAt,
+			ReceivedAt:         e.ReceivedAt,
+			IsCorrection:       e.Revision > 1,
+			Tombstoned:         e.Tombstoned,
+			Superseded:         e.Tombstoned || (e.Provider != "" && !e.Active),
 		})
 	}
-	return out, nil
+	return out
 }
 
 // currentOverIndex is the 0-based over that contains the latest legal delivery.
@@ -502,6 +554,32 @@ func (s *Service) GetInningsEvents(ctx context.Context, id string, innings, limi
 	return s.events.InningsEvents(ctx, match.ID.Hex(), innings, limit)
 }
 
+func (s *Service) GetInningsEventsAfter(ctx context.Context, id string, innings int, afterSequence int64, limit int) ([]BallEventResponse, error) {
+	objID, err := resolveMatchID(ctx, s.repo, id)
+	if err != nil {
+		return nil, err
+	}
+	match, err := s.repo.GetByID(ctx, objID)
+	if err != nil || match == nil {
+		return nil, errMatchNotFound
+	}
+	if innings <= 0 {
+		innings = match.Innings
+	}
+	if s.events == nil {
+		return []BallEventResponse{}, nil
+	}
+	repository, ok := s.events.(CursorEventRepository)
+	if !ok {
+		return nil, errors.New("sequence cursor is unavailable")
+	}
+	events, err := repository.InningsEventsAfter(ctx, match.ID.Hex(), innings, afterSequence, limit)
+	if err != nil {
+		return nil, err
+	}
+	return ballEventResponses(events), nil
+}
+
 // ClearMatchEvents deletes all persisted ball events for the given match.
 // Used by the simulator on start/reset to ensure a clean slate.
 func (s *Service) ClearMatchEvents(ctx context.Context, matchID string) error {
@@ -511,6 +589,13 @@ func (s *Service) ClearMatchEvents(ctx context.Context, matchID string) error {
 	objID, err := resolveMatchID(ctx, s.repo, matchID)
 	if err != nil {
 		return err
+	}
+	match, err := s.repo.GetByID(ctx, objID)
+	if err != nil {
+		return err
+	}
+	if match != nil && match.DataSource == DataSourceSportmonks {
+		return errProviderOwnedMatch
 	}
 	return s.events.DeleteByMatchID(ctx, objID.Hex())
 }
@@ -710,6 +795,9 @@ func (s *Service) StartMatch(ctx context.Context, id string) (*Match, error) {
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
 	}
+	if existing.DataSource == DataSourceSportmonks {
+		return nil, errProviderOwnedMatch
+	}
 
 	status := NormalizeStatus(existing.Status)
 	switch status {
@@ -744,6 +832,9 @@ func (s *Service) CompleteMatch(ctx context.Context, id string) (*Match, error) 
 	existing, err := s.repo.GetByID(ctx, objID)
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
+	}
+	if existing.DataSource == DataSourceSportmonks {
+		return nil, errProviderOwnedMatch
 	}
 
 	status := NormalizeStatus(existing.Status)

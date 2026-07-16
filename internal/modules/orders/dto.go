@@ -1,18 +1,25 @@
 package orders
 
-import "github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+import (
+	"time"
+
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+)
 
 type CreateOrderRequest struct {
-	ClientOrderID   string                         `json:"clientOrderId"`
-	MatchID         string                         `json:"matchId"`
-	MarketID        string                         `json:"marketId"`
-	Strike          float64                        `json:"strike"`
-	Side            string                         `json:"side"`
-	Type            string                         `json:"type"`
-	PositionEffect  string                         `json:"positionEffect,omitempty"`
-	Quantity        int                            `json:"quantity"`
-	Price           float64                        `json:"price"`
-	PricingSnapshot *markets.PriceCalculationInput `json:"pricingSnapshot,omitempty"`
+	ClientOrderID             string                         `json:"clientOrderId"`
+	MatchID                   string                         `json:"matchId"`
+	MarketID                  string                         `json:"marketId"`
+	Strike                    float64                        `json:"strike"`
+	Side                      string                         `json:"side"`
+	Type                      string                         `json:"type"`
+	PositionEffect            string                         `json:"positionEffect,omitempty"`
+	Quantity                  int                            `json:"quantity"`
+	Price                     float64                        `json:"price"`
+	PricingSnapshot           *markets.PriceCalculationInput `json:"pricingSnapshot,omitempty"`
+	ExpectedMatchStateVersion int64                          `json:"expectedMatchStateVersion,omitempty"`
+	ExpectedTradingVersion    int64                          `json:"expectedTradingVersion,omitempty"`
+	QuoteExpiresAt            time.Time                      `json:"quoteExpiresAt,omitempty"`
 }
 
 type OrderResponse struct {
@@ -43,27 +50,30 @@ type CancelOrderRequest struct {
 }
 
 type OrderPreviewResponse struct {
-	MatchID           string  `json:"matchId"`
-	MarketID          string  `json:"marketId"`
-	Strike            float64 `json:"strike"`
-	Side              string  `json:"side"`
-	Type              string  `json:"type"`
-	PositionEffect    string  `json:"positionEffect"`
-	PositionIntent    string  `json:"positionIntent"`
-	Quantity          int     `json:"quantity"`
-	RequestedPrice    float64 `json:"requestedPrice"`
-	OrderPrice        float64 `json:"orderPrice"`
-	ExecutablePrice   float64 `json:"executablePrice"`
-	Bid               float64 `json:"bid"`
-	Ask               float64 `json:"ask"`
-	Notional          float64 `json:"notional"`
-	MarginRequired    float64 `json:"marginRequired"`
-	NetLotsBefore     int     `json:"netLotsBefore"`
-	ProjectedLots     int     `json:"projectedLots"`
-	AvailableBalance  float64 `json:"availableBalance"`
-	SufficientBalance bool    `json:"sufficientBalance"`
-	WillExecuteNow    bool    `json:"willExecuteNow"`
-	Message           string  `json:"message"`
+	MatchID           string    `json:"matchId"`
+	MarketID          string    `json:"marketId"`
+	Strike            float64   `json:"strike"`
+	Side              string    `json:"side"`
+	Type              string    `json:"type"`
+	PositionEffect    string    `json:"positionEffect"`
+	PositionIntent    string    `json:"positionIntent"`
+	Quantity          int       `json:"quantity"`
+	RequestedPrice    float64   `json:"requestedPrice"`
+	OrderPrice        float64   `json:"orderPrice"`
+	ExecutablePrice   float64   `json:"executablePrice"`
+	Bid               float64   `json:"bid"`
+	Ask               float64   `json:"ask"`
+	Notional          float64   `json:"notional"`
+	MarginRequired    float64   `json:"marginRequired"`
+	NetLotsBefore     int       `json:"netLotsBefore"`
+	ProjectedLots     int       `json:"projectedLots"`
+	AvailableBalance  float64   `json:"availableBalance"`
+	SufficientBalance bool      `json:"sufficientBalance"`
+	WillExecuteNow    bool      `json:"willExecuteNow"`
+	Message           string    `json:"message"`
+	MatchStateVersion int64     `json:"matchStateVersion"`
+	TradingVersion    int64     `json:"tradingVersion"`
+	ExpiresAt         time.Time `json:"expiresAt"`
 }
 
 // ClosePositionRequest is the body for POST /api/v1/positions/{id}/close.

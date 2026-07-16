@@ -1,16 +1,42 @@
 package health
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
-type Handler struct{}
+type ReadinessCheck func(context.Context) error
 
-func NewHandler() *Handler {
-	return &Handler{}
+type Handler struct {
+	ready ReadinessCheck
+}
+
+func NewHandler(checks ...ReadinessCheck) *Handler {
+	var check ReadinessCheck
+	if len(checks) > 0 {
+		check = checks[0]
+	}
+	return &Handler{ready: check}
+}
+
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+	status := http.StatusOK
+	payload := map[string]string{"status": "ready"}
+	if h.ready != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if err := h.ready(ctx); err != nil {
+			status = http.StatusServiceUnavailable
+			payload["status"] = "not_ready"
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {

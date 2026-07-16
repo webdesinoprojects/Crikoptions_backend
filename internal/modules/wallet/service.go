@@ -174,3 +174,22 @@ func (s *Service) SettleShortOpenFill(ctx context.Context, userID primitive.Obje
 		CreatedBy:     userID,
 	})
 }
+
+// SettleForcedBuyFill is reserved for provider finalization. It can take a
+// paper wallet negative so a losing short can always settle, but it never
+// releases more collateral than the wallet actually holds.
+func (s *Service) SettleForcedBuyFill(ctx context.Context, userID primitive.ObjectID, fillCost, reserveRelease float64, orderID, description string) (*AdjustmentResult, error) {
+	return s.repo.SettleForcedBuyFill(ctx, BuyFillOp{
+		UserID: userID, FillCost: fillCost, ReserveRelease: reserveRelease,
+		ReferenceType: "EXECUTION", ReferenceID: orderID,
+		Description: description, CreatedBy: userID,
+	})
+}
+
+func (s *Service) ReverseProviderContract(ctx context.Context, userID primitive.ObjectID, cashDelta, reservedDelta float64, marketID, description string) (*AdjustmentResult, error) {
+	return s.repo.ReverseProviderContract(ctx, ProviderVoidOp{
+		UserID: userID, CashDelta: cashDelta, ReservedDelta: reservedDelta,
+		ReferenceType: "MARKET_CONTRACT", ReferenceID: marketID,
+		Description: description, CreatedBy: userID,
+	})
+}

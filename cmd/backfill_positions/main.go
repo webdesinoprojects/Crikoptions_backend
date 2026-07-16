@@ -70,7 +70,7 @@ func main() {
 		if err := cur.Decode(&exec); err != nil {
 			log.Fatalf("decode execution %d: %v", count, err)
 		}
-		if err := projections.ApplyExecution(ctx, exec); err != nil {
+		if _, err := projections.ApplyExecution(ctx, exec, positions.ProjectionConstraint{}); err != nil {
 			log.Fatalf("apply execution %s: %v", exec.ID.Hex(), err)
 		}
 		count++

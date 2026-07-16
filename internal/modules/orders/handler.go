@@ -297,10 +297,14 @@ func (h *Handler) CloseAllPositions(w http.ResponseWriter, r *http.Request) {
 func writeOrderError(w http.ResponseWriter, err error) {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		httpjson.Write(w, apiErr.Status, map[string]any{
+		body := map[string]any{
 			"success": false,
 			"message": apiErr.Message,
-		})
+		}
+		if apiErr.Code != "" {
+			body["code"] = apiErr.Code
+		}
+		httpjson.Write(w, apiErr.Status, body)
 		return
 	}
 

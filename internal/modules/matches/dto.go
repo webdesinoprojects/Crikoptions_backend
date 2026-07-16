@@ -68,13 +68,25 @@ type BallEventRequest struct {
 
 // BallEventResponse is one item in GET /api/v1/matches/{id}/events.
 type BallEventResponse struct {
-	Innings     int     `json:"innings"`
-	Over        int     `json:"over"`
-	Ball        int     `json:"ball"`
-	Runs        int     `json:"runs"`
-	IsWicket    bool    `json:"isWicket"`
-	Extra       *string `json:"extra"`
-	StrikerName string  `json:"strikerName,omitempty"`
-	BowlerName  string  `json:"bowlerName,omitempty"`
-	Commentary  string  `json:"commentary,omitempty"`
+	EventID            string         `json:"eventId"`
+	Sequence           int64          `json:"sequence,omitempty"`
+	Revision           int64          `json:"revision,omitempty"`
+	Innings            int            `json:"innings"`
+	Over               int            `json:"over"`
+	Ball               int            `json:"ball"`
+	LegalBall          bool           `json:"legalBall"`
+	Runs               int            `json:"runs"`
+	BatterRuns         int            `json:"batterRuns,omitempty"`
+	IsWicket           bool           `json:"isWicket"`
+	Extra              *string        `json:"extra"`
+	Extras             DeliveryExtras `json:"extras,omitempty"`
+	Dismissal          *Dismissal     `json:"dismissal,omitempty"`
+	StrikerName        string         `json:"strikerName,omitempty"`
+	BowlerName         string         `json:"bowlerName,omitempty"`
+	Commentary         string         `json:"commentary,omitempty"`
+	ProviderModifiedAt *time.Time     `json:"providerModifiedAt,omitempty"`
+	ReceivedAt         *time.Time     `json:"receivedAt,omitempty"`
+	IsCorrection       bool           `json:"isCorrection,omitempty"`
+	Tombstoned         bool           `json:"tombstoned,omitempty"`
+	Superseded         bool           `json:"superseded,omitempty"`
 }

@@ -113,6 +113,12 @@ func (h *Handler) UpdateMatchScore(w http.ResponseWriter, r *http.Request) {
 				"success": false,
 				"message": "Match not found",
 			})
+		case errors.Is(err, errProviderOwnedMatch):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"code":    "PROVIDER_OWNED_MATCH",
+				"message": "Provider-owned matches cannot be edited manually",
+			})
 		default:
 			httpjson.Write(w, http.StatusInternalServerError, map[string]any{
 				"success": false,
@@ -156,6 +162,12 @@ func (h *Handler) UpdateLiveContext(w http.ResponseWriter, r *http.Request) {
 				"success": false,
 				"message": "Striker, non-striker, and bowler names are required and figures cannot be negative",
 			})
+		case errors.Is(err, errProviderOwnedMatch):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"code":    "PROVIDER_OWNED_MATCH",
+				"message": "Provider-owned matches cannot be edited manually",
+			})
 		default:
 			httpjson.Write(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "Failed to update live match context"})
 		}
@@ -173,6 +185,10 @@ func (h *Handler) UpdateLiveContext(w http.ResponseWriter, r *http.Request) {
 // so a late-joining client can render "This over" in sync with oversText.
 // GET /api/v1/matches/{id}/events?limit=6
 func (h *Handler) GetMatchEvents(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("innings") || r.URL.Query().Has("afterSequence") || r.URL.Query().Get("history") == "true" {
+		h.getInningsEvents(w, r)
+		return
+	}
 	limit := 6
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
@@ -203,6 +219,37 @@ func (h *Handler) GetMatchEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) getInningsEvents(w http.ResponseWriter, r *http.Request) {
+	innings, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("innings")))
+	afterSequence, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("afterSequence")), 10, 64)
+	if err != nil && strings.TrimSpace(r.URL.Query().Get("afterSequence")) != "" {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{"success": false, "message": "Invalid sequence cursor"})
+		return
+	}
+	limit := 100
+	if value, parseErr := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit"))); parseErr == nil && value > 0 {
+		limit = min(value, 500)
+	}
+	events, err := h.service.GetInningsEventsAfter(r.Context(), r.PathValue("id"), innings, afterSequence, limit)
+	if err != nil {
+		status := http.StatusInternalServerError
+		message := "Failed to fetch innings events"
+		if errors.Is(err, errMatchNotFound) {
+			status, message = http.StatusNotFound, "Match not found"
+		}
+		httpjson.Write(w, status, map[string]any{"success": false, "message": message})
+		return
+	}
+	var nextSequence any
+	if len(events) == limit {
+		nextSequence = events[len(events)-1].Sequence
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true, "message": "Innings events fetched successfully",
+		"data": events, "nextSequence": nextSequence,
+	})
+}
+
 func (h *Handler) RecordBall(w http.ResponseWriter, r *http.Request) {
 	var req BallEventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -225,6 +272,12 @@ func (h *Handler) RecordBall(w http.ResponseWriter, r *http.Request) {
 			httpjson.Write(w, http.StatusConflict, map[string]any{
 				"success": false,
 				"message": "Match must be live to record balls",
+			})
+		case errors.Is(err, errProviderOwnedMatch):
+			httpjson.Write(w, http.StatusConflict, map[string]any{
+				"success": false,
+				"code":    "PROVIDER_OWNED_MATCH",
+				"message": "Provider-owned matches cannot be edited manually",
 			})
 		case errors.Is(err, errInvalidBallEvent):
 			httpjson.Write(w, http.StatusBadRequest, map[string]any{
@@ -299,6 +352,12 @@ func writeMatchActionError(w http.ResponseWriter, err error) {
 		httpjson.Write(w, http.StatusConflict, map[string]any{
 			"success": false,
 			"message": "Invalid match status transition",
+		})
+	case errors.Is(err, errProviderOwnedMatch):
+		httpjson.Write(w, http.StatusConflict, map[string]any{
+			"success": false,
+			"code":    "PROVIDER_OWNED_MATCH",
+			"message": "Provider-owned matches cannot be edited manually",
 		})
 	default:
 		httpjson.Write(w, http.StatusInternalServerError, map[string]any{

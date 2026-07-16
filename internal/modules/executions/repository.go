@@ -15,6 +15,7 @@ type Repository interface {
 	Create(ctx context.Context, exec Execution) (*Execution, error)
 	GetByID(ctx context.Context, id primitive.ObjectID) (*Execution, error)
 	List(ctx context.Context, filter Filter) []Execution
+	ListWithError(ctx context.Context, filter Filter) ([]Execution, error)
 	EnsureIndexes(ctx context.Context) error
 }
 
@@ -59,6 +60,11 @@ func (r *MemoryRepository) GetByID(_ context.Context, id primitive.ObjectID) (*E
 }
 
 func (r *MemoryRepository) List(_ context.Context, filter Filter) []Execution {
+	items, _ := r.ListWithError(context.Background(), filter)
+	return items
+}
+
+func (r *MemoryRepository) ListWithError(_ context.Context, filter Filter) ([]Execution, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -78,12 +84,15 @@ func (r *MemoryRepository) List(_ context.Context, filter Filter) []Execution {
 		if !filter.OrderID.IsZero() && e.OrderID != filter.OrderID {
 			continue
 		}
+		if filter.ExcludeLiquiditySource != "" && e.LiquiditySource == filter.ExcludeLiquiditySource {
+			continue
+		}
 		out = append(out, e)
 		if int64(len(out)) >= limit {
 			break
 		}
 	}
-	return out
+	return out, nil
 }
 
 func (r *MemoryRepository) EnsureIndexes(_ context.Context) error {
@@ -145,6 +154,11 @@ func (r *MongoRepository) GetByID(ctx context.Context, id primitive.ObjectID) (*
 }
 
 func (r *MongoRepository) List(ctx context.Context, filter Filter) []Execution {
+	items, _ := r.ListWithError(ctx, filter)
+	return items
+}
+
+func (r *MongoRepository) ListWithError(ctx context.Context, filter Filter) ([]Execution, error) {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -161,6 +175,9 @@ func (r *MongoRepository) List(ctx context.Context, filter Filter) []Execution {
 	if !filter.OrderID.IsZero() {
 		mongoFilter["orderId"] = filter.OrderID
 	}
+	if filter.ExcludeLiquiditySource != "" {
+		mongoFilter["liquiditySource"] = bson.M{"$ne": filter.ExcludeLiquiditySource}
+	}
 
 	cur, err := r.col.Find(
 		ctx,
@@ -168,15 +185,15 @@ func (r *MongoRepository) List(ctx context.Context, filter Filter) []Execution {
 		options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(normalizedLimit(filter.Limit)),
 	)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer cur.Close(ctx)
 
 	var out []Execution
 	if err := cur.All(ctx, &out); err != nil {
-		return nil
+		return nil, err
 	}
-	return out
+	return out, nil
 }
 
 func timeoutCtx(parent context.Context) (context.Context, context.CancelFunc) {
