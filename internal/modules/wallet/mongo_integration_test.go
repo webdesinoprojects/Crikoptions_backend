@@ -31,7 +31,7 @@ func TestMongoWalletOperationIdempotency(t *testing.T) {
 	if err := client.Ping(ctx, readpref.Primary()); err != nil {
 		t.Fatalf("ping Mongo primary: %v", err)
 	}
-	db := client.Database("crikoptions_wallet_it_" + primitive.NewObjectID().Hex())
+	db := client.Database("wallet_it_" + primitive.NewObjectID().Hex())
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanupCancel()

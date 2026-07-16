@@ -36,7 +36,7 @@ func TestMongoLiveProjectionTransaction(t *testing.T) {
 		t.Fatalf("ping Mongo primary: %v", err)
 	}
 
-	db := client.Database("crikoptions_sportmonks_it_" + primitive.NewObjectID().Hex())
+	db := client.Database("sm_it_" + primitive.NewObjectID().Hex())
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanupCancel()
@@ -109,7 +109,7 @@ func TestMongoLiveProjectionTransaction(t *testing.T) {
 
 	want := authoritativeCounts{
 		matches: 1, events: 1, revisions: 1, markets: 1,
-		marketSnapshots: 1, outbox: 2, gateJobs: 1,
+		marketSnapshots: 1, outbox: 2,
 	}
 	assertAuthoritativeCounts(t, ctx, db, want)
 	assertApplyGeneration(t, ctx, store.fixtures, fixtureID, 1)

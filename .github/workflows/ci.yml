@@ -55,7 +55,7 @@ jobs:
         run: go test ./...
       - name: Replica-set integration test
         env:
-          MONGO_INTEGRATION_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
+          MONGO_INTEGRATION_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
         run: |
           go test ./internal/sportmonks/store -run '^TestMongoLiveProjectionTransaction$' -count=1
           go test ./internal/modules/wallet -run '^TestMongoWalletOperationIdempotency$' -count=1
