@@ -91,21 +91,30 @@ func (s *Service) SetSettlement(runner SettlementRunner) {
 
 func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	all := s.repo.GetAll(ctx)
-	visible := make([]Match, 0, len(all))
+	live := make([]Match, 0, len(all))
+	upcoming := make([]Match, 0, len(all))
 	for i := range all {
 		if all[i].Hidden {
 			continue
 		}
-		all[i].Status = NormalizeStatus(all[i].Status)
-		if all[i].DataSource == DataSourceSportmonks &&
-			all[i].Status != StatusLive &&
-			all[i].Status != StatusInningsBreak {
+		// Home feed is Sportmonks only; manual/simulator demo matches are excluded.
+		if all[i].DataSource != DataSourceSportmonks {
 			continue
 		}
+		all[i].Status = NormalizeStatus(all[i].Status)
 		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)
-		visible = append(visible, all[i])
+		switch all[i].Status {
+		case StatusLive, StatusInningsBreak:
+			live = append(live, all[i])
+		case StatusUpcoming:
+			upcoming = append(upcoming, all[i])
+		}
 	}
-	return SortHomeMatches(visible)
+	// Prefer live fixtures; when nothing is in play, surface upcoming Sportmonks matches.
+	if len(live) > 0 {
+		return SortHomeMatches(live)
+	}
+	return SortHomeMatches(upcoming)
 }
 
 func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
@@ -639,7 +648,12 @@ func (s *Service) publishScore(match *Match) {
 		"status":       NormalizeStatus(match.Status),
 		"liveContext":  match.LiveContext,
 	}
-	if balls := s.currentOverBallsPayload(context.Background(), match); balls != nil {
+	if match.MatchPulse != nil {
+		payload["matchPulse"] = match.MatchPulse
+	}
+	if len(match.ThisOver) > 0 {
+		payload["thisOver"] = match.ThisOver
+	} else if balls := s.currentOverBallsPayload(context.Background(), match); balls != nil {
 		payload["thisOver"] = balls
 	}
 	s.publisher.Publish(realtime.MatchScoreTopic(match.ID.Hex()), payload)

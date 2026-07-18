@@ -33,6 +33,7 @@ import (
 	sportmonksclient "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/client"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/settlement"
 	sportmonksstore "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/store"
+	sportmonksworker "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/worker"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/watchdog"
 )
 
@@ -104,6 +105,13 @@ func main() {
 		}
 	}
 	matchesService := matches.NewService(matchesRepo, matchEventsRepo, realtimeHub)
+	if providerConfig.Mode == sportmonksclient.ModeLive {
+		if n, err := matchesRepo.HideNonSportmonksMatches(context.Background()); err != nil {
+			log.Printf("hide demo matches: %v", err)
+		} else if n > 0 {
+			log.Printf("hid %d demo/simulator matches for Sportmonks live mode", n)
+		}
+	}
 	if err := matchesService.ReconcileOnStartup(context.Background()); err != nil {
 		log.Printf("matches reconcile: %v", err)
 	}
@@ -125,7 +133,31 @@ func main() {
 	mustEnsureIndexes(context.Background(), "Sportmonks provider", feedStore.EnsureIndexes)
 	sportmonksAdminHandler := sportmonksadmin.NewHandler(feedStore)
 	if providerConfig.Mode == sportmonksclient.ModeLive {
+		if n, err := feedStore.CompleteStuckTerminalMatches(context.Background(), time.Now().UTC()); err != nil {
+			log.Printf("sportmonks complete stuck terminal matches: %v", err)
+		} else if n > 0 {
+			log.Printf("sportmonks completed %d stuck terminal matches on startup", n)
+		}
+		if n, err := feedStore.RepairUpcomingUnsupportedMatches(context.Background(), time.Now().UTC()); err != nil {
+			log.Printf("sportmonks repair upcoming matches: %v", err)
+		} else if n > 0 {
+			log.Printf("sportmonks repaired %d unsupported upcoming matches on startup", n)
+		}
 		go watchdog.Run(providerCtx, feedStore, 5*time.Second)
+		provider, providerErr := sportmonksclient.New(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
+		if providerErr != nil {
+			log.Fatalf("Sportmonks client: %v", providerErr)
+		}
+		feedWorker, workerErr := sportmonksworker.New(providerConfig, provider, feedStore, processInstanceID(), log.Default())
+		if workerErr != nil {
+			log.Fatalf("Sportmonks feed worker: %v", workerErr)
+		}
+		go func() {
+			log.Printf("Sportmonks feed worker started mode=%s fastPolling=%t", providerConfig.Mode, providerConfig.FastPollingEnabled)
+			if runErr := feedWorker.Run(providerCtx); runErr != nil && providerCtx.Err() == nil {
+				log.Printf("Sportmonks feed worker stopped: %v", runErr)
+			}
+		}()
 	}
 
 	// Orders.
@@ -227,7 +259,9 @@ func main() {
 	simService.SetLockStore(simLocks)
 	simHandler := simulator.NewHandler(simService)
 	defer simService.Shutdown()
-	simService.AutoStartOnBoot(context.Background())
+	if providerConfig.Mode != sportmonksclient.ModeLive {
+		simService.AutoStartOnBoot(context.Background())
+	}
 
 	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, sportmonksAdminHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS(cfg.AllowedOrigins))

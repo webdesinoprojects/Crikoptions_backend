@@ -340,22 +340,30 @@ func TestInterruptedIsBreakAndAbandonedInningsIsNotFinal(t *testing.T) {
 }
 
 func TestFiftyOverFormatsRequireStructuredSchedule(t *testing.T) {
-	for _, fixtureType := range []string{"ODI", "List A"} {
-		t.Run(fixtureType, func(t *testing.T) {
-			withoutSchedule := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"`+fixtureType+`"`, 1)
-			if _, err := ReduceFixtureJSON([]byte(withoutSchedule), mustCatalog(t)); !errors.Is(err, ErrUnsupportedFormat) {
-				t.Fatalf("unstructured %s error = %v", fixtureType, err)
-			}
-			withSchedule := strings.Replace(withoutSchedule, `"type":"`+fixtureType+`"`, `"type":"`+fixtureType+`","total_overs_played":50`, 1)
-			projection, err := ReduceFixtureJSON([]byte(withSchedule), mustCatalog(t))
-			if err != nil {
-				t.Fatalf("structured %s: %v", fixtureType, err)
-			}
-			if projection.Format != "ODI" || projection.ScheduledBalls != 300 {
-				t.Fatalf("structured %s format = %s/%d", fixtureType, projection.Format, projection.ScheduledBalls)
-			}
-		})
-	}
+	t.Run("List A", func(t *testing.T) {
+		withoutSchedule := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"List A"`, 1)
+		if _, err := ReduceFixtureJSON([]byte(withoutSchedule), mustCatalog(t)); !errors.Is(err, ErrUnsupportedFormat) {
+			t.Fatalf("unstructured List A error = %v", err)
+		}
+		withSchedule := strings.Replace(withoutSchedule, `"type":"List A"`, `"type":"List A","total_overs_played":50`, 1)
+		projection, err := ReduceFixtureJSON([]byte(withSchedule), mustCatalog(t))
+		if err != nil {
+			t.Fatalf("structured List A: %v", err)
+		}
+		if projection.Format != "ODI" || projection.ScheduledBalls != 300 {
+			t.Fatalf("structured List A format = %s/%d", projection.Format, projection.ScheduledBalls)
+		}
+	})
+	t.Run("ODI", func(t *testing.T) {
+		withoutSchedule := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"ODI"`, 1)
+		projection, err := ReduceFixtureJSON([]byte(withoutSchedule), mustCatalog(t))
+		if err != nil {
+			t.Fatalf("standard ODI without structured overs: %v", err)
+		}
+		if projection.Format != "ODI" || projection.ScheduledBalls != 300 {
+			t.Fatalf("ODI format = %s/%d", projection.Format, projection.ScheduledBalls)
+		}
+	})
 }
 
 func TestStructuredOversMustMatchFormat(t *testing.T) {
@@ -376,8 +384,8 @@ func TestStructuredOversMustMatchFormat(t *testing.T) {
 		t.Fatalf("nullable official T20 schedule: %v", err)
 	}
 	nullODI := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"ODI","total_overs_played":null`, 1)
-	if _, err := ReduceFixtureJSON([]byte(nullODI), mustCatalog(t)); !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("nullable ODI schedule error = %v", err)
+	if _, err := ReduceFixtureJSON([]byte(nullODI), mustCatalog(t)); err != nil {
+		t.Fatalf("nullable official ODI schedule: %v", err)
 	}
 }
 

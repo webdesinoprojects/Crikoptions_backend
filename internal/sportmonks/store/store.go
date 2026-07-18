@@ -405,13 +405,17 @@ func (s *Store) ListIncidents(ctx context.Context, limit int64) ([]Incident, err
 }
 
 func (s *Store) RequestFixtureResync(ctx context.Context, fixtureID int64, now time.Time) (bool, error) {
-	result, err := s.fixtures.UpdateOne(ctx, bson.M{
-		"_id": fixtureID, "eligible": true,
-	}, bson.M{
-		"$set":   bson.M{"nextPollAt": now.UTC(), "lastError": "manual_resync", "updatedAt": now.UTC()},
+	result, err := s.fixtures.UpdateOne(ctx, bson.M{"_id": fixtureID}, bson.M{
+		"$set": bson.M{
+			"eligible": true, "nextPollAt": now.UTC(),
+			"lastError": "manual_resync", "updatedAt": now.UTC(),
+		},
 		"$unset": bson.M{"leaseOwner": "", "leaseToken": "", "leaseUntil": ""},
-	})
-	return result != nil && result.MatchedCount == 1, err
+	}, options.Update().SetUpsert(true))
+	if err != nil {
+		return false, err
+	}
+	return result.MatchedCount > 0 || result.UpsertedCount > 0, nil
 }
 
 func (s *Store) AdminStatus(ctx context.Context, now time.Time) (Status, error) {
@@ -831,8 +835,10 @@ func (s *Store) UpsertFixtureTargets(ctx context.Context, fixtures []client.Fixt
 		}
 		if liveMode {
 			_, alreadyAdmitted := admitted[fixture.ID]
-			eligible = eligible && (alreadyAdmitted || futureNotStartedFixture(fixture, start, now) ||
-				liveAdmissionAllowed(fixture, allowMidMatchAdmission, existing[fixture.ID], now))
+			if !alreadyAdmitted {
+				eligible = eligible && (futureNotStartedFixture(fixture, start, now) ||
+					liveAdmissionAllowed(fixture, allowMidMatchAdmission, existing[fixture.ID], now))
+			}
 		}
 		set := bson.M{
 			"leagueId": fixture.LeagueID, "seasonId": fixture.SeasonID,
@@ -944,7 +950,8 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 		feedState := matches.FeedStateWarming
 		blockers := []string{"not_live"}
 		identityValid := fixture.LeagueID > 0 && fixture.SeasonID > 0 && fixture.LocalTeamID > 0 && fixture.VisitorTeamID > 0 && fixture.LocalTeamID != fixture.VisitorTeamID
-		if !identityValid || formatErr != nil || fixture.SuperOver || rawMeaningful(fixture.RPCOvers) || rawMeaningful(fixture.RPCTarget) {
+		supported := identityValid && formatErr == nil && !fixture.SuperOver && !rawMeaningful(fixture.RPCOvers) && !rawMeaningful(fixture.RPCTarget)
+		if !supported {
 			format = fixture.Type
 			scheduledBalls = 0
 			feedState = matches.FeedStateUnsupported
@@ -952,6 +959,8 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 		}
 		localName := fixtureTeamName(fixture.LocalTeam, fixture.LocalTeamID)
 		visitorName := fixtureTeamName(fixture.VisitorTeam, fixture.VisitorTeamID)
+		localLogo := fixtureTeamLogo(fixture.LocalTeam)
+		visitorLogo := fixtureTeamLogo(fixture.VisitorTeam)
 		setOnInsert := bson.M{
 			"_id": primitive.NewObjectID(), "dataSource": ProviderName, "provider": ProviderName,
 			"providerFixtureId": fixture.ID, "providerLeagueId": fixture.LeagueID,
@@ -965,15 +974,32 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 			"stateVersion": 1, "tradingVersion": 1, "feedState": feedState,
 			"tradingState": "blocked", "tradingBlockers": blockers, "createdAt": now.UTC(),
 		}
+		setFields := bson.M{
+			"startTime": start,
+			"teamAName": localName, "teamBName": visitorName,
+			"teamALogo": localLogo, "teamBLogo": visitorLogo,
+			"hidden": false, "updatedAt": now.UTC(),
+		}
+		// Keep upcoming publications in sync so previously unsupported ODI fixtures
+		// become visible once classification succeeds.
+		if reconcile.IsNotStartedStatus(fixture.Status) {
+			setFields["providerPhase"] = fixture.Status
+			setFields["format"] = format
+			setFields["scheduledBalls"] = scheduledBalls
+			setFields["ballsLeft"] = scheduledBalls
+			setFields["oversText"] = "0.0"
+			setFields["feedState"] = feedState
+			setFields["tradingState"] = "blocked"
+			setFields["tradingBlockers"] = blockers
+			if supported {
+				setFields["status"] = matches.StatusUpcoming
+			}
+		}
 		_, err = s.matches.UpdateOne(ctx, bson.M{
 			"provider": ProviderName, "providerFixtureId": fixture.ID,
 		}, bson.M{
 			"$setOnInsert": setOnInsert,
-			"$set": bson.M{
-				"providerPhase": fixture.Status, "startTime": start,
-				"teamAName": localName, "teamBName": visitorName,
-				"hidden": false, "updatedAt": now.UTC(),
-			},
+			"$set":         setFields,
 		}, options.Update().SetUpsert(true))
 		if err != nil {
 			return err
@@ -1412,7 +1438,8 @@ func parseProviderTime(raw string) (time.Time, error) {
 }
 
 type providerTeam struct {
-	Name string `json:"name"`
+	Name      string `json:"name"`
+	ImagePath string `json:"image_path"`
 }
 
 func fixtureTeamName(raw json.RawMessage, id int64) string {
@@ -1421,6 +1448,14 @@ func fixtureTeamName(raw json.RawMessage, id int64) string {
 		return strings.TrimSpace(team.Name)
 	}
 	return fmt.Sprintf("Team %d", id)
+}
+
+func fixtureTeamLogo(raw json.RawMessage) string {
+	team, err := client.DecodeRelation[providerTeam](raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(team.ImagePath)
 }
 
 func isNoDocuments(err error) bool { return errors.Is(err, mongo.ErrNoDocuments) }

@@ -46,9 +46,12 @@ type Storage interface {
 	DeferTarget(context.Context, int64, time.Time, string) error
 	SavePayload(context.Context, int64, string, []byte, time.Time, time.Duration, bool, error) error
 	ApplyProjection(context.Context, reconcile.Projection, []byte, time.Time, store.ApplyOptions) (store.ApplyResult, error)
+	ApplyProviderTerminalClosure(context.Context, int64, string, time.Time, store.ApplyOptions) (bool, error)
+	CompleteStuckTerminalMatches(context.Context, time.Time) (int64, error)
 	MarkFeedUnavailable(context.Context, int64, string, string, time.Time, *time.Time) error
 	MarkFeedFrozen(context.Context, int64, time.Time, time.Time) error
 	ResetFinalizationHolds(context.Context, int64, string, string, time.Time) error
+	RescheduleStaleTargets(context.Context, time.Time) (int64, error)
 }
 
 type Logger interface {
@@ -157,6 +160,11 @@ func (w *Worker) bootstrap(ctx context.Context) error {
 	}
 	if err := w.discoverLive(ctx); err != nil {
 		w.logger.Printf("sportmonks initial live discovery: %v", err)
+	}
+	if count, err := w.store.RescheduleStaleTargets(ctx, w.now().UTC()); err != nil {
+		w.logger.Printf("sportmonks reschedule stale targets: %v", err)
+	} else if count > 0 {
+		w.logger.Printf("sportmonks rescheduled %d fixture targets for immediate poll", count)
 	}
 	return nil
 }
@@ -415,7 +423,7 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 		return
 	}
 	envelope, err := w.provider.FixtureByID(ctx, target.ID, client.FixtureOptions{Includes: []string{
-		"balls", "runs", "scoreboards", "batting", "bowling",
+		"balls", "runs", "scoreboards", "batting", "bowling", "batting.batsman", "bowling.bowler",
 	}})
 	w.quota.observe("fixtures", w.now().UTC(), envelope.RateLimit)
 	if err != nil {
@@ -435,6 +443,19 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	if err != nil {
 		_ = w.store.SavePayload(ctx, target.ID, string(w.cfg.Mode), raw, receivedAt, w.cfg.RawPayloadTTL, false, err)
 		if w.cfg.Mode == client.ModeLive {
+			if providerStatus, ok := reconcile.FixtureProviderStatus(raw); ok && reconcile.IsTerminalProviderStatus(providerStatus) {
+				closed, closeErr := w.store.ApplyProviderTerminalClosure(ctx, target.ID, providerStatus, receivedAt, store.ApplyOptions{
+					Mode: string(w.cfg.Mode), LeaseOwner: w.owner, LeaseToken: token,
+				})
+				if closeErr != nil {
+					w.logger.Printf("sportmonks fixture %d terminal closure: %v", target.ID, closeErr)
+				} else if closed {
+					w.logger.Printf("sportmonks fixture %d: closed after reduce failure provider=%s", target.ID, providerStatus)
+					next := receivedAt.Add(intervalForProviderStatus(providerStatus, activeInterval, w.cfg))
+					_ = w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), "", providerStatus, receivedAt, next)
+					return
+				}
+			}
 			if resetErr := w.store.ResetFinalizationHolds(ctx, target.ID, w.owner, token, receivedAt); resetErr != nil {
 				if errors.Is(resetErr, store.ErrFixtureLeaseLost) {
 					return
@@ -462,6 +483,12 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	if err != nil {
 		w.handlePollFailure(ctx, target, token, scheduledInterval, err)
 		return
+	}
+	if result.Applied {
+		w.logger.Printf(
+			"sportmonks fixture %d: applied feed=%s stateVersion=%d reconciling=%t",
+			target.ID, result.FeedState, result.StateVersion, result.Reconciling,
+		)
 	}
 	if w.cfg.Mode == client.ModeLive && projection.Status == matches.StatusLive {
 		_ = w.store.MarkFeedFrozen(ctx, target.ID, receivedAt, receivedAt.Add(-w.cfg.ActiveFreezeTimeout))

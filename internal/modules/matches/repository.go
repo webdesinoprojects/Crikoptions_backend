@@ -271,6 +271,41 @@ func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
 	return len(docs), nil
 }
 
+// HideNonSportmonksMatches marks manual, simulator, and legacy demo matches as
+// hidden so they no longer appear on the home feed when running Sportmonks live.
+func (r *MongoRepository) HideNonSportmonksMatches(ctx context.Context) (int64, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	sampleIDs := make([]primitive.ObjectID, 0, len(getSampleMatches()))
+	for _, match := range getSampleMatches() {
+		sampleIDs = append(sampleIDs, match.ID)
+	}
+
+	now := time.Now().UTC()
+	filter := bson.M{
+		"hidden": bson.M{"$ne": true},
+		"$or": bson.A{
+			bson.M{"_id": bson.M{"$in": sampleIDs}},
+			bson.M{"dataSource": bson.M{"$in": bson.A{DataSourceManual, DataSourceSimulator}}},
+			bson.M{"dataSource": bson.M{"$exists": false}},
+			bson.M{"dataSource": ""},
+		},
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"hidden":    true,
+			"status":    StatusCompleted,
+			"updatedAt": now,
+		},
+	}
+	result, err := r.col.UpdateMany(ctx, filter, update)
+	if err != nil {
+		return 0, err
+	}
+	return result.ModifiedCount, nil
+}
+
 // EnsureDefaultMatches upserts the built-in sample matches (T20 + ODI) so
 // hex ids …aa / …bb / …cc / …dd always exist even when the collection was seeded earlier.
 func (r *MongoRepository) EnsureDefaultMatches(ctx context.Context) error {

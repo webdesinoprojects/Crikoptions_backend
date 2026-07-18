@@ -39,10 +39,13 @@ type Match struct {
 	TargetScore       int               `json:"targetScore,omitempty" bson:"targetScore,omitempty"`
 	OversText         string            `json:"oversText" bson:"oversText"`
 	LiveContext       *LiveMatchContext `json:"liveContext,omitempty" bson:"liveContext,omitempty"`
+	MatchPulse        *MatchPulse       `json:"matchPulse,omitempty" bson:"matchPulse,omitempty"`
+	ThisOver          []OverBall        `json:"thisOver,omitempty" bson:"thisOver,omitempty"`
 
 	ProviderPhase         string           `json:"providerPhase,omitempty" bson:"providerPhase,omitempty"`
 	ScheduledBalls        int              `json:"scheduledBalls,omitempty" bson:"scheduledBalls,omitempty"`
 	ProviderBattingTeamID int64            `json:"providerBattingTeamId,omitempty" bson:"providerBattingTeamId,omitempty"`
+	ProviderReconcilePolls int              `json:"-" bson:"providerReconcilePolls,omitempty"`
 	InningsSummaries      []InningsSummary `json:"inningsSummaries,omitempty" bson:"inningsSummaries,omitempty"`
 
 	// StateVersion versions authoritative score/event state. TradingVersion is
@@ -150,4 +153,23 @@ type LiveMatchContext struct {
 	NonStriker  BatterStats      `json:"nonStriker" bson:"nonStriker"`
 	Bowler      BowlerStats      `json:"bowler" bson:"bowler"`
 	Partnership PartnershipStats `json:"partnership" bson:"partnership"`
+}
+
+// MatchPulse is derived live-match analytics for the on-field matrix UI.
+type MatchPulse struct {
+	LastWicket       string `json:"lastWicket" bson:"lastWicket"`
+	Momentum         string `json:"momentum" bson:"momentum"`
+	MomentumLevel    string `json:"momentumLevel,omitempty" bson:"momentumLevel,omitempty"`
+	MarketVolatility string `json:"marketVolatility" bson:"marketVolatility"`
+	VolatilityLevel  string `json:"volatilityLevel,omitempty" bson:"volatilityLevel,omitempty"`
+	Pressure         string `json:"pressure" bson:"pressure"`
+	PressureLevel    string `json:"pressureLevel,omitempty" bson:"pressureLevel,omitempty"`
+}
+
+// OverBall is one slot in the current over row (legal ball or extra).
+type OverBall struct {
+	Runs      int    `json:"runs" bson:"runs"`
+	IsWicket  bool   `json:"isWicket" bson:"isWicket"`
+	LegalBall bool   `json:"legalBall" bson:"legalBall"`
+	Extra     string `json:"extra,omitempty" bson:"extra,omitempty"`
 }

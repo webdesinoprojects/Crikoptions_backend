@@ -51,7 +51,7 @@ func isLiveStatus(status string) bool {
 }
 
 // SortHomeMatches returns matches ordered for the schedule strip: live first,
-// then upcoming, then everything else by start time descending.
+// then innings break, then upcoming (soonest start first), then everything else.
 func SortHomeMatches(in []Match) []Match {
 	out := make([]Match, len(in))
 	copy(out, in)
@@ -59,6 +59,9 @@ func SortHomeMatches(in []Match) []Match {
 		pi, pj := homePriority(out[i].Status), homePriority(out[j].Status)
 		if pi != pj {
 			return pi < pj
+		}
+		if NormalizeStatus(out[i].Status) == StatusUpcoming {
+			return out[i].StartTime.Before(out[j].StartTime)
 		}
 		return out[i].StartTime.After(out[j].StartTime)
 	})

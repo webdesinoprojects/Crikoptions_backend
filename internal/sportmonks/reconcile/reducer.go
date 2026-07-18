@@ -95,6 +95,9 @@ type Projection struct {
 	Target            int
 	Innings           []Innings
 	Deliveries        []Delivery
+	LiveContext       *matches.LiveMatchContext
+	MatchPulse        *matches.MatchPulse
+	ThisOver          []matches.OverBall
 	ProviderUpdatedAt *time.Time
 	SnapshotHash      string
 }
@@ -207,10 +210,12 @@ func ReduceFixtureJSON(raw []byte, catalog Catalog) (Projection, error) {
 	if err != nil {
 		return Projection{}, err
 	}
-	if _, err := requiredRelation(root, "batting"); err != nil {
+	battingItems, err := requiredRelation(root, "batting")
+	if err != nil {
 		return Projection{}, err
 	}
-	if _, err := requiredRelation(root, "bowling"); err != nil {
+	bowlingItems, err := requiredRelation(root, "bowling")
+	if err != nil {
 		return Projection{}, err
 	}
 
@@ -325,11 +330,24 @@ func ReduceFixtureJSON(raw []byte, catalog Catalog) (Projection, error) {
 		}
 	}
 	if currentInnings > 0 && current.BattingTeamID == 0 {
-		return Projection{}, fmt.Errorf("%w: current innings batting team is missing", ErrIncompleteSnapshot)
+		if IsExplicitTerminalProviderStatus(status) && len(innings) > 0 {
+			current = innings[len(innings)-1]
+			currentInnings = current.Number
+		} else {
+			return Projection{}, fmt.Errorf("%w: current innings batting team is missing", ErrIncompleteSnapshot)
+		}
 	}
 
 	localName := relationName(root["localteam"])
 	visitorName := relationName(root["visitorteam"])
+	liveInput := LiveContextInput{
+		CurrentInnings: currentInnings, BattingTeamID: current.BattingTeamID,
+		LocalTeamID: localID, VisitorTeamID: visitorID,
+		LocalTeamName: localName, VisitorTeamName: visitorName,
+		CurrentScore: current.Runs, Wickets: current.Wickets,
+		LegalBalls: current.LegalBalls, ScheduledBalls: scheduledBalls,
+		Target: target, Deliveries: deliveries,
+	}
 	projection := Projection{
 		FixtureID: fixtureID, LeagueID: leagueID, SeasonID: seasonID,
 		LocalTeamID: localID, VisitorTeamID: visitorID,
@@ -340,6 +358,9 @@ func ReduceFixtureJSON(raw []byte, catalog Catalog) (Projection, error) {
 		CurrentScore: current.Runs, Wickets: current.Wickets,
 		LegalBalls: current.LegalBalls, Target: target,
 		Innings: innings, Deliveries: deliveries, ProviderUpdatedAt: providerUpdated,
+		LiveContext: BuildLiveContext(battingItems, bowlingItems, liveInput),
+		MatchPulse:  BuildMatchPulse(liveInput),
+		ThisOver:    BuildThisOver(deliveries, currentInnings, current.LegalBalls),
 	}
 	projection.SnapshotHash = projectionHash(projection)
 	return projection, nil
@@ -656,13 +677,13 @@ func normalizeSnapshotFormat(root map[string]any, raw string) (string, int, erro
 	}
 	clean := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(raw), "_", ""))
 	clean = strings.ReplaceAll(clean, " ", "")
-	if clean != "odi" && clean != "lista" {
-		return format, scheduledBalls, nil
+	// Standard ODI fixtures are published as 50 overs even when Sportmonks has not
+	// yet populated total_overs_played (typical for NS / upcoming). List A remains
+	// unsupported until a structured 50-over schedule is present.
+	if clean == "lista" && !hasStructuredOvers {
+		return "", 0, fmt.Errorf("%w: %s has no structured 50-over schedule", ErrUnsupportedFormat, raw)
 	}
-	if hasStructuredOvers {
-		return format, scheduledBalls, nil
-	}
-	return "", 0, fmt.Errorf("%w: %s has no structured 50-over schedule", ErrUnsupportedFormat, raw)
+	return format, scheduledBalls, nil
 }
 
 // ClassifyFormat exposes the reducer's allowlist to fixture discovery without

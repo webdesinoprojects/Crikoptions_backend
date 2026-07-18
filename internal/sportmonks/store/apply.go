@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -338,6 +339,19 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 		return ApplyResult{}, ErrTerminalRegression
 	}
 	if projection.ProviderUpdatedAt != nil && current.LastProviderUpdateAt != nil && projection.ProviderUpdatedAt.Before(*current.LastProviderUpdateAt) {
+		if projection.SnapshotHash != "" && projection.SnapshotHash == current.LastSnapshotHash {
+			overlay := current
+			applyProjectionOverlay(&overlay, projection, receivedAt, cfg.FeedValidity)
+			applyFeedHealth(&overlay, projection)
+			updated, err := s.persistMatchSnapshot(ctx, overlay, receivedAt, "match.state")
+			if err != nil {
+				return ApplyResult{}, err
+			}
+			return ApplyResult{
+				MatchID: updated.ID.Hex(), StateVersion: updated.StateVersion,
+				TradingVersion: updated.TradingVersion, FeedState: updated.FeedState,
+			}, nil
+		}
 		return ApplyResult{}, ErrStaleSnapshot
 	}
 
@@ -393,8 +407,14 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 			}
 		}
 	}
-	if firstMissing || correctionBlocked {
+	skipReconcileGate := projection.Status == matches.StatusCompleted ||
+		projection.Status == matches.StatusAbandoned ||
+		projection.Status == matches.StatusInningsBreak
+	forceResolve := current.ProviderReconcilePolls >= maxReconcilingPolls-1 || skipReconcileGate
+	if !forceResolve && (firstMissing || correctionBlocked) {
+		reason := "correction_blocked"
 		if firstMissing {
+			reason = "missing_delivery"
 			for providerID, event := range existingEvents {
 				if event.Active && !event.Tombstoned {
 					if _, present := candidateByID[providerID]; !present {
@@ -409,43 +429,56 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 				}
 			}
 		}
-		updated, err := s.setReconciling(ctx, current, receivedAt)
+		updated, err := s.applyReconcilingPoll(ctx, current, projection, receivedAt, cfg, reason)
 		if err != nil {
 			return ApplyResult{}, err
 		}
-		result := ApplyResult{
+		return ApplyResult{
 			MatchID: updated.ID.Hex(), StateVersion: updated.StateVersion,
 			TradingVersion: updated.TradingVersion, FeedState: updated.FeedState,
 			Applied: true, Reconciling: true,
+		}, nil
+	}
+
+	if forceResolve && (firstMissing || correctionBlocked) {
+		log.Printf(
+			"sportmonks fixture %d match %s: forcing delivery reconcile after %d polls (missing=%t corrections=%t terminal=%t)",
+			projection.FixtureID, current.ID.Hex(), current.ProviderReconcilePolls+1,
+			firstMissing, correctionBlocked, skipReconcileGate,
+		)
+		cfg.AllowCorrections = true
+	}
+
+	if firstMissing {
+		for providerID, event := range existingEvents {
+			if event.Active && !event.Tombstoned {
+				if _, present := candidateByID[providerID]; !present {
+					result, err := s.events.UpdateOne(ctx, bson.M{"_id": event.ID, "revision": event.Revision}, bson.M{"$inc": bson.M{"missingPolls": 1}})
+					if err != nil {
+						return ApplyResult{}, err
+					}
+					if result.ModifiedCount != 1 {
+						return ApplyResult{}, ErrConcurrentApply
+					}
+				}
+			}
 		}
-		return result, nil
 	}
 
 	stateChanged := newMatch || current.LastSnapshotHash != projection.SnapshotHash || current.FeedState != matches.FeedStateHealthy || current.HealthySnapshotCount < 2 || projection.Status == matches.StatusCompleted || inningsHoldPending(current, projection) || tradingGateRefreshNeeded(current, projection)
 	if !stateChanged {
-		now := receivedAt
-		validity := cfg.FeedValidity
-		if validity <= 0 {
-			validity = 50 * time.Second
+		overlay := current
+		applyProjectionOverlay(&overlay, projection, receivedAt, cfg.FeedValidity)
+		applyFeedHealth(&overlay, projection)
+		overlay.UpdatedAt = receivedAt
+		updated, err := s.persistMatchSnapshot(ctx, overlay, receivedAt, "match.state")
+		if err != nil {
+			return ApplyResult{}, err
 		}
-		validUntil := now.Add(validity)
-		tradingState := current.TradingState
-		if len(current.TradingBlockers) == 0 {
-			tradingState = "open"
-		}
-		_, err := s.matches.UpdateOne(ctx, bson.M{"_id": current.ID}, bson.M{"$set": bson.M{
-			"feedState":            matches.FeedStateHealthy,
-			"tradingState":         tradingState,
-			"tradingBlockers":      current.TradingBlockers,
-			"lastFeedReceivedAt":   &now,
-			"lastSuccessfulPollAt": &now,
-			"feedValidUntil":       &validUntil,
-			"updatedAt":            now,
-		}})
 		return ApplyResult{
-			MatchID: current.ID.Hex(), StateVersion: current.StateVersion,
-			TradingVersion: current.TradingVersion, FeedState: matches.FeedStateHealthy,
-		}, err
+			MatchID: updated.ID.Hex(), StateVersion: updated.StateVersion,
+			TradingVersion: updated.TradingVersion, FeedState: updated.FeedState,
+		}, nil
 	}
 
 	nextVersion := current.StateVersion + 1
@@ -732,6 +765,9 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 	next.BallsLeft = max(0, projection.ScheduledBalls-projection.LegalBalls)
 	next.TargetScore = projection.Target
 	next.OversText = fmt.Sprintf("%d.%d", projection.LegalBalls/6, projection.LegalBalls%6)
+	next.LiveContext = projection.LiveContext
+	next.MatchPulse = projection.MatchPulse
+	next.ThisOver = projection.ThisOver
 	next.InningsSummaries = inningsSummaries(projection.Innings, current.InningsSummaries, nextVersion, receivedAt, inningsHold)
 	if projection.Status == matches.StatusAbandoned {
 		freezeAbandonmentDispositions(current, &next)
@@ -748,6 +784,7 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 		next.LastStateChangeAt = timePointer(receivedAt)
 	}
 	next.StateVersion = nextVersion
+	next.ProviderReconcilePolls = 0
 	next.UpdatedAt = receivedAt
 
 	previousTradingState := current.TradingState
@@ -785,6 +822,15 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 		next.TradingState = "blocked"
 		next.TradingBlockers = providerBlockers(current.TradingBlockers, "innings_break")
 	case matches.StatusCompleted:
+		if reconcile.IsExplicitTerminalProviderStatus(projection.ProviderStatus) {
+			next.Status = matches.StatusCompleted
+			next.FeedState = matches.FeedStateTerminal
+			next.HealthySnapshotCount = 0
+			next.TradingState = "closed"
+			next.TradingBlockers = providerBlockers(current.TradingBlockers, "not_live")
+			next.FinalCandidate = nil
+			break
+		}
 		next.Status = matches.StatusInningsBreak
 		next.FeedState = matches.FeedStateFinalizing
 		next.HealthySnapshotCount = current.HealthySnapshotCount + 1
@@ -1359,6 +1405,15 @@ func (s *Store) insertDeliveryOutbox(ctx context.Context, match matches.Match, e
 		"ballsLeft": match.BallsLeft, "targetScore": match.TargetScore, "oversText": match.OversText,
 		"stateVersion": match.StateVersion, "tradingVersion": match.TradingVersion,
 	}
+	if match.LiveContext != nil {
+		payload["liveContext"] = match.LiveContext
+	}
+	if match.MatchPulse != nil {
+		payload["matchPulse"] = match.MatchPulse
+	}
+	if len(match.ThisOver) > 0 {
+		payload["thisOver"] = match.ThisOver
+	}
 	outbox := OutboxEvent{
 		EventID: fmt.Sprintf("sportmonks:%d:%s:%d", match.ProviderFixtureID, event.ProviderEventID, event.Revision),
 		Topic:   realtime.MatchCommentaryTopic(match.ID.Hex()), Type: "match.delivery",
@@ -1370,7 +1425,7 @@ func (s *Store) insertDeliveryOutbox(ctx context.Context, match matches.Match, e
 }
 
 func scorePayload(match matches.Match) map[string]any {
-	return map[string]any{
+	payload := map[string]any{
 		"matchId": match.ID.Hex(), "innings": match.Innings,
 		"currentScore": match.CurrentScore, "wicketsLost": match.WicketsLost,
 		"ballsLeft": match.BallsLeft, "targetScore": match.TargetScore,
@@ -1381,6 +1436,16 @@ func scorePayload(match matches.Match) map[string]any {
 		"inningsSummaries":     match.InningsSummaries,
 		"lastSuccessfulPollAt": match.LastSuccessfulPollAt, "feedValidUntil": match.FeedValidUntil,
 	}
+	if match.LiveContext != nil {
+		payload["liveContext"] = match.LiveContext
+	}
+	if match.MatchPulse != nil {
+		payload["matchPulse"] = match.MatchPulse
+	}
+	if len(match.ThisOver) > 0 {
+		payload["thisOver"] = match.ThisOver
+	}
+	return payload
 }
 
 func inningsSummaries(input []reconcile.Innings, current []matches.InningsSummary, revision int64, now time.Time, hold time.Duration) []matches.InningsSummary {

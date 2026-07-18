@@ -21,6 +21,8 @@ type MatchResponse struct {
 	TargetScore  int               `json:"targetScore,omitempty"`
 	OversText    string            `json:"oversText"`
 	LiveContext  *LiveMatchContext `json:"liveContext,omitempty"`
+	MatchPulse   *MatchPulse       `json:"matchPulse,omitempty"`
+	ThisOver     []OverBall        `json:"thisOver,omitempty"`
 	CreatedAt    time.Time         `json:"createdAt"`
 	UpdatedAt    time.Time         `json:"updatedAt"`
 }
