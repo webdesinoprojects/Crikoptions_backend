@@ -164,9 +164,9 @@ func TestMongoLiveProjectionTransaction(t *testing.T) {
 		t.Fatalf("rejected apply changed active lease: owner=%q token=%q", target.LeaseOwner, target.LeaseToken)
 	}
 
-	// Raw payload diagnostics intentionally survive failed transactions; they
-	// are never used as public match or trading state.
-	assertCollectionCount(t, ctx, db.Collection("provider_payloads"), 4)
+	// Raw payload diagnostics intentionally survive failed transactions, but
+	// only the latest payload is retained for each fixture/mode pair.
+	assertCollectionCount(t, ctx, db.Collection("provider_payloads"), 1)
 }
 
 func integrationProjection(fixtureID int64) reconcile.Projection {
