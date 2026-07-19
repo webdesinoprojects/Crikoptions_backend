@@ -59,8 +59,17 @@ func (s *stubMarketSvc) StrikeQuote(input markets.PriceCalculationInput, strike 
 	return s.bid, s.ask, s.ok
 }
 
-func (s *stubMarketSvc) IsTradable(_ *markets.Market) bool {
-	return true
+// IsTradable stays permissive for legacy fixtures but honours terminal
+// lifecycles so settled/void markets exercise the real rejection path.
+func (s *stubMarketSvc) IsTradable(market *markets.Market) bool {
+	if market == nil {
+		return false
+	}
+	switch market.Lifecycle {
+	case markets.MarketLifecycleSettling, markets.MarketLifecycleSettled, markets.MarketLifecycleVoid:
+		return false
+	}
+	return market.Status != markets.MarketStatusClosed
 }
 
 type stubMatchSvc struct {

@@ -22,6 +22,7 @@ type providerMatchStub struct {
 	gateValid   bool
 	gateTouches int
 	failAtTouch int
+	gateErr     error
 }
 
 type providerMarketStub struct {
@@ -47,6 +48,9 @@ func (s *providerMatchStub) GetMatchByID(context.Context, string) (*matches.Matc
 
 func (s *providerMatchStub) VerifyTradingGate(_ context.Context, _ string, stateVersion, tradingVersion int64) (*matches.Match, bool, error) {
 	s.gateTouches++
+	if s.gateErr != nil {
+		return nil, false, s.gateErr
+	}
 	valid := s.gateValid && (s.failAtTouch == 0 || s.gateTouches < s.failAtTouch)
 	_ = stateVersion
 	_ = tradingVersion
@@ -233,6 +237,48 @@ func TestProviderGateChangeBeforeFillCancelsOrderAndReleasesMargin(t *testing.T)
 	}
 	if account.ReservedBalance != 0 {
 		t.Fatalf("reserved balance = %.2f, want 0", account.ReservedBalance)
+	}
+}
+
+// A settled provider market must fail with the permanent MARKET_CLOSED error,
+// not TRADING_STATE_CHANGED — the latter tells clients to refresh and retry an
+// order that can never succeed (settled markets stay listed after innings end).
+func TestSettledProviderMarketRejectsWithMarketClosed(t *testing.T) {
+	svc, marketSvc, matchSvc, userID := newProviderTradingService(t)
+	marketSvc.market.Lifecycle = markets.MarketLifecycleSettled
+	marketSvc.market.Status = markets.MarketStatusClosed
+
+	req := CreateOrderRequest{
+		MatchID: matchSvc.match.ID.Hex(), MarketID: marketSvc.market.ID.Hex(), Strike: 130,
+		Side: "buy", Type: OrderTypeMarket, Quantity: 1,
+		ExpectedMatchStateVersion: 12, ExpectedTradingVersion: 5, QuoteExpiresAt: time.Now().UTC().Add(5 * time.Second),
+	}
+	if _, err := svc.PreviewOrder(context.Background(), userID, req); !errors.Is(err, ErrMarketClosed) {
+		t.Fatalf("preview error = %v, want ErrMarketClosed", err)
+	}
+	if _, err := svc.CreateOrder(context.Background(), userID, req); !errors.Is(err, ErrMarketClosed) {
+		t.Fatalf("create error = %v, want ErrMarketClosed", err)
+	}
+}
+
+// A driver error from the gate (e.g. a WriteConflict labeled
+// TransientTransactionError when a feed tick races the order tx) must
+// propagate raw so WithTransaction can retry it — collapsing it into
+// ErrTradingStateChanged surfaced spurious 409s on healthy open matches.
+func TestGateDriverErrorPropagatesRawForTxRetry(t *testing.T) {
+	svc, marketSvc, matchSvc, userID := newProviderTradingService(t)
+	transient := errors.New("(WriteConflict) Caused by :: Write conflict during plan execution")
+	matchSvc.gateErr = transient
+	_, err := svc.CreateOrder(context.Background(), userID, CreateOrderRequest{
+		MatchID: matchSvc.match.ID.Hex(), MarketID: marketSvc.market.ID.Hex(), Strike: 130,
+		Side: "buy", Type: OrderTypeMarket, Quantity: 1,
+		ExpectedMatchStateVersion: 12, ExpectedTradingVersion: 5, QuoteExpiresAt: time.Now().UTC().Add(5 * time.Second),
+	})
+	if errors.Is(err, ErrTradingStateChanged) {
+		t.Fatalf("gate driver error was collapsed into ErrTradingStateChanged; must propagate raw for tx retry")
+	}
+	if !errors.Is(err, transient) {
+		t.Fatalf("error = %v, want raw driver error", err)
 	}
 }
 

@@ -33,6 +33,7 @@ var (
 	ErrStrikeNotFound         = errors.New("strike not found in option chain")
 	ErrNoLiquidity            = errors.New("no executable market quote available")
 	ErrTradingStateChanged    = newCodedAPIError(http.StatusConflict, "TRADING_STATE_CHANGED", "Trading state changed; refresh the quote and try again")
+	ErrMarketClosed           = newCodedAPIError(http.StatusBadRequest, "MARKET_CLOSED", "This market has settled and is no longer tradable")
 	ErrMarketContractMismatch = newCodedAPIError(http.StatusConflict, "MARKET_CONTRACT_MISMATCH", "Market does not belong to the current match innings")
 	ErrReservedClientOrderID  = newCodedAPIError(http.StatusBadRequest, "RESERVED_CLIENT_ORDER_ID", "clientOrderId uses a reserved system prefix")
 	ErrInternalOrderCancel    = newCodedAPIError(http.StatusConflict, "ORDER_NOT_CANCELLABLE", "System settlement orders cannot be cancelled")
@@ -434,6 +435,9 @@ func (s *Service) PreviewOrder(ctx context.Context, userID primitive.ObjectID, r
 	}
 	if !s.markets.IsTradable(market) {
 		if isProviderMatch(match) {
+			if isMarketPermanentlyClosed(market) {
+				return nil, ErrMarketClosed
+			}
 			return nil, ErrTradingStateChanged
 		}
 		if req.Side == "sell" {
@@ -568,6 +572,9 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	}
 	if !s.markets.IsTradable(market) {
 		if isProviderMatch(match) {
+			if isMarketPermanentlyClosed(market) {
+				return nil, ErrMarketClosed
+			}
 			return nil, ErrTradingStateChanged
 		}
 		// Exit path uses the explicit error contract; buy path is unchanged.
@@ -653,6 +660,11 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	const gateAttempts = 3
 	for attempt := 0; attempt < gateAttempts; attempt++ {
 		if attempt > 0 {
+			// Give the racing feed tick time to commit before re-reading the gate;
+			// back-to-back retries land inside the same sync window.
+			if waitErr := sleepCtx(ctx, gateRetryBackoff); waitErr != nil {
+				return nil, waitErr
+			}
 			// Re-load live match/market after a Sportmonks tick raced the gate.
 			if refreshed, refreshErr := s.markets.GetMarketByID(ctx, req.MarketID); refreshErr == nil && refreshed != nil {
 				market = refreshed
@@ -661,6 +673,9 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 				match = refreshed
 			}
 			if !s.markets.IsTradable(market) || !isMatchTradable(match) {
+				if isMarketPermanentlyClosed(market) {
+					return nil, ErrMarketClosed
+				}
 				return nil, ErrTradingStateChanged
 			}
 			if err := validateMarketContract(req.MatchID, market, match); err != nil {
@@ -743,6 +758,12 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 
 	var filled *Order
 	for attempt := 0; attempt < gateAttempts; attempt++ {
+		if attempt > 0 {
+			if waitErr := sleepCtx(ctx, gateRetryBackoff); waitErr != nil {
+				err = waitErr
+				break
+			}
+		}
 		filled, err = s.applyFill(ctx, userID, created, fillPrice, created.RemainingQuantity)
 		if err == nil {
 			break
@@ -812,6 +833,37 @@ func isProviderMatch(match *matches.Match) bool {
 	return match != nil && strings.EqualFold(strings.TrimSpace(match.DataSource), matches.DataSourceSportmonks)
 }
 
+// isMarketPermanentlyClosed distinguishes settled/void contracts from transient
+// suspensions. Settled markets stay in the match's market list after an innings
+// ends; surfacing TRADING_STATE_CHANGED for them told users to retry an order
+// that can never succeed.
+func isMarketPermanentlyClosed(market *markets.Market) bool {
+	if market == nil {
+		return false
+	}
+	switch market.Lifecycle {
+	case markets.MarketLifecycleSettling, markets.MarketLifecycleSettled, markets.MarketLifecycleVoid:
+		return true
+	}
+	return market.Status == markets.MarketStatusClosed
+}
+
+// gateRetryBackoff spaces the gate retry attempts so they do not all land
+// inside the same Sportmonks feed-sync window (a tick commits in a few ms;
+// back-to-back retries observed the same in-flight state all three times).
+const gateRetryBackoff = 75 * time.Millisecond
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func providerRequestMatchesGate(req CreateOrderRequest, match *matches.Match) bool {
 	if !isProviderMatch(match) {
 		return true
@@ -833,7 +885,15 @@ func (s *Service) verifyTradingGates(ctx context.Context, match *matches.Match, 
 		return ErrTradingStateChanged
 	}
 	verified, valid, err := verifier.VerifyTradingGate(ctx, match.ID.Hex(), stateVersion, tradingVersion)
-	if err != nil || !valid || !isMatchTradable(verified) {
+	if err != nil {
+		// Propagate driver errors raw. The gate write races the feed sync on the
+		// same match/market docs, and a WriteConflict inside the order transaction
+		// carries the TransientTransactionError label — WithTransaction retries it
+		// automatically only if the label survives. Collapsing it into
+		// ErrTradingStateChanged surfaced spurious 409s on healthy open matches.
+		return err
+	}
+	if !valid || !isMatchTradable(verified) {
 		return ErrTradingStateChanged
 	}
 	marketVerifier, ok := s.markets.(ProviderMarketGateVerifier)
@@ -841,7 +901,10 @@ func (s *Service) verifyTradingGates(ctx context.Context, match *matches.Match, 
 		return ErrTradingStateChanged
 	}
 	verifiedMarket, valid, err := marketVerifier.VerifyProviderMarketGate(ctx, marketID, verified.StateVersion, verified.TradingVersion)
-	if err != nil || !valid || !s.markets.IsTradable(verifiedMarket) {
+	if err != nil {
+		return err
+	}
+	if !valid || !s.markets.IsTradable(verifiedMarket) {
 		return ErrTradingStateChanged
 	}
 	if err := validateMarketContract(verified.ID.Hex(), verifiedMarket, verified); err != nil {
