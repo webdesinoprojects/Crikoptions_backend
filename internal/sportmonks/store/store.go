@@ -97,13 +97,7 @@ func (s *Store) EnsureIndexes(ctx context.Context) error {
 			{Keys: bson.D{{Key: "eligible", Value: 1}, {Key: "nextPollAt", Value: 1}, {Key: "startTime", Value: 1}}},
 			{Keys: bson.D{{Key: "leagueId", Value: 1}, {Key: "startTime", Value: 1}}},
 		}},
-		{s.payloads, []mongo.IndexModel{
-			{Keys: bson.D{{Key: "expiresAt", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(0)},
-			{
-				Keys:    bson.D{{Key: "fixtureId", Value: 1}, {Key: "mode", Value: 1}},
-				Options: options.Index().SetUnique(true),
-			},
-		}},
+		{s.payloads, []mongo.IndexModel{{Keys: bson.D{{Key: "expiresAt", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(0)}}},
 		{s.settlements, []mongo.IndexModel{{Keys: bson.D{{Key: "status", Value: 1}, {Key: "nextAttemptAt", Value: 1}, {Key: "leaseUntil", Value: 1}, {Key: "createdAt", Value: 1}}}}},
 		{s.gateJobs, []mongo.IndexModel{{Keys: bson.D{{Key: "status", Value: 1}, {Key: "nextAttemptAt", Value: 1}, {Key: "leaseUntil", Value: 1}, {Key: "createdAt", Value: 1}}}}},
 		{s.reports, []mongo.IndexModel{{Keys: bson.D{{Key: "fixtureId", Value: 1}, {Key: "receivedAt", Value: -1}}}}},
@@ -1210,9 +1204,10 @@ func (s *Store) SavePayload(ctx context.Context, fixtureID int64, mode string, r
 		}
 	}
 	_, err := s.payloads.UpdateOne(ctx,
-		bson.M{"fixtureId": fixtureID, "mode": mode},
+		bson.M{"_id": fmt.Sprintf("%d:%s", fixtureID, mode)},
 		bson.M{"$set": bson.M{
-			"valid": valid, "error": message, "raw": append(json.RawMessage(nil), raw...),
+			"fixtureId": fixtureID, "mode": mode, "valid": valid, "error": message,
+			"raw":        append(json.RawMessage(nil), raw...),
 			"receivedAt": receivedAt.UTC(), "expiresAt": receivedAt.UTC().Add(ttl),
 		}},
 		options.Update().SetUpsert(true),
