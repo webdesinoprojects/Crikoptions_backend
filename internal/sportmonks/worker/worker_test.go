@@ -19,11 +19,16 @@ func TestAdaptivePollingIsOptInAndBounded(t *testing.T) {
 	tests := []struct {
 		active int
 		want   time.Duration
-	}{{1, 5 * time.Second}, {2, 5 * time.Second}, {3, 10 * time.Second}, {4, 10 * time.Second}, {5, 15 * time.Second}, {8, 15 * time.Second}}
+	}{{1, 5 * time.Second}, {2, 5 * time.Second}, {3, 5 * time.Second}, {4, 5 * time.Second}, {5, 15 * time.Second}, {8, 15 * time.Second}}
 	for _, test := range tests {
 		if got := adaptivePollInterval(test.active, cfg); got != test.want {
 			t.Fatalf("active=%d interval=%s want=%s", test.active, got, test.want)
 		}
+	}
+	cfg.FastPollingEnabled = false
+	cfg.Mode = client.ModeLive
+	if got := adaptivePollInterval(1, cfg); got != 5*time.Second {
+		t.Fatalf("live mode must fast-poll even when flag is off, got %s", got)
 	}
 }
 

@@ -117,23 +117,20 @@ func testProjection(status, hash string) reconcile.Projection {
 	}
 }
 
-func TestProjectMatchRequiresTwoHealthySnapshots(t *testing.T) {
+func TestProjectMatchOpensOnFirstLiveSnapshot(t *testing.T) {
 	now := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
 	current := initialMatch(testProjection(matches.StatusLive, "one"), now)
 	first := projectMatch(current, testProjection(matches.StatusLive, "one"), now, time.Minute, 2*time.Minute, 50*time.Second, 1)
-	if first.FeedState != matches.FeedStateWarming || first.TradingState != "blocked" {
-		t.Fatalf("first snapshot state=%s/%s", first.FeedState, first.TradingState)
+	if first.FeedState != matches.FeedStateHealthy || first.TradingState != "open" || len(first.TradingBlockers) != 0 {
+		t.Fatalf("first live snapshot should open: state=%s/%s blockers=%v", first.FeedState, first.TradingState, first.TradingBlockers)
 	}
 	second := projectMatch(first, testProjection(matches.StatusLive, "two"), now.Add(5*time.Second), time.Minute, 2*time.Minute, 50*time.Second, 2)
-	if second.FeedState != matches.FeedStateHealthy || second.TradingState != "open" || len(second.TradingBlockers) != 0 {
+	if second.FeedState != matches.FeedStateHealthy || second.TradingState != "open" {
 		t.Fatalf("second snapshot=%+v", second)
-	}
-	if second.TradingVersion <= first.TradingVersion {
-		t.Fatalf("trading version did not advance: %d -> %d", first.TradingVersion, second.TradingVersion)
 	}
 }
 
-func TestProjectMatchWarmsEachNewInnings(t *testing.T) {
+func TestProjectMatchOpensImmediatelyOnNewInnings(t *testing.T) {
 	now := time.Now().UTC()
 	current := initialMatch(testProjection(matches.StatusLive, "innings-one"), now)
 	current.Status = matches.StatusInningsBreak
@@ -147,8 +144,11 @@ func TestProjectMatchWarmsEachNewInnings(t *testing.T) {
 		Number: 2, BattingTeamID: projection.VisitorTeamID, Runs: 0, ScheduledBalls: 120,
 	}}
 	next := projectMatch(current, projection, now.Add(time.Minute), time.Minute, 2*time.Minute, 50*time.Second, 9)
-	if next.HealthySnapshotCount != 1 || next.FeedState != matches.FeedStateWarming || next.TradingState != "blocked" {
-		t.Fatalf("new innings did not warm safely: %+v", next)
+	if next.HealthySnapshotCount != 1 || next.FeedState != matches.FeedStateHealthy || next.TradingState != "open" {
+		t.Fatalf("new live innings should open immediately: %+v", next)
+	}
+	if containsValue(next.TradingBlockers, "warming") || containsValue(next.TradingBlockers, "innings_break") {
+		t.Fatalf("stale blockers should clear on new live innings: %v", next.TradingBlockers)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestStructurallyCompleteLiveInningsBlocksImmediately(t *testing.T) {
 	}
 }
 
-func TestDeliveryCorrectionRequiresTwoHealthyRecoveryPolls(t *testing.T) {
+func TestDeliveryCorrectionRecoversOnNextLivePoll(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	projection := testProjection(matches.StatusLive, "corrected")
 	current := initialMatch(projection, now.Add(-time.Second))
@@ -208,12 +208,8 @@ func TestDeliveryCorrectionRequiresTwoHealthyRecoveryPolls(t *testing.T) {
 	resetCorrectionRecovery(&current, 1, 0)
 
 	one := projectMatch(current, projection, now, time.Minute, 2*time.Minute, 50*time.Second, 2)
-	if one.FeedState != matches.FeedStateWarming || one.TradingState != "blocked" {
-		t.Fatalf("first corrected poll state=%s trading=%s", one.FeedState, one.TradingState)
-	}
-	two := projectMatch(one, projection, now.Add(time.Second), time.Minute, 2*time.Minute, 50*time.Second, 3)
-	if two.FeedState != matches.FeedStateHealthy || two.TradingState != "open" {
-		t.Fatalf("second corrected poll state=%s trading=%s", two.FeedState, two.TradingState)
+	if one.FeedState != matches.FeedStateHealthy || one.TradingState != "open" || one.HealthySnapshotCount != 1 {
+		t.Fatalf("corrected live poll should reopen immediately: state=%s trading=%s count=%d", one.FeedState, one.TradingState, one.HealthySnapshotCount)
 	}
 }
 
@@ -414,7 +410,7 @@ func TestAbandonmentPreservesFinalizedInningsMarket(t *testing.T) {
 	}
 }
 
-func TestProviderMarketStaysPendingUntilTwoHealthySnapshots(t *testing.T) {
+func TestProviderMarketOpensOnFirstHealthySnapshot(t *testing.T) {
 	ctx := context.Background()
 	marketService := markets.NewService(markets.NewMemoryRepository())
 	matchID := primitive.NewObjectID()
@@ -423,7 +419,7 @@ func TestProviderMarketStaysPendingUntilTwoHealthySnapshots(t *testing.T) {
 		ProviderBattingTeamID: 10, ProviderTeamAID: 10,
 		TeamAName: "Alpha", TeamBName: "Beta", Format: "T20", ScheduledBalls: 120,
 		StateVersion: 50, TradingVersion: 7, HealthySnapshotCount: 1,
-		FeedState: matches.FeedStateWarming, TradingBlockers: []string{"warming"},
+		FeedState: matches.FeedStateHealthy, TradingBlockers: []string{},
 	}
 	store := &Store{markets: marketService}
 	if err := store.projectMarkets(ctx, match, reconcile.Projection{}); err != nil {
@@ -433,12 +429,12 @@ func TestProviderMarketStaysPendingUntilTwoHealthySnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(marketList) != 1 || marketList[0].Lifecycle != markets.MarketLifecyclePending {
-		t.Fatalf("market before second healthy snapshot = %+v", marketList)
+	if len(marketList) != 1 || marketList[0].Lifecycle != markets.MarketLifecycleOpen {
+		t.Fatalf("market after first healthy snapshot = %+v", marketList)
 	}
 }
 
-func TestOpenedProviderMarketRemainsOpenButBlockedDuringRecovery(t *testing.T) {
+func TestOpenedProviderMarketStaysTradableDuringSoftSync(t *testing.T) {
 	ctx := context.Background()
 	marketService := markets.NewService(markets.NewMemoryRepository())
 	matchID := primitive.NewObjectID()
@@ -460,15 +456,18 @@ func TestOpenedProviderMarketRemainsOpenButBlockedDuringRecovery(t *testing.T) {
 	match.FeedState = matches.FeedStateWarming
 	match.TradingBlockers = []string{"warming"}
 	if err := store.projectMarkets(ctx, match, reconcile.Projection{}); err != nil {
-		t.Fatalf("block opened market during recovery: %v", err)
+		t.Fatalf("soft sync market gate: %v", err)
 	}
 	marketList, err := marketService.ListMarketsByMatchID(ctx, matchID.Hex())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(marketList) != 1 || marketList[0].Lifecycle != markets.MarketLifecycleOpen ||
-		marketList[0].Status != markets.MarketStatusSuspended || !containsValue(marketList[0].Blockers, "warming") {
-		t.Fatalf("market during recovery = %+v", marketList)
+		marketList[0].Status != markets.MarketStatusActive || containsValue(marketList[0].Blockers, "warming") {
+		t.Fatalf("market during soft sync must stay tradable = %+v", marketList)
+	}
+	if !marketService.IsTradable(&marketList[0]) {
+		t.Fatal("IsTradable should allow soft-sync markets")
 	}
 
 	match.StateVersion++

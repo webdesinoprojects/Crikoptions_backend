@@ -39,6 +39,7 @@ func TestProviderMarketTradabilityFailsClosed(t *testing.T) {
 		{name: "active legacy", market: &Market{Status: MarketStatusActive}, want: true},
 		{name: "provider missing lifecycle", market: &Market{Kind: MarketKindInningsScore, Status: MarketStatusActive}, want: false},
 		{name: "provider open", market: &Market{Kind: MarketKindInningsScore, Lifecycle: MarketLifecycleOpen, Status: MarketStatusActive}, want: true},
+		{name: "provider soft sync blocker", market: &Market{Kind: MarketKindInningsScore, Lifecycle: MarketLifecycleOpen, Status: MarketStatusActive, Blockers: []string{"reconciling"}}, want: true},
 		{name: "provider blocker", market: &Market{Kind: MarketKindInningsScore, Lifecycle: MarketLifecycleOpen, Status: MarketStatusActive, Blockers: []string{"feed_stale"}}, want: false},
 		{name: "provider compatibility suspended", market: &Market{Kind: MarketKindInningsScore, Lifecycle: MarketLifecycleOpen, Status: MarketStatusSuspended}, want: false},
 	}

@@ -69,7 +69,10 @@ func applyFeedHealth(match *matches.Match, projection reconcile.Projection) {
 	if match.FeedState == matches.FeedStateTerminal {
 		return
 	}
-	if liveContextReady(projection.LiveContext) {
+	switch projection.Status {
+	case matches.StatusLive:
+		// Successful live scoreboard polls keep trading open even when on-field
+		// batting/bowling names are incomplete (UI can still show "waiting").
 		match.FeedState = matches.FeedStateHealthy
 		match.TradingBlockers = providerBlockers(match.TradingBlockers)
 		if len(match.TradingBlockers) == 0 {
@@ -78,9 +81,6 @@ func applyFeedHealth(match *matches.Match, projection reconcile.Projection) {
 			match.TradingState = "blocked"
 		}
 		return
-	}
-	// Match/innings ended at provider — leave reconciling for a finished fixture with no batters.
-	switch projection.Status {
 	case matches.StatusCompleted, matches.StatusAbandoned:
 		if reconcile.IsExplicitTerminalProviderStatus(projection.ProviderStatus) {
 			applyTerminalMatchState(match, projection.ProviderStatus)
@@ -93,6 +93,17 @@ func applyFeedHealth(match *matches.Match, projection reconcile.Projection) {
 		match.FeedState = matches.FeedStateHealthy
 		match.TradingState = "blocked"
 		match.TradingBlockers = providerBlockers(match.TradingBlockers, "innings_break")
+	default:
+		// Overlay polls may omit Status while still carrying a full on-field matrix.
+		if liveContextReady(projection.LiveContext) {
+			match.FeedState = matches.FeedStateHealthy
+			match.TradingBlockers = providerBlockers(match.TradingBlockers)
+			if len(match.TradingBlockers) == 0 {
+				match.TradingState = "open"
+			} else {
+				match.TradingState = "blocked"
+			}
+		}
 	}
 }
 
@@ -127,49 +138,20 @@ func (s *Store) applyReconcilingPoll(
 	if err := s.resetPendingFinalization(ctx, &current, receivedAt); err != nil {
 		return matches.Match{}, err
 	}
+	previousTradingState := current.TradingState
 	previousTradingVersion := current.TradingVersion
-	previousFeedState := current.FeedState
+	previousBlockers := append([]string(nil), current.TradingBlockers...)
 	current.ProviderReconcilePolls++
 	current.StateVersion++
-	if previousFeedState != matches.FeedStateReconciling || current.TradingState == "open" {
-		current.TradingVersion++
-	}
 
 	applyProjectionOverlay(&current, projection, receivedAt, cfg.FeedValidity)
-	if current.FeedState == matches.FeedStateTerminal {
-		// Terminal provider phase applied during overlay.
-	} else if liveContextReady(projection.LiveContext) {
-		current.FeedState = matches.FeedStateHealthy
-		current.TradingBlockers = providerBlockers(current.TradingBlockers)
-		if len(current.TradingBlockers) == 0 {
-			current.TradingState = "open"
-		} else {
-			current.TradingState = "blocked"
-		}
-	} else if projection.Status == matches.StatusCompleted || projection.Status == matches.StatusAbandoned {
-		current.FeedState = matches.FeedStateFinalizing
-		current.TradingState = "closed"
-		current.TradingBlockers = providerBlockers(current.TradingBlockers, "finalizing")
-	} else if projection.Status == matches.StatusInningsBreak {
-		current.FeedState = matches.FeedStateHealthy
-		current.TradingState = "blocked"
-		current.TradingBlockers = providerBlockers(current.TradingBlockers, "innings_break")
-	} else {
-		current.FeedState = matches.FeedStateReconciling
-		current.HealthySnapshotCount = 0
-		current.TradingState = "blocked"
-		current.TradingBlockers = providerBlockers(current.TradingBlockers, "reconciling")
-	}
-	needsCancellation := current.TradingVersion != previousTradingVersion
-	if needsCancellation {
-		current.TradingBlockers = appendUnique(current.TradingBlockers, "cancellation_pending")
-	}
+	needsCancellation := decideReconcilingTradingGate(&current, projection, previousTradingState, previousTradingVersion, previousBlockers)
 	current.UpdatedAt = receivedAt
 
 	log.Printf(
-		"sportmonks fixture %d match %s: reconciling poll %d reason=%s feed=%s liveContext=%t",
+		"sportmonks fixture %d match %s: reconciling poll %d reason=%s feed=%s trading=%s blockers=%v cancel=%t",
 		projection.FixtureID, current.ID.Hex(), current.ProviderReconcilePolls, reason,
-		current.FeedState, liveContextReady(projection.LiveContext),
+		current.FeedState, current.TradingState, current.TradingBlockers, needsCancellation,
 	)
 
 	result, err := s.matches.ReplaceOne(ctx, bson.M{"_id": current.ID, "stateVersion": current.StateVersion - 1}, current)
@@ -204,6 +186,147 @@ func (s *Store) applyReconcilingPoll(
 		return matches.Match{}, err
 	}
 	return current, nil
+}
+
+// decideReconcilingTradingGate updates feed/trading during a soft reconcile poll.
+// Live scoreboard polls keep buy/sell open; only a real gate change (open → blocked)
+// bumps tradingVersion and schedules order cancellation.
+func decideReconcilingTradingGate(
+	match *matches.Match,
+	projection reconcile.Projection,
+	previousTradingState string,
+	previousTradingVersion int64,
+	previousBlockers []string,
+) bool {
+	if match == nil {
+		return false
+	}
+	if match.FeedState == matches.FeedStateTerminal {
+		return false
+	}
+	switch projection.Status {
+	case matches.StatusLive:
+		match.FeedState = matches.FeedStateHealthy
+		match.TradingBlockers = providerBlockers(match.TradingBlockers)
+		match.TradingBlockers = removeValue(match.TradingBlockers, "cancellation_pending")
+		if !matches.HasHardTradingBlockers(match.TradingBlockers) {
+			match.TradingState = "open"
+			match.TradingBlockers = matches.HardTradingBlockers(match.TradingBlockers)
+		} else {
+			match.TradingState = "blocked"
+		}
+	case matches.StatusCompleted, matches.StatusAbandoned:
+		match.FeedState = matches.FeedStateFinalizing
+		match.TradingState = "closed"
+		match.TradingBlockers = providerBlockers(match.TradingBlockers, "finalizing")
+	case matches.StatusInningsBreak:
+		match.FeedState = matches.FeedStateHealthy
+		match.TradingState = "blocked"
+		match.TradingBlockers = providerBlockers(match.TradingBlockers, "innings_break")
+	default:
+		// Incomplete projection during soft sync: keep buy/sell open if the match
+		// is already live. Only mark feed as reconciling for the SYNC badge.
+		if strings.EqualFold(strings.TrimSpace(match.Status), matches.StatusLive) ||
+			strings.EqualFold(strings.TrimSpace(previousTradingState), "open") {
+			match.Status = matches.StatusLive
+			match.FeedState = matches.FeedStateReconciling
+			match.TradingBlockers = matches.HardTradingBlockers(providerBlockers(match.TradingBlockers))
+			match.TradingBlockers = removeValue(match.TradingBlockers, "cancellation_pending")
+			if len(match.TradingBlockers) == 0 {
+				match.TradingState = "open"
+			} else {
+				match.TradingState = "blocked"
+			}
+		} else {
+			match.FeedState = matches.FeedStateReconciling
+			match.HealthySnapshotCount = 0
+			match.TradingState = "blocked"
+			match.TradingBlockers = providerBlockers(match.TradingBlockers, "reconciling")
+		}
+	}
+
+	wasTradable := strings.EqualFold(strings.TrimSpace(previousTradingState), "open") &&
+		!matches.HasHardTradingBlockers(previousBlockers) &&
+		!containsValue(previousBlockers, "cancellation_pending")
+	nowTradable := strings.EqualFold(strings.TrimSpace(match.TradingState), "open") &&
+		!matches.HasHardTradingBlockers(match.TradingBlockers)
+	if nowTradable {
+		// Soft sync while live: keep the same trading fence so buy/sell stay available.
+		match.TradingVersion = previousTradingVersion
+		return false
+	}
+	gateChanged := match.TradingState != previousTradingState ||
+		!sameStrings(providerBlockers(match.TradingBlockers), providerBlockers(previousBlockers)) ||
+		containsValue(previousBlockers, "cancellation_pending") != containsValue(match.TradingBlockers, "cancellation_pending")
+	if gateChanged && match.TradingVersion == previousTradingVersion {
+		match.TradingVersion++
+	}
+	if wasTradable && !nowTradable {
+		match.TradingBlockers = appendUnique(match.TradingBlockers, "cancellation_pending")
+		if match.TradingVersion == previousTradingVersion {
+			match.TradingVersion++
+		}
+		return true
+	}
+	return false
+}
+
+// HealFalselyStaleLiveMatches reopens live matches stuck in feed_stale / warming
+// while polls are still fresh, so the UI does not linger on SYNCING.
+func (s *Store) HealFalselyStaleLiveMatches(ctx context.Context, now time.Time, freshWithin time.Duration) (int, error) {
+	if freshWithin <= 0 {
+		freshWithin = 2 * time.Minute
+	}
+	now = now.UTC()
+	cutoff := now.Add(-freshWithin)
+	cursor, err := s.matches.Find(ctx, bson.M{
+		"provider": ProviderName,
+		"status":   matches.StatusLive,
+		"$or": bson.A{
+			bson.M{"feedState": matches.FeedStateStale},
+			bson.M{"feedState": matches.FeedStateWarming},
+			bson.M{"feedState": matches.FeedStateReconciling},
+			bson.M{"tradingBlockers": "feed_stale"},
+			bson.M{"tradingBlockers": "warming"},
+			bson.M{"tradingBlockers": "reconciling"},
+		},
+		"lastSuccessfulPollAt": bson.M{"$gt": cutoff},
+	})
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+	var rows []matches.Match
+	if err := cursor.All(ctx, &rows); err != nil {
+		return 0, err
+	}
+	healed := 0
+	for _, match := range rows {
+		previousVersion := match.StateVersion
+		match.StateVersion++
+		match.TradingVersion++
+		match.FeedState = matches.FeedStateHealthy
+		if match.HealthySnapshotCount < 1 {
+			match.HealthySnapshotCount = 1
+		}
+		match.TradingState = "open"
+		match.TradingBlockers = providerBlockers(match.TradingBlockers)
+		match.FeedValidUntil = timePointer(now.Add(freshWithin))
+		match.UpdatedAt = now
+		result, err := s.matches.ReplaceOne(ctx, bson.M{"_id": match.ID, "stateVersion": previousVersion}, match)
+		if err != nil {
+			return healed, err
+		}
+		if result.ModifiedCount != 1 {
+			continue
+		}
+		if err := s.projectMarkets(ctx, match, reconcile.Projection{CurrentInnings: match.Innings}); err != nil {
+			return healed, err
+		}
+		_ = s.insertMatchOutbox(ctx, match, "match.feed_state", now)
+		healed++
+	}
+	return healed, nil
 }
 
 // EnsureAdmittedFixturesPollable marks every admitted non-terminal Sportmonks match

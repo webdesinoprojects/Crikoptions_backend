@@ -328,11 +328,6 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		}
 	}
 
-	marketIDs := make([]string, 0, len(bucketKeys))
-	for _, key := range bucketKeys {
-		marketIDs = append(marketIDs, key.marketID)
-	}
-	prices := s.marketPrices(ctx, marketIDs)
 	out := make([]Position, 0, len(allBuckets))
 	for i, b := range allBuckets {
 		k := bucketKeys[i]
@@ -345,17 +340,7 @@ func (s *Service) aggregate(ctx context.Context, fills []executions.Execution) [
 		p.CreatedAt = b.firstSeen
 		p.UpdatedAt = b.lastUpdated
 
-		ltp := 0.0
-		if price, ok := prices[k.marketID]; ok {
-			ltp = price.LTP
-			for _, sp := range price.OptionChain {
-				if math.Abs(sp.Strike-k.strike) < 0.01 {
-					ltp = sp.Premium
-					break
-				}
-			}
-		}
-		p.LTP = ltp
+		p.LTP = s.strikeMarkPrice(ctx, k.marketID, k.strike, p.Lots)
 		p.PnL = computePnL(p, b.matchedQty())
 		p.RealizedPnL = computeRealized(b)
 		out = append(out, p)
@@ -397,28 +382,143 @@ func (s *Service) positionsFromProjectionFilter(ctx context.Context, filter Proj
 	return s.positionsFromProjections(ctx, projections)
 }
 
-func (s *Service) positionsFromProjections(ctx context.Context, projections []PositionProjection) ([]Position, error) {
-	marketIDs := make([]string, 0, len(projections))
-	for _, projection := range projections {
-		marketIDs = append(marketIDs, projection.MarketID)
-	}
-	prices := s.marketPrices(ctx, marketIDs)
+type markPriceCache struct {
+	markets map[string]*markets.Market
+	matches map[string]*matches.Match
+	marks   map[string]float64
+}
 
+func newMarkPriceCache() *markPriceCache {
+	return &markPriceCache{
+		markets: make(map[string]*markets.Market),
+		matches: make(map[string]*matches.Match),
+		marks:   make(map[string]float64),
+	}
+}
+
+func markCacheKey(marketID string, strike float64, lots int) string {
+	dir := 0
+	if lots > 0 {
+		dir = 1
+	} else if lots < 0 {
+		dir = -1
+	}
+	return fmt.Sprintf("%s|%.4f|%d", marketID, strike, dir)
+}
+
+func (s *Service) positionsFromProjections(ctx context.Context, projections []PositionProjection) ([]Position, error) {
+	cache := newMarkPriceCache()
 	positions := make([]Position, 0, len(projections))
 	for _, projection := range projections {
 		ltp := 0.0
-		if price, ok := prices[projection.MarketID]; ok {
-			ltp = price.LTP
-			for _, sp := range price.OptionChain {
-				if math.Abs(sp.Strike-projection.Strike) < 0.01 {
-					ltp = sp.Premium
-					break
-				}
-			}
+		// Closed rows already carry realized PnL — skip live quoting.
+		if strings.EqualFold(strings.TrimSpace(projection.Status), "open") && projection.Lots != 0 {
+			ltp = s.strikeMarkPriceCached(ctx, cache, projection.MarketID, projection.Strike, projection.Lots)
 		}
 		positions = append(positions, projection.ToPosition(ltp))
 	}
 	return positions, nil
+}
+
+// strikeMarkPrice returns the live exit mark for a strike: bid for longs, ask for
+// shorts, mid otherwise. Never falls back to the chain-wide average LTP — that
+// inflated Today's P&L by hundreds/thousands vs the order ticket quote.
+func (s *Service) strikeMarkPrice(ctx context.Context, marketID string, strike float64, lots int) float64 {
+	return s.strikeMarkPriceCached(ctx, newMarkPriceCache(), marketID, strike, lots)
+}
+
+func (s *Service) strikeMarkPriceCached(ctx context.Context, cache *markPriceCache, marketID string, strike float64, lots int) float64 {
+	if s.markets == nil || strings.TrimSpace(marketID) == "" || strike <= 0 {
+		return 0
+	}
+	if cache == nil {
+		cache = newMarkPriceCache()
+	}
+	key := markCacheKey(marketID, strike, lots)
+	if cached, ok := cache.marks[key]; ok {
+		return cached
+	}
+
+	market, ok := cache.markets[marketID]
+	if !ok {
+		var err error
+		market, err = s.markets.GetMarketByID(ctx, marketID)
+		if err != nil || market == nil {
+			cache.marks[key] = 0
+			return 0
+		}
+		cache.markets[marketID] = market
+	}
+
+	var input markets.PriceCalculationInput
+	if s.matches != nil && market.MatchID != "" {
+		if match, hit := cache.matches[market.MatchID]; hit {
+			input = markets.PricingInputFromMatch(*match)
+		} else if match, matchErr := s.matches.GetMatchByID(ctx, market.MatchID); matchErr == nil && match != nil {
+			cache.matches[market.MatchID] = match
+			input = markets.PricingInputFromMatch(*match)
+		}
+	}
+
+	mark := 0.0
+	if quoter, ok := s.strikeQuoter(); ok {
+		bid, ask, quoted := quoter.StrikeQuote(input, strike)
+		if quoted {
+			switch {
+			case lots > 0 && bid > 0:
+				mark = bid
+			case lots < 0 && ask > 0:
+				mark = ask
+			case bid > 0 && ask > 0:
+				mark = round2((bid + ask) / 2)
+			case bid > 0:
+				mark = bid
+			case ask > 0:
+				mark = ask
+			}
+		}
+	}
+
+	if mark <= 0 {
+		pricer := s.pricer
+		if pricer == nil {
+			if p, ok := s.markets.(MarketPricer); ok {
+				pricer = p
+			}
+		}
+		if pricer != nil && input.MatchID != "" {
+			if res, calcErr := pricer.CalculatePrice(input); calcErr == nil {
+				for _, sp := range res.OptionChain {
+					if math.Abs(sp.Strike-strike) < 0.01 && sp.Premium > 0 {
+						mark = round2(sp.Premium)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Last resort: stored market LTP only if it looks like a premium, not a
+	// projected total score / aggregate.
+	if mark <= 0 && market.LTP > 0 && market.LTP < 1000 {
+		mark = round2(market.LTP)
+	}
+	cache.marks[key] = mark
+	return mark
+}
+
+type strikeQuoter interface {
+	StrikeQuote(input markets.PriceCalculationInput, strike float64) (bid, ask float64, ok bool)
+}
+
+func (s *Service) strikeQuoter() (strikeQuoter, bool) {
+	if q, ok := s.pricer.(strikeQuoter); ok {
+		return q, true
+	}
+	if q, ok := s.markets.(strikeQuoter); ok {
+		return q, true
+	}
+	return nil, false
 }
 
 func (s *Service) marketPrices(ctx context.Context, ids []string) map[string]*markets.PriceResponse {
@@ -442,32 +542,24 @@ func (s *Service) marketPrices(ctx context.Context, ids []string) map[string]*ma
 
 	for _, marketID := range marketIDs {
 		market, err := s.markets.GetMarketByID(ctx, marketID)
-		if err == nil && market != nil {
-			price := &markets.PriceResponse{
-				LTP: market.LTP,
+		if err != nil || market == nil {
+			continue
+		}
+		price := &markets.PriceResponse{LTP: market.LTP}
+		pricer := s.pricer
+		if pricer == nil {
+			if p, ok := s.markets.(MarketPricer); ok {
+				pricer = p
 			}
-
-			// Attempt to dynamically calculate live LTP based on the current match score
-			if s.matches != nil {
-				if match, err := s.matches.GetMatchByID(ctx, market.MatchID); err == nil && match != nil {
-					if pricer, ok := s.markets.(MarketPricer); ok {
-						if res, err := pricer.CalculatePrice(markets.PriceCalculationInput{
-							MatchID:      market.MatchID,
-							Format:       match.Format,
-							Innings:      match.Innings,
-							CurrentScore: match.CurrentScore,
-							WicketsLost:  match.WicketsLost,
-							BallsLeft:    match.BallsLeft,
-							BallsBowled:  matches.TotalBallsForFormat(match.Format) - match.BallsLeft,
-							TargetScore:  match.TargetScore,
-						}); err == nil {
-							price = &res
-						}
-					}
+		}
+		if pricer != nil && s.matches != nil {
+			if match, matchErr := s.matches.GetMatchByID(ctx, market.MatchID); matchErr == nil && match != nil {
+				if res, calcErr := pricer.CalculatePrice(markets.PricingInputFromMatch(*match)); calcErr == nil {
+					price = &res
 				}
 			}
-			prices[marketID] = price
 		}
+		prices[marketID] = price
 	}
 	return prices
 }
@@ -539,6 +631,11 @@ func computeRealized(b *aggregateBucket) float64 {
 	}
 	avgBuy := b.buyNotional / float64(b.buyQty)
 	avgSell := b.sellNotional / float64(b.sellQty)
+	// Zero-basis fills would treat the whole exit premium as profit and blow up
+	// Today's P&L (e.g. settlement payoff with a missing buy price).
+	if avgBuy <= 0 || avgSell < 0 {
+		return 0
+	}
 	return round2((avgSell - avgBuy) * float64(matched))
 }
 

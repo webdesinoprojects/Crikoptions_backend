@@ -56,6 +56,9 @@ type Match struct {
 	FeedState            string     `json:"feedState,omitempty" bson:"feedState,omitempty"`
 	TradingState         string     `json:"tradingState,omitempty" bson:"tradingState,omitempty"`
 	TradingBlockers      []string   `json:"tradingBlockers,omitempty" bson:"tradingBlockers,omitempty"`
+	// Tradable is computed for API/WS clients: true while buy/sell should work,
+	// including soft SYNC (reconciling/warming). Not persisted.
+	Tradable             bool       `json:"tradable" bson:"-"`
 	TradingGateCheckedAt *time.Time `json:"-" bson:"tradingGateCheckedAt,omitempty"`
 	GateCheckSeq         int64      `json:"-" bson:"gateCheckSeq,omitempty"`
 

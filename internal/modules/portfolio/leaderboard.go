@@ -70,7 +70,8 @@ func (s *Service) buildLeaderboardFromPositions(ctx context.Context, users []aut
 	for _, position := range allPositions {
 		switch strings.ToLower(strings.TrimSpace(position.Status)) {
 		case "open":
-			pnlByUser[position.UserID] = round2(pnlByUser[position.UserID] + position.PnL)
+			// Match GetSummary: unrealized open MTM + realized slice on the open row.
+			pnlByUser[position.UserID] = round2(pnlByUser[position.UserID] + position.PnL + position.RealizedPnL)
 		case "closed":
 			pnlByUser[position.UserID] = round2(pnlByUser[position.UserID] + realizedPnL(position))
 		}

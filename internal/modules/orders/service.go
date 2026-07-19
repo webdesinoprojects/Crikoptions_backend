@@ -583,7 +583,12 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		return nil, ErrMatchNotTradable
 	}
 	if isProviderMatch(match) && !providerRequestMatchesGate(req, match) {
-		return nil, ErrTradingStateChanged
+		// Sportmonks ticks bump stateVersion continuously between preview and
+		// submit. Rebind to the live gate for buys and sells while trading is
+		// still healthy+open — pricing already uses the live match snapshot.
+		req.ExpectedMatchStateVersion = match.StateVersion
+		req.ExpectedTradingVersion = match.TradingVersion
+		req.QuoteExpiresAt = time.Now().UTC().Add(5 * time.Second)
 	}
 
 	pricingInput := markets.PricingInputFromMatch(*match)
@@ -645,25 +650,84 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 	}
 
 	var created *Order
-	err = s.repo.DoTx(ctx, func(txCtx context.Context) error {
-		if err := s.verifyTradingGates(txCtx, match, market.ID.Hex(), match.StateVersion, match.TradingVersion); err != nil {
-			return err
-		}
-		var txErr error
-		created, txErr = s.repo.Create(txCtx, order)
-		if txErr != nil {
-			return txErr
+	const gateAttempts = 3
+	for attempt := 0; attempt < gateAttempts; attempt++ {
+		if attempt > 0 {
+			// Re-load live match/market after a Sportmonks tick raced the gate.
+			if refreshed, refreshErr := s.markets.GetMarketByID(ctx, req.MarketID); refreshErr == nil && refreshed != nil {
+				market = refreshed
+			}
+			if refreshed, refreshErr := s.matches.GetMatchByID(ctx, req.MatchID); refreshErr == nil && refreshed != nil {
+				match = refreshed
+			}
+			if !s.markets.IsTradable(market) || !isMatchTradable(match) {
+				return nil, ErrTradingStateChanged
+			}
+			if err := validateMarketContract(req.MatchID, market, match); err != nil {
+				return nil, err
+			}
+			req.ExpectedMatchStateVersion = match.StateVersion
+			req.ExpectedTradingVersion = match.TradingVersion
+			req.QuoteExpiresAt = time.Now().UTC().Add(5 * time.Second)
+			order.MatchStateVersion = match.StateVersion
+			order.TradingVersion = match.TradingVersion
+			order.QuoteExpiresAt = req.QuoteExpiresAt
+			// Re-price market orders against the live snapshot so fills stay consistent.
+			pricingInput = markets.PricingInputFromMatch(*match)
+			bid, ask, ok = s.markets.StrikeQuote(pricingInput, req.Strike)
+			if !ok {
+				return nil, ErrStrikeNotFound
+			}
+			if req.Type == OrderTypeMarket {
+				fillPrice, ok = matchMarketOrder(req.Side, bid, ask)
+				if !ok {
+					if req.Side == "sell" {
+						return nil, newAPIError(http.StatusBadRequest, "No bid available")
+					}
+					return nil, ErrNoLiquidity
+				}
+				orderPrice = fillPrice
+				order.Price = orderPrice
+				plan, err = buildPositionPlan(req.Side, req.Quantity, req.PositionEffect, position.NetLots, req.Strike, orderPrice)
+				if err != nil {
+					return nil, err
+				}
+				order.ReservedAmount = plan.ReservedAmount
+				order.ReservedQuantity = plan.ReservedQuantity
+				order.PositionEffect = plan.Effect
+				order.PositionIntent = plan.Intent
+			}
 		}
 
-		if plan.ReservedAmount > 0 {
-			fundsCtx := orderFundsOperationContext(txCtx, userID, created.ID, "reserve")
-			_, txErr = s.wallets.ReserveOrderMargin(fundsCtx, userID, plan.ReservedAmount, created.ID.Hex(), fmt.Sprintf("Reserve margin for order %s", created.ID.Hex()))
+		err = s.repo.DoTx(ctx, func(txCtx context.Context) error {
+			if err := s.verifyTradingGates(txCtx, match, market.ID.Hex(), match.StateVersion, match.TradingVersion); err != nil {
+				return err
+			}
+			var txErr error
+			created, txErr = s.repo.Create(txCtx, order)
 			if txErr != nil {
 				return txErr
 			}
+
+			if plan.ReservedAmount > 0 {
+				fundsCtx := orderFundsOperationContext(txCtx, userID, created.ID, "reserve")
+				_, txErr = s.wallets.ReserveOrderMargin(fundsCtx, userID, plan.ReservedAmount, created.ID.Hex(), fmt.Sprintf("Reserve margin for order %s", created.ID.Hex()))
+				if txErr != nil {
+					return txErr
+				}
+			}
+			return nil
+		})
+		if err == nil {
+			break
 		}
-		return nil
-	})
+		if errors.Is(err, wallet.ErrInsufficientFunds) {
+			return nil, ErrInsufficientBalance
+		}
+		if !errors.Is(err, ErrTradingStateChanged) || !isProviderMatch(match) || attempt == gateAttempts-1 {
+			return nil, err
+		}
+	}
 
 	if err != nil {
 		if errors.Is(err, wallet.ErrInsufficientFunds) {
@@ -677,7 +741,16 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		return created, nil
 	}
 
-	filled, err := s.applyFill(ctx, userID, created, fillPrice, created.RemainingQuantity)
+	var filled *Order
+	for attempt := 0; attempt < gateAttempts; attempt++ {
+		filled, err = s.applyFill(ctx, userID, created, fillPrice, created.RemainingQuantity)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrTradingStateChanged) || !isProviderMatch(match) || attempt == gateAttempts-1 {
+			break
+		}
+	}
 	if err != nil {
 		// Reservation and execution are separately fenced transactions. If the
 		// provider gate or position changes between them, leave no marketable
@@ -760,21 +833,15 @@ func (s *Service) verifyTradingGates(ctx context.Context, match *matches.Match, 
 		return ErrTradingStateChanged
 	}
 	verified, valid, err := verifier.VerifyTradingGate(ctx, match.ID.Hex(), stateVersion, tradingVersion)
-	if err != nil {
-		return err
-	}
-	if !valid || !isMatchTradable(verified) || verified.StateVersion != stateVersion || verified.TradingVersion != tradingVersion {
+	if err != nil || !valid || !isMatchTradable(verified) {
 		return ErrTradingStateChanged
 	}
 	marketVerifier, ok := s.markets.(ProviderMarketGateVerifier)
 	if !ok {
 		return ErrTradingStateChanged
 	}
-	verifiedMarket, valid, err := marketVerifier.VerifyProviderMarketGate(ctx, marketID, stateVersion, tradingVersion)
-	if err != nil {
-		return err
-	}
-	if !valid || !s.markets.IsTradable(verifiedMarket) || verifiedMarket.MatchStateVersion != stateVersion || verifiedMarket.TradingVersion != tradingVersion {
+	verifiedMarket, valid, err := marketVerifier.VerifyProviderMarketGate(ctx, marketID, verified.StateVersion, verified.TradingVersion)
+	if err != nil || !valid || !s.markets.IsTradable(verifiedMarket) {
 		return ErrTradingStateChanged
 	}
 	if err := validateMarketContract(verified.ID.Hex(), verifiedMarket, verified); err != nil {
@@ -807,10 +874,12 @@ func validateMarketContract(requestMatchID string, market *markets.Market, match
 	}
 	if providerMatch {
 		if market.Kind != markets.MarketKindInningsScore ||
-			market.FormulaVersion != markets.FormulaVersionInningsScoreV1 ||
-			market.Innings != match.Innings {
+			market.FormulaVersion != markets.FormulaVersionInningsScoreV1 {
 			return ErrMarketContractMismatch
 		}
+		// Market innings is the contract. Match.Innings can advance a tick before
+		// the prior innings market is closed — requiring equality caused intermittent
+		// TRADING_STATE_CHANGED on otherwise open markets.
 	} else if market.Innings > 0 && market.Innings != match.Innings {
 		return ErrMarketContractMismatch
 	}
@@ -901,7 +970,15 @@ func (s *Service) ClosePosition(ctx context.Context, userID primitive.ObjectID, 
 	if err := s.attachProviderFence(ctx, &request); err != nil {
 		return nil, err
 	}
-	return s.CreateOrder(ctx, userID, request)
+	order, err := s.CreateOrder(ctx, userID, request)
+	// Sportmonks can bump versions between fence attach and submit; one refresh is enough.
+	if errors.Is(err, ErrTradingStateChanged) {
+		if fenceErr := s.attachProviderFence(ctx, &request); fenceErr != nil {
+			return nil, fenceErr
+		}
+		order, err = s.CreateOrder(ctx, userID, request)
+	}
+	return order, err
 }
 
 // CloseAllPositions submits MARKET close orders for every open position
@@ -959,6 +1036,11 @@ func (s *Service) CloseAllPositions(ctx context.Context, userID primitive.Object
 			continue
 		}
 		order, err := s.CreateOrder(ctx, userID, request)
+		if errors.Is(err, ErrTradingStateChanged) {
+			if fenceErr := s.attachProviderFence(ctx, &request); fenceErr == nil {
+				order, err = s.CreateOrder(ctx, userID, request)
+			}
+		}
 		if err != nil {
 			result.Failed++
 			result.Failures = append(result.Failures, CloseAllPositionFailure{
@@ -1103,10 +1185,13 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 	err := s.repo.DoTx(ctx, func(txCtx context.Context) error {
 		if enforceTradingGate {
 			match, txErr := s.matches.GetMatchByID(txCtx, order.MatchID)
-			if txErr != nil || match == nil {
+			if txErr != nil || match == nil || !isMatchTradable(match) {
 				return ErrTradingStateChanged
 			}
-			if txErr := s.verifyTradingGates(txCtx, match, order.MarketID, order.MatchStateVersion, order.TradingVersion); txErr != nil {
+			// Use the live match gate versions. Ball-by-ball Sportmonks polls bump
+			// stateVersion continuously; requiring the create-time versions here
+			// makes market sells (especially exits) fail spuriously after a buy.
+			if txErr := s.verifyTradingGates(txCtx, match, order.MarketID, match.StateVersion, match.TradingVersion); txErr != nil {
 				return txErr
 			}
 		}
@@ -1322,21 +1407,7 @@ func isInternalClientOrderID(clientOrderID string) bool {
 }
 
 func isMatchTradable(match *matches.Match) bool {
-	if match == nil {
-		return false
-	}
-	if isProviderMatch(match) {
-		return strings.EqualFold(strings.TrimSpace(match.Status), matches.StatusLive) &&
-			strings.EqualFold(strings.TrimSpace(match.FeedState), matches.FeedStateHealthy) &&
-			strings.EqualFold(strings.TrimSpace(match.TradingState), markets.MarketLifecycleOpen) &&
-			len(match.TradingBlockers) == 0
-	}
-	switch strings.ToLower(strings.TrimSpace(match.Status)) {
-	case "live", "innings_break":
-		return true
-	default:
-		return false
-	}
+	return matches.IsTradable(match)
 }
 
 func matchLimitOrder(side string, limitPrice, bid, ask float64) (fillPrice float64, ok bool) {

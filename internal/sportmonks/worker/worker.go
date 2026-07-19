@@ -478,7 +478,7 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 		AllowMidMatchAdmission:  w.cfg.AllowMidMatchLiveAdmission,
 		InningsFinalizationHold: w.cfg.InningsFinalizationHold,
 		MatchFinalizationHold:   w.cfg.MatchFinalizationHold, RawPayloadTTL: w.cfg.RawPayloadTTL,
-		FeedValidity: maxDuration(w.cfg.StaleMinimum, 3*scheduledInterval+5*time.Second),
+		FeedValidity: feedValidityForInterval(w.cfg, scheduledInterval),
 	})
 	if err != nil {
 		w.handlePollFailure(ctx, target, token, scheduledInterval, err)
@@ -490,9 +490,10 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 			target.ID, result.FeedState, result.StateVersion, result.Reconciling,
 		)
 	}
-	if w.cfg.Mode == client.ModeLive && projection.Status == matches.StatusLive {
-		_ = w.store.MarkFeedFrozen(ctx, target.ID, receivedAt, receivedAt.Add(-w.cfg.ActiveFreezeTimeout))
-	}
+	// Do NOT MarkFeedFrozen after a successful poll. Quiet scoreboards (no runs
+	// for 90s) are normal in cricket; treating them as feed_stale blocked trading
+	// while polls were healthy. Real outages are handled by ExpireStaleFeeds /
+	// handlePollFailure when LastSuccessfulPollAt goes stale.
 	nextInterval := intervalForProjection(projection, result, activeInterval, w.cfg)
 	next := receivedAt.Add(w.jitter(nextInterval))
 	next = clampPreMatchPoll(projection, next)
@@ -544,11 +545,24 @@ func (w *Worker) handlePollFailure(ctx context.Context, target store.FixtureTarg
 				return
 			}
 		}
-		staleAfter := maxDuration(w.cfg.StaleMinimum, 3*scheduled+5*time.Second)
+		staleAfter := feedValidityForInterval(w.cfg, scheduled)
 		cutoff := now.Add(-staleAfter)
 		_ = w.store.MarkFeedUnavailable(ctx, target.ID, matches.FeedStateStale, "feed_stale", now, &cutoff)
 	}
 	_ = w.store.FailTargetPoll(ctx, target.ID, w.owner, token, cause, now, next)
+}
+
+// feedValidityForInterval is how long a successful poll keeps the feed fresh.
+// Sized to tolerate several missed polls plus one slow HTTP round-trip.
+func feedValidityForInterval(cfg client.Config, scheduled time.Duration) time.Duration {
+	if scheduled <= 0 {
+		scheduled = cfg.MaxPollInterval
+	}
+	httpBudget := cfg.HTTPTimeout
+	if httpBudget <= 0 {
+		httpBudget = 15 * time.Second
+	}
+	return maxDuration(cfg.StaleMinimum, 4*scheduled+httpBudget+10*time.Second)
 }
 
 func intervalForProviderStatus(status string, active time.Duration, cfg client.Config) time.Duration {
@@ -576,14 +590,16 @@ func (w *Worker) failureBackoff(target store.FixtureTarget, cause error) time.Du
 }
 
 func adaptivePollInterval(active int, cfg client.Config) time.Duration {
-	if !cfg.FastPollingEnabled {
+	// Live trading always prefers the minimum interval when few fixtures are active.
+	fast := cfg.FastPollingEnabled || cfg.Mode == client.ModeLive
+	if !fast {
 		return cfg.MaxPollInterval
 	}
 	switch {
 	case active <= 2:
 		return cfg.MinPollInterval
 	case active <= 4:
-		return maxDuration(cfg.MinPollInterval, 10*time.Second)
+		return maxDuration(cfg.MinPollInterval, 5*time.Second)
 	default:
 		return cfg.MaxPollInterval
 	}

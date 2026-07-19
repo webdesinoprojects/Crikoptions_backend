@@ -122,15 +122,18 @@ func (r *MemoryRepository) VerifyTradingGate(_ context.Context, id primitive.Obj
 		if match.ID != id {
 			continue
 		}
-		if match.DataSource != DataSourceSportmonks || match.StateVersion != stateVersion ||
-			match.TradingVersion != tradingVersion || match.TradingState != "open" ||
-			match.FeedState != FeedStateHealthy || len(match.TradingBlockers) != 0 ||
-			match.FeedValidUntil == nil || !match.FeedValidUntil.After(time.Now().UTC()) {
+		// Score ticks bump stateVersion continuously; gate on open + tradable feed.
+		// Soft sync (reconciling/warming) must not reject buys — that is the SYNC badge.
+		_ = stateVersion
+		_ = tradingVersion
+		if match.DataSource != DataSourceSportmonks || match.TradingState != "open" ||
+			!FeedAllowsTrading(match.FeedState) || HasHardTradingBlockers(match.TradingBlockers) {
 			return match, false, nil
 		}
 		now := time.Now().UTC()
 		match.TradingGateCheckedAt = &now
 		match.GateCheckSeq++
+		match.TradingBlockers = HardTradingBlockers(match.TradingBlockers)
 		return match, true, nil
 	}
 	return nil, false, nil
@@ -481,25 +484,45 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 // VerifyTradingGate performs a write against the authoritative match document.
 // When called with a mongo.SessionContext inside an order transaction, this
 // creates a document-level write conflict with concurrent feed suspension.
+//
+// stateVersion/tradingVersion are not required to match: Sportmonks score ticks
+// bump them continuously and must not fail buys/sells while trading stays open.
+// Soft sync feed states (reconciling/warming) are allowed so SYNC does not
+// block purchase.
 func (r *MongoRepository) VerifyTradingGate(ctx context.Context, id primitive.ObjectID, stateVersion, tradingVersion int64) (*Match, bool, error) {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
+	_ = stateVersion
+	_ = tradingVersion
 	now := time.Now().UTC()
+	softBlockers := make([]string, 0, len(SoftSyncTradingBlockers))
+	for blocker := range SoftSyncTradingBlockers {
+		softBlockers = append(softBlockers, blocker)
+	}
+	feedStates := make([]string, 0, len(SoftSyncFeedStates))
+	for state := range SoftSyncFeedStates {
+		feedStates = append(feedStates, state)
+	}
 	result := r.col.FindOneAndUpdate(
 		ctx,
 		bson.M{
-			"_id":             id,
-			"dataSource":      DataSourceSportmonks,
-			"stateVersion":    stateVersion,
-			"tradingVersion":  tradingVersion,
-			"tradingState":    "open",
-			"feedState":       FeedStateHealthy,
-			"feedValidUntil":  bson.M{"$gt": now},
-			"tradingBlockers": bson.M{"$size": 0},
+			"_id":          id,
+			"dataSource":   DataSourceSportmonks,
+			"tradingState": "open",
+			"feedState":    bson.M{"$in": feedStates},
+			// feedValidUntil intentionally omitted — poll gaps expire the timestamp
+			// before ExpireStaleFeeds flips feedState, which caused intermittent
+			// buy/sell failures while the match was still shown as tradable.
+			// Allow empty blockers or soft-sync-only blockers (reconciling/warming).
+			"$nor": bson.A{
+				bson.M{"tradingBlockers": bson.M{"$elemMatch": bson.M{"$nin": softBlockers}}},
+			},
 		},
 		bson.M{
-			"$set": bson.M{"tradingGateCheckedAt": now},
+			"$set": bson.M{
+				"tradingGateCheckedAt": now,
+			},
 			"$inc": bson.M{"gateCheckSeq": 1},
 		},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),

@@ -53,6 +53,16 @@ func main() {
 	}
 	defer func() { _ = mongo.Close(context.Background()) }()
 	log.Printf("MongoDB connected; no in-memory fallback enabled; using database %q", cfg.MongoDB)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if deleted, err := database.PurgeEphemeralStorage(cleanupCtx, mongo.DB); err != nil {
+		log.Printf("mongo ephemeral purge: %v", err)
+	} else if deleted > 0 {
+		log.Printf("mongo ephemeral purge freed %d documents (users/wallets/orders/matches/trades untouched)", deleted)
+	}
+	if err := database.EnsureEphemeralTTLs(cleanupCtx, mongo.DB); err != nil {
+		log.Printf("mongo ephemeral TTL ensure: %v", err)
+	}
+	cleanupCancel()
 	checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = mongo.RequireTransactions(checkCtx)
 	cancel()
@@ -143,6 +153,11 @@ func main() {
 		} else if n > 0 {
 			log.Printf("sportmonks repaired %d unsupported upcoming matches on startup", n)
 		}
+		if n, err := feedStore.HealFalselyStaleLiveMatches(context.Background(), time.Now().UTC(), 2*time.Minute); err != nil {
+			log.Printf("sportmonks heal stale live matches: %v", err)
+		} else if n > 0 {
+			log.Printf("sportmonks healed %d falsely stale live matches on startup", n)
+		}
 		go watchdog.Run(providerCtx, feedStore, 5*time.Second)
 		provider, providerErr := sportmonksclient.New(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
 		if providerErr != nil {
@@ -156,6 +171,24 @@ func main() {
 			log.Printf("Sportmonks feed worker started mode=%s fastPolling=%t", providerConfig.Mode, providerConfig.FastPollingEnabled)
 			if runErr := feedWorker.Run(providerCtx); runErr != nil && providerCtx.Err() == nil {
 				log.Printf("Sportmonks feed worker stopped: %v", runErr)
+			}
+		}()
+		go func() {
+			ticker := time.NewTicker(10 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-providerCtx.Done():
+					return
+				case <-ticker.C:
+					purgeCtx, cancel := context.WithTimeout(providerCtx, 2*time.Minute)
+					if n, err := database.PurgeEphemeralStorage(purgeCtx, mongo.DB); err != nil {
+						log.Printf("mongo periodic ephemeral purge: %v", err)
+					} else if n > 0 {
+						log.Printf("mongo periodic ephemeral purge removed %d docs", n)
+					}
+					cancel()
+				}
 			}
 		}()
 	}
@@ -316,6 +349,11 @@ func parseAdminEmails(s string) []string {
 
 func mustEnsureIndexes(ctx context.Context, collection string, ensure func(context.Context) error) {
 	if err := ensure(ctx); err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "space quota") || strings.Contains(msg, "storage quota") {
+			log.Printf("MongoDB index setup %s skipped (Atlas space quota): %v", collection, err)
+			return
+		}
 		log.Fatalf("MongoDB index setup %s: %v", collection, err)
 	}
 }

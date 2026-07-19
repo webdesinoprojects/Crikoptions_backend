@@ -28,6 +28,16 @@ func (h *Handler) GetHomeMatches(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) GetUpcomingMatches(w http.ResponseWriter, r *http.Request) {
+	matches := h.service.GetUpcomingMatches(r.Context())
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Upcoming matches fetched successfully",
+		"data":    matches,
+	})
+}
+
 func (h *Handler) GetMatchDetail(w http.ResponseWriter, r *http.Request) {
 	match, err := h.service.GetMatchByID(r.Context(), r.PathValue("id"))
 	if err != nil || match == nil {

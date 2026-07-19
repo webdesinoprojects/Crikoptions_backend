@@ -22,6 +22,48 @@ func TestOutboxPayloadAddsMonotonicEnvelope(t *testing.T) {
 	}
 }
 
+func TestPaceBallUpdateOnlyBetweenDifferentBalls(t *testing.T) {
+	ctx := context.Background()
+	var lastMatch, lastBall string
+	var lastAt time.Time
+
+	first := outboxDocument{
+		Type: "match.delivery", MatchID: "m1", EventID: "d1",
+		Payload: map[string]any{"eventId": "ball-1"},
+	}
+	start := time.Now()
+	if !paceBallUpdate(ctx, first, &lastMatch, &lastBall, &lastAt) {
+		t.Fatal("first ball blocked")
+	}
+	if time.Since(start) >= ballUpdatePace/2 {
+		t.Fatal("first ball should not wait")
+	}
+
+	sameBallScore := outboxDocument{
+		Type: "match.state", MatchID: "m1",
+		EventID: "sportmonks:1:2:3:match.ball:ball-1",
+	}
+	start = time.Now()
+	if !paceBallUpdate(ctx, sameBallScore, &lastMatch, &lastBall, &lastAt) {
+		t.Fatal("same-ball score blocked")
+	}
+	if time.Since(start) >= ballUpdatePace/2 {
+		t.Fatal("same ball score tick should not wait")
+	}
+
+	nextBall := outboxDocument{
+		Type: "match.delivery", MatchID: "m1", EventID: "d2",
+		Payload: map[string]any{"eventId": "ball-2"},
+	}
+	start = time.Now()
+	if !paceBallUpdate(ctx, nextBall, &lastMatch, &lastBall, &lastAt) {
+		t.Fatal("next ball blocked")
+	}
+	if time.Since(start) < ballUpdatePace/2 {
+		t.Fatal("next ball should pace after previous ball")
+	}
+}
+
 func TestOutboxWatcherReadinessTracksConnection(t *testing.T) {
 	watcher := &OutboxWatcher{}
 	if err := watcher.Ready(context.Background()); err == nil {

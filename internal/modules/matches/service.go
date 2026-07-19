@@ -103,6 +103,7 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 		}
 		all[i].Status = NormalizeStatus(all[i].Status)
 		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)
+		AnnotateTradable(&all[i])
 		switch all[i].Status {
 		case StatusLive, StatusInningsBreak:
 			live = append(live, all[i])
@@ -113,6 +114,29 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	// Prefer live fixtures; when nothing is in play, surface upcoming Sportmonks matches.
 	if len(live) > 0 {
 		return SortHomeMatches(live)
+	}
+	return SortHomeMatches(upcoming)
+}
+
+// GetUpcomingMatches returns Sportmonks fixtures that have not started yet,
+// soonest start first. Unlike home, this never falls back to live matches.
+func (s *Service) GetUpcomingMatches(ctx context.Context) []Match {
+	all := s.repo.GetAll(ctx)
+	upcoming := make([]Match, 0, len(all))
+	for i := range all {
+		if all[i].Hidden {
+			continue
+		}
+		if all[i].DataSource != DataSourceSportmonks {
+			continue
+		}
+		all[i].Status = NormalizeStatus(all[i].Status)
+		if all[i].Status != StatusUpcoming {
+			continue
+		}
+		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)
+		AnnotateTradable(&all[i])
+		upcoming = append(upcoming, all[i])
 	}
 	return SortHomeMatches(upcoming)
 }
@@ -128,6 +152,7 @@ func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
 	}
 	match.Status = NormalizeStatus(match.Status)
 	match.OversText = calculateOvers(match.BallsLeft, match.Format)
+	AnnotateTradable(match)
 	return match, nil
 }
 

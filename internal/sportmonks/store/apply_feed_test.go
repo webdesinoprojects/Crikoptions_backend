@@ -59,6 +59,105 @@ func TestApplyProjectionOverlayUpdatesFeedTimestamps(t *testing.T) {
 	}
 }
 
+func TestDecideReconcilingTradingGateKeepsLiveBuySellOpen(t *testing.T) {
+	match := matches.Match{
+		FeedState:       matches.FeedStateHealthy,
+		TradingState:    "open",
+		TradingVersion:  7,
+		TradingBlockers: nil,
+	}
+	cancel := decideReconcilingTradingGate(
+		&match,
+		reconcile.Projection{Status: matches.StatusLive, CurrentScore: 88},
+		"open",
+		7,
+		nil,
+	)
+	if cancel {
+		t.Fatal("live soft sync must not cancel orders")
+	}
+	if match.TradingState != "open" || match.TradingVersion != 7 || len(match.TradingBlockers) != 0 {
+		t.Fatalf("got trading=%s version=%d blockers=%v", match.TradingState, match.TradingVersion, match.TradingBlockers)
+	}
+	if match.FeedState != matches.FeedStateHealthy {
+		t.Fatalf("feedState=%q", match.FeedState)
+	}
+}
+
+func TestDecideReconcilingTradingGateClearsStuckCancellationPending(t *testing.T) {
+	match := matches.Match{
+		FeedState:       matches.FeedStateReconciling,
+		TradingState:    "blocked",
+		TradingVersion:  9,
+		TradingBlockers: []string{"cancellation_pending", "reconciling"},
+	}
+	cancel := decideReconcilingTradingGate(
+		&match,
+		reconcile.Projection{Status: matches.StatusLive},
+		"blocked",
+		9,
+		[]string{"cancellation_pending", "reconciling"},
+	)
+	if cancel {
+		t.Fatal("re-opening live trade must not enqueue another cancellation")
+	}
+	if match.TradingState != "open" || containsValue(match.TradingBlockers, "cancellation_pending") {
+		t.Fatalf("got trading=%s blockers=%v", match.TradingState, match.TradingBlockers)
+	}
+}
+
+func TestDecideReconcilingTradingGateBlocksAndCancelsWhenLeavingLive(t *testing.T) {
+	match := matches.Match{
+		FeedState:      matches.FeedStateHealthy,
+		TradingState:   "open",
+		TradingVersion: 3,
+	}
+	cancel := decideReconcilingTradingGate(
+		&match,
+		reconcile.Projection{Status: matches.StatusInningsBreak},
+		"open",
+		3,
+		nil,
+	)
+	if !cancel {
+		t.Fatal("expected order cancellation when trading closes")
+	}
+	if match.TradingState != "blocked" || !containsValue(match.TradingBlockers, "cancellation_pending") {
+		t.Fatalf("got trading=%s blockers=%v", match.TradingState, match.TradingBlockers)
+	}
+	if match.TradingVersion <= 3 {
+		t.Fatalf("tradingVersion=%d want bump", match.TradingVersion)
+	}
+}
+
+func TestDecideReconcilingTradingGateKeepsOpenWhenProjectionStatusEmpty(t *testing.T) {
+	match := matches.Match{
+		Status:         matches.StatusLive,
+		FeedState:      matches.FeedStateHealthy,
+		TradingState:   "open",
+		TradingVersion: 4,
+	}
+	cancel := decideReconcilingTradingGate(
+		&match,
+		reconcile.Projection{CurrentScore: 120},
+		"open",
+		4,
+		nil,
+	)
+	if cancel {
+		t.Fatal("empty-status soft sync must not cancel orders")
+	}
+	if match.TradingState != "open" || match.TradingVersion != 4 {
+		t.Fatalf("got trading=%s version=%d", match.TradingState, match.TradingVersion)
+	}
+	if match.FeedState != matches.FeedStateReconciling {
+		t.Fatalf("feedState=%q want reconciling for SYNC badge", match.FeedState)
+	}
+	if matches.HasHardTradingBlockers(match.TradingBlockers) {
+		t.Fatalf("blockers=%v must not hard-block", match.TradingBlockers)
+	}
+}
+
 func mustTime(value string) (t time.Time) {
 	t, _ = time.Parse(time.RFC3339, value)
 	return t

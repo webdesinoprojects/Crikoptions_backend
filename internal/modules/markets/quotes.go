@@ -87,7 +87,7 @@ func (s *Service) IsTradable(market *Market) bool {
 	if market.Lifecycle != "" {
 		return market.Lifecycle == MarketLifecycleOpen &&
 			market.Status == MarketStatusActive &&
-			len(market.Blockers) == 0
+			!matches.HasHardTradingBlockers(market.Blockers)
 	}
 	return market.Status == MarketStatusActive
 }

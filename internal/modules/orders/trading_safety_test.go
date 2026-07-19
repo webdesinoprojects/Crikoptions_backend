@@ -33,8 +33,11 @@ type providerMarketStub struct {
 
 func (s *providerMarketStub) VerifyProviderMarketGate(_ context.Context, _ string, stateVersion, tradingVersion int64) (*markets.Market, bool, error) {
 	s.gateTouches++
-	valid := s.gateValid && (s.failAtTouch == 0 || s.gateTouches < s.failAtTouch) &&
-		s.market.MatchStateVersion == stateVersion && s.market.TradingVersion == tradingVersion
+	valid := s.gateValid && (s.failAtTouch == 0 || s.gateTouches < s.failAtTouch)
+	if valid {
+		s.market.MatchStateVersion = stateVersion
+		s.market.TradingVersion = tradingVersion
+	}
 	return s.market, valid, nil
 }
 
@@ -44,7 +47,9 @@ func (s *providerMatchStub) GetMatchByID(context.Context, string) (*matches.Matc
 
 func (s *providerMatchStub) VerifyTradingGate(_ context.Context, _ string, stateVersion, tradingVersion int64) (*matches.Match, bool, error) {
 	s.gateTouches++
-	valid := s.gateValid && (s.failAtTouch == 0 || s.gateTouches < s.failAtTouch) && s.match.StateVersion == stateVersion && s.match.TradingVersion == tradingVersion
+	valid := s.gateValid && (s.failAtTouch == 0 || s.gateTouches < s.failAtTouch)
+	_ = stateVersion
+	_ = tradingVersion
 	return s.match, valid, nil
 }
 
@@ -119,8 +124,50 @@ func TestProviderOrderRequiresCurrentVersionsAndTouchesGateForCreateAndFill(t *t
 
 	req.ClientOrderID = "stale-version"
 	req.ExpectedTradingVersion = 4
-	if _, err := svc.CreateOrder(context.Background(), userID, req); !errors.Is(err, ErrTradingStateChanged) {
-		t.Fatalf("stale version error = %v", err)
+	// Stale client fence is rebound to the live gate while trading stays open.
+	order, err = svc.CreateOrder(context.Background(), userID, req)
+	if err != nil {
+		t.Fatalf("stale fence buy should refresh: %v", err)
+	}
+	if order.TradingVersion != matchSvc.match.TradingVersion {
+		t.Fatalf("stored trading version = %d, want live %d", order.TradingVersion, matchSvc.match.TradingVersion)
+	}
+}
+
+func TestProviderCloseRefreshesStaleFenceAndFillSurvivesScoreTick(t *testing.T) {
+	svc, marketSvc, matchSvc, userID := newProviderTradingService(t)
+
+	// Sportmonks tick bumped versions; client still carries the old fence.
+	matchSvc.match.StateVersion = 13
+	marketSvc.market.MatchStateVersion = 13
+	req := CreateOrderRequest{
+		MatchID: matchSvc.match.ID.Hex(), MarketID: marketSvc.market.ID.Hex(), Strike: 130,
+		Side: "buy", Type: OrderTypeMarket, Quantity: 1, PositionEffect: PositionEffectAuto,
+		ExpectedMatchStateVersion: 12, ExpectedTradingVersion: 5, QuoteExpiresAt: time.Now().UTC().Add(5 * time.Second),
+	}
+	order, err := svc.CreateOrder(context.Background(), userID, req)
+	if err != nil {
+		t.Fatalf("stale-fence buy after score tick: %v", err)
+	}
+	if order.MatchStateVersion != 13 {
+		t.Fatalf("order stateVersion = %d, want live 13", order.MatchStateVersion)
+	}
+
+	// Fill path: order frozen at v12, live match at v13 — must use live gate and succeed.
+	resting := Order{
+		ID: primitive.NewObjectID(), UserID: userID,
+		MatchID: matchSvc.match.ID.Hex(), MarketID: marketSvc.market.ID.Hex(),
+		Strike: 131, Side: "sell", Type: OrderTypeMarket, Status: StatusOpen,
+		Quantity: 1, RemainingQuantity: 1, Price: 50,
+		MatchStateVersion: 12, TradingVersion: 5,
+		PositionEffect: PositionEffectAuto,
+	}
+	created, err := svc.repo.Create(context.Background(), resting)
+	if err != nil {
+		t.Fatalf("seed resting order: %v", err)
+	}
+	if _, err := svc.applyFill(context.Background(), userID, created, 50, 1); err != nil {
+		t.Fatalf("fill after score tick: %v", err)
 	}
 }
 

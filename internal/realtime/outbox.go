@@ -55,6 +55,9 @@ func (w *OutboxWatcher) Run(ctx context.Context) error {
 		}
 		w.connected.Store(true)
 
+		var lastBallMatch string
+		var lastBallID string
+		var lastBallAt time.Time
 		for stream.Next(ctx) {
 			var change struct {
 				Document outboxDocument `bson:"fullDocument"`
@@ -63,8 +66,11 @@ func (w *OutboxWatcher) Run(ctx context.Context) error {
 				log.Printf("realtime outbox decode: %v", err)
 				continue
 			}
-			if topic := strings.TrimSpace(change.Document.Topic); topic != "" {
-				w.publisher.Publish(topic, outboxPayload(change.Document))
+			doc := change.Document
+			if topic := strings.TrimSpace(doc.Topic); topic != "" {
+				if paceBallUpdate(ctx, doc, &lastBallMatch, &lastBallID, &lastBallAt) {
+					w.publisher.Publish(topic, outboxPayload(doc))
+				}
 			}
 			resumeToken = append(resumeToken[:0], stream.ResumeToken()...)
 		}
@@ -141,6 +147,51 @@ func outboxPayload(document outboxDocument) map[string]any {
 	payload["sequence"] = document.Sequence
 	payload["timestamp"] = document.OccurredAt.UTC().Format(time.RFC3339Nano)
 	return payload
+}
+
+// ballUpdatePace spaces catch-up balls so the UI can show one delivery at a time
+// when Sportmonks returns several new balls in a single poll.
+const ballUpdatePace = 400 * time.Millisecond
+
+func ballUpdateIdentity(doc outboxDocument) (matchID, ballID string, ok bool) {
+	matchID = strings.TrimSpace(doc.MatchID)
+	switch {
+	case doc.Type == "match.delivery":
+		if id, _ := doc.Payload["eventId"].(string); strings.TrimSpace(id) != "" {
+			return matchID, strings.TrimSpace(id), true
+		}
+		return matchID, fmt.Sprintf("seq:%d", doc.Sequence), true
+	case doc.Type == "match.state" && strings.Contains(doc.EventID, ":match.ball:"):
+		parts := strings.Split(doc.EventID, ":match.ball:")
+		return matchID, parts[len(parts)-1], true
+	default:
+		return "", "", false
+	}
+}
+
+// paceBallUpdate delays the first event of each new ball for the same match.
+// Delivery + progressive score for the same ball stay back-to-back.
+func paceBallUpdate(ctx context.Context, doc outboxDocument, lastMatch, lastBall *string, lastAt *time.Time) bool {
+	matchID, ballID, ok := ballUpdateIdentity(doc)
+	if !ok {
+		return true
+	}
+	sameBall := matchID != "" && matchID == *lastMatch && ballID == *lastBall
+	if !sameBall && matchID != "" && matchID == *lastMatch && !lastAt.IsZero() {
+		if wait := ballUpdatePace - time.Since(*lastAt); wait > 0 {
+			timer := time.NewTimer(wait)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return false
+			case <-timer.C:
+			}
+		}
+	}
+	*lastMatch = matchID
+	*lastBall = ballID
+	*lastAt = time.Now()
+	return true
 }
 
 func waitOutboxRetry(ctx context.Context) bool {

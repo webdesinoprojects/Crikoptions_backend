@@ -53,13 +53,13 @@ func TestLoadConfigFromEnvDefaultsToOff(t *testing.T) {
 	if cfg.BaseURL != DefaultBaseURL {
 		t.Fatalf("BaseURL = %q, want %q", cfg.BaseURL, DefaultBaseURL)
 	}
-	if cfg.QuotaReservePercent != 20 || cfg.MinPollInterval != 5*time.Second || cfg.MaxPollInterval != 15*time.Second {
+	if cfg.QuotaReservePercent != 20 || cfg.MinPollInterval != 2*time.Second || cfg.MaxPollInterval != 6*time.Second {
 		t.Fatalf("unexpected quota/poll defaults: %+v", cfg)
 	}
 	if cfg.HourlyRequestLimit != 2000 || cfg.FastPollingEnabled || cfg.AllowLiveCorrections || cfg.AllowMidMatchLiveAdmission {
 		t.Fatalf("unexpected live-safety defaults: %+v", cfg)
 	}
-	if cfg.RawPayloadTTL != 30*24*time.Hour {
+	if cfg.RawPayloadTTL != 2*time.Hour {
 		t.Fatalf("RawPayloadTTL = %s", cfg.RawPayloadTTL)
 	}
 }

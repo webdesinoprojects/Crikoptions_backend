@@ -126,7 +126,7 @@ func (s *Service) EnsureProviderInningsMarket(ctx context.Context, spec Provider
 	}
 	lifecycle := MarketLifecyclePending
 	status := MarketStatusSuspended
-	if strings.EqualFold(strings.TrimSpace(spec.FeedState), matches.FeedStateHealthy) && len(spec.Blockers) == 0 {
+	if matches.FeedAllowsTrading(spec.FeedState) && !matches.HasHardTradingBlockers(spec.Blockers) {
 		lifecycle = MarketLifecycleOpen
 		status = MarketStatusActive
 	}

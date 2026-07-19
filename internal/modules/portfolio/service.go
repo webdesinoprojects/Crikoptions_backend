@@ -117,10 +117,9 @@ func (s *Service) GetSummary(ctx context.Context, userID primitive.ObjectID) (*P
 	}
 
 	totalUnrealizedPnL := sumOpenPnL(portfolioPositions)
-	totalRealizedPnL := sumClosedPnL(closedTrades)
+	totalRealizedPnL := round2(sumClosedPnL(closedTrades) + sumOpenRealizedPnL(portfolioPositions))
 	totalPnL := round2(totalUnrealizedPnL + totalRealizedPnL)
-	totalPositionValue := sumPositionValue(portfolioPositions)
-	totalEquity := round2(account.CashBalance + totalPositionValue)
+	totalEquity := round2(account.CashBalance + totalUnrealizedPnL)
 	dailyPnL := round2(computeDailyPnL(portfolioPositions, closedTrades, time.Now()))
 	marginUsagePct := computeMarginUsage(account.ReservedBalance, account.AvailableBalance)
 
@@ -397,6 +396,14 @@ func sumOpenPnL(positions []PortfolioPosition) float64 {
 	return round2(total)
 }
 
+func sumOpenRealizedPnL(positions []PortfolioPosition) float64 {
+	total := 0.0
+	for _, position := range positions {
+		total += position.RealizedPnL
+	}
+	return round2(total)
+}
+
 func sumClosedPnL(trades []ClosedTrade) float64 {
 	total := 0.0
 	for _, trade := range trades {
@@ -427,11 +434,13 @@ func fillAllocations(positions []PortfolioPosition) {
 	}
 }
 
+// computeDailyPnL is open mark-to-market on every open position, plus realized
+// from trades closed today and partial realizes updated today.
 func computeDailyPnL(positions []PortfolioPosition, closedTrades []ClosedTrade, now time.Time) float64 {
 	total := 0.0
 	for _, position := range positions {
+		total += position.UnrealizedPnL
 		if isSameLocalDay(parseTime(position.OpenedAt), now) {
-			total += position.UnrealizedPnL
 			total += position.RealizedPnL
 		}
 	}
@@ -552,7 +561,12 @@ func realizedPnL(position positions.Position) float64 {
 	if position.RealizedPnL != 0 {
 		return round2(position.RealizedPnL)
 	}
-	return round2(position.PnL)
+	// Do not fall back to open MTM PnL for a zero realized sentinel — that
+	// double-counts unrealized into closed/daily totals.
+	if position.Status == "closed" && position.BuyPrice > 0 && position.SellPrice >= 0 && position.MatchedLots > 0 {
+		return round2((position.SellPrice - position.BuyPrice) * float64(position.MatchedLots))
+	}
+	return 0
 }
 
 func symbolFromMarket(market *markets.Market, fallback string) string {

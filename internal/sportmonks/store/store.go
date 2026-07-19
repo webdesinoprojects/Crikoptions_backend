@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -90,7 +91,7 @@ func (s *Store) EnsureIndexes(ctx context.Context) error {
 		}}},
 		{s.outbox, []mongo.IndexModel{
 			{Keys: bson.D{{Key: "eventId", Value: 1}}, Options: options.Index().SetUnique(true)},
-			{Keys: bson.D{{Key: "createdAt", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(24 * 60 * 60)},
+			{Keys: bson.D{{Key: "createdAt", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(6 * 60 * 60)},
 		}},
 		{s.leagues, []mongo.IndexModel{{Keys: bson.D{{Key: "enabled", Value: 1}, {Key: "entitled", Value: 1}}}}},
 		{s.fixtures, []mongo.IndexModel{
@@ -100,14 +101,28 @@ func (s *Store) EnsureIndexes(ctx context.Context) error {
 		{s.payloads, []mongo.IndexModel{{Keys: bson.D{{Key: "expiresAt", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(0)}}},
 		{s.settlements, []mongo.IndexModel{{Keys: bson.D{{Key: "status", Value: 1}, {Key: "nextAttemptAt", Value: 1}, {Key: "leaseUntil", Value: 1}, {Key: "createdAt", Value: 1}}}}},
 		{s.gateJobs, []mongo.IndexModel{{Keys: bson.D{{Key: "status", Value: 1}, {Key: "nextAttemptAt", Value: 1}, {Key: "leaseUntil", Value: 1}, {Key: "createdAt", Value: 1}}}}},
-		{s.reports, []mongo.IndexModel{{Keys: bson.D{{Key: "fixtureId", Value: 1}, {Key: "receivedAt", Value: -1}}}}},
-		{s.marketSnaps, []mongo.IndexModel{{Keys: bson.D{{Key: "matchId", Value: 1}, {Key: "stateVersion", Value: 1}, {Key: "tradingVersion", Value: 1}}}}},
+		{s.reports, []mongo.IndexModel{
+			{Keys: bson.D{{Key: "fixtureId", Value: 1}, {Key: "receivedAt", Value: -1}}},
+		}},
+		{s.marketSnaps, []mongo.IndexModel{
+			{Keys: bson.D{{Key: "matchId", Value: 1}, {Key: "stateVersion", Value: 1}, {Key: "tradingVersion", Value: 1}}},
+		}},
 		{s.quota, []mongo.IndexModel{{Keys: bson.D{{Key: "expiresAt", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(0)}}},
 		{s.schedules, []mongo.IndexModel{{Keys: bson.D{{Key: "leaseUntil", Value: 1}}}}},
-		{s.incidents, []mongo.IndexModel{{Keys: bson.D{{Key: "status", Value: 1}, {Key: "createdAt", Value: -1}}}}},
+		{s.incidents, []mongo.IndexModel{
+			{Keys: bson.D{{Key: "status", Value: 1}, {Key: "createdAt", Value: -1}}},
+		}},
 	}
 	for _, set := range sets {
 		if _, err := set.collection.Indexes().CreateMany(ctx, set.indexes); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "space quota") || strings.Contains(msg, "storage quota") {
+				log.Printf("sportmonks index ensure %s skipped (Atlas space quota): %v", set.collection.Name(), err)
+				continue
+			}
+			if strings.Contains(msg, "indexoptionsconflict") || strings.Contains(msg, "already exists") {
+				continue
+			}
 			return fmt.Errorf("ensure %s indexes: %w", set.collection.Name(), err)
 		}
 	}
@@ -1193,26 +1208,10 @@ func (s *Store) FailTargetPoll(ctx context.Context, fixtureID int64, owner, toke
 }
 
 func (s *Store) SavePayload(ctx context.Context, fixtureID int64, mode string, raw []byte, receivedAt time.Time, ttl time.Duration, valid bool, cause error) error {
-	if ttl <= 0 {
-		ttl = 30 * 24 * time.Hour
-	}
-	message := ""
-	if cause != nil {
-		message = cause.Error()
-		if len(message) > 1000 {
-			message = message[:1000]
-		}
-	}
-	_, err := s.payloads.UpdateOne(ctx,
-		bson.M{"_id": fmt.Sprintf("%d:%s", fixtureID, mode)},
-		bson.M{"$set": bson.M{
-			"fixtureId": fixtureID, "mode": mode, "valid": valid, "error": message,
-			"raw":        append(json.RawMessage(nil), raw...),
-			"receivedAt": receivedAt.UTC(), "expiresAt": receivedAt.UTC().Add(ttl),
-		}},
-		options.Update().SetUpsert(true),
-	)
-	return err
+	// Free Atlas tiers do not reclaim disk after deletes. Storing multi-MB Sportmonks
+	// fixture JSON (even temporarily) permanently inflates the cluster meter.
+	// Skip persistence entirely — live projection already lives on the match doc.
+	return nil
 }
 
 func (s *Store) ClaimSettlementJob(ctx context.Context, owner string, now time.Time, ttl time.Duration) (*SettlementJob, error) {

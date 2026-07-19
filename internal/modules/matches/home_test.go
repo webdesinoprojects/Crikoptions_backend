@@ -90,3 +90,51 @@ func TestGetHomeMatches_UpcomingWhenNoLive(t *testing.T) {
 		t.Fatalf("expected later upcoming second, got %s", home[1].ID.Hex())
 	}
 }
+
+func TestGetUpcomingMatches_OnlyUpcomingSorted(t *testing.T) {
+	now := time.Now().UTC()
+	repo := NewMemoryRepository()
+	svc := NewService(repo, NewMemoryEventRepository(), nil)
+
+	liveID := primitive.NewObjectID()
+	soonID := primitive.NewObjectID()
+	laterID := primitive.NewObjectID()
+
+	repo.matches = []Match{
+		{
+			ID: liveID, DataSource: DataSourceSportmonks,
+			TeamAName: "WI", TeamBName: "NZ", Status: StatusLive,
+			Format: "T20", BallsLeft: 60, CreatedAt: now, UpdatedAt: now, StartTime: now,
+		},
+		{
+			ID: laterID, DataSource: DataSourceSportmonks,
+			TeamAName: "AUS", TeamBName: "PAK", Status: StatusUpcoming,
+			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
+			StartTime: now.Add(48 * time.Hour),
+		},
+		{
+			ID: soonID, DataSource: DataSourceSportmonks,
+			TeamAName: "ENG", TeamBName: "IND", Status: StatusUpcoming,
+			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
+			StartTime: now.Add(2 * time.Hour),
+		},
+		{
+			ID: primitive.NewObjectID(), DataSource: DataSourceManual,
+			TeamAName: "CSK", TeamBName: "MI", Status: StatusUpcoming,
+			Format: "T20", CreatedAt: now, UpdatedAt: now, StartTime: now.Add(time.Hour),
+		},
+	}
+
+	upcoming := svc.GetUpcomingMatches(context.Background())
+	if len(upcoming) != 2 {
+		t.Fatalf("expected 2 upcoming Sportmonks matches, got %d", len(upcoming))
+	}
+	if upcoming[0].ID != soonID || upcoming[1].ID != laterID {
+		t.Fatalf("order=%s then %s", upcoming[0].TeamAName, upcoming[1].TeamAName)
+	}
+	for _, match := range upcoming {
+		if match.Status != StatusUpcoming {
+			t.Fatalf("unexpected status %q", match.Status)
+		}
+	}
+}

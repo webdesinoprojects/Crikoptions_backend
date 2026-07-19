@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +39,7 @@ var (
 func (s *Store) ApplyProjection(ctx context.Context, projection reconcile.Projection, raw []byte, receivedAt time.Time, cfg ApplyOptions) (ApplyResult, error) {
 	receivedAt = receivedAt.UTC()
 	if cfg.RawPayloadTTL <= 0 {
-		cfg.RawPayloadTTL = 30 * 24 * time.Hour
+		cfg.RawPayloadTTL = 48 * time.Hour
 	}
 	if err := s.SavePayload(ctx, projection.FixtureID, cfg.Mode, raw, receivedAt, cfg.RawPayloadTTL, true, nil); err != nil {
 		return ApplyResult{}, fmt.Errorf("save provider payload: %w", err)
@@ -193,8 +194,16 @@ func (s *Store) MarkFeedUnavailable(ctx context.Context, fixtureID int64, state,
 }
 
 func (s *Store) MarkFeedFrozen(ctx context.Context, fixtureID int64, now, stateChangeCutoff time.Time) error {
+	// Only treat as dead feed when polls themselves stopped. Quiet scoreboards
+	// (unchanged SnapshotHash) are normal during overs and must not block trading.
 	return s.markFeedConditionally(ctx, fixtureID, matches.FeedStateStale, "feed_stale", now, func(match matches.Match) bool {
-		return match.Status == matches.StatusLive && match.LastStateChangeAt != nil && !match.LastStateChangeAt.After(stateChangeCutoff)
+		if match.Status != matches.StatusLive {
+			return false
+		}
+		if match.LastSuccessfulPollAt == nil || match.LastSuccessfulPollAt.After(stateChangeCutoff) {
+			return false
+		}
+		return match.LastStateChangeAt != nil && !match.LastStateChangeAt.After(stateChangeCutoff)
 	})
 }
 
@@ -542,13 +551,8 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 			return ApplyResult{}, err
 		}
 	}
-	if err := s.insertMatchOutbox(ctx, next, "match.state", receivedAt); err != nil {
+	if err := s.publishBallByBallUpdates(ctx, next, projection, changedEvents, receivedAt); err != nil {
 		return ApplyResult{}, err
-	}
-	for _, event := range changedEvents {
-		if err := s.insertDeliveryOutbox(ctx, next, event, receivedAt); err != nil {
-			return ApplyResult{}, err
-		}
 	}
 	return ApplyResult{
 		MatchID: next.ID.Hex(), StateVersion: next.StateVersion,
@@ -806,14 +810,13 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 		} else {
 			next.HealthySnapshotCount = current.HealthySnapshotCount + 1
 		}
-		if next.HealthySnapshotCount >= 2 {
-			next.FeedState = matches.FeedStateHealthy
-			next.TradingState = "open"
-			next.TradingBlockers = providerBlockers(current.TradingBlockers)
-		} else {
-			next.FeedState = matches.FeedStateWarming
-			next.TradingState = "blocked"
-			next.TradingBlockers = providerBlockers(current.TradingBlockers, "warming")
+		// Open on the first successful live poll. Requiring 2 polls forced a
+		// multi-interval "warming/SYNCING" badge that looked broken in production.
+		next.FeedState = matches.FeedStateHealthy
+		next.TradingState = "open"
+		next.TradingBlockers = providerBlockers(current.TradingBlockers)
+		if next.HealthySnapshotCount < 1 {
+			next.HealthySnapshotCount = 1
 		}
 	case matches.StatusInningsBreak:
 		next.Status = matches.StatusInningsBreak
@@ -890,11 +893,39 @@ func (s *Store) setReconciling(ctx mongo.SessionContext, current matches.Match, 
 		return matches.Match{}, err
 	}
 	previousTradingVersion := current.TradingVersion
+	previousTradingState := current.TradingState
 	current.StateVersion++
-	if current.FeedState != matches.FeedStateReconciling || current.TradingState == "open" {
+	current.FeedState = matches.FeedStateReconciling
+	// Live soft-sync: keep trading open. Only non-live matches get blocked.
+	if strings.EqualFold(strings.TrimSpace(current.Status), matches.StatusLive) &&
+		strings.EqualFold(strings.TrimSpace(previousTradingState), "open") &&
+		!matches.HasHardTradingBlockers(current.TradingBlockers) {
+		current.TradingState = "open"
+		current.TradingBlockers = matches.HardTradingBlockers(providerBlockers(current.TradingBlockers))
+		current.TradingBlockers = removeValue(current.TradingBlockers, "cancellation_pending")
+		current.LastFeedReceivedAt = timePointer(now)
+		current.UpdatedAt = now
+		result, err := s.matches.ReplaceOne(ctx, bson.M{"_id": current.ID, "stateVersion": current.StateVersion - 1}, current)
+		if err != nil {
+			return matches.Match{}, err
+		}
+		if result.ModifiedCount != 1 {
+			return matches.Match{}, ErrConcurrentApply
+		}
+		if err := s.projectMarkets(ctx, current, reconcile.Projection{CurrentInnings: current.Innings, Format: current.Format, ScheduledBalls: current.ScheduledBalls}); err != nil {
+			return matches.Match{}, err
+		}
+		if err := s.insertMarketSnapshots(ctx, current, now); err != nil {
+			return matches.Match{}, err
+		}
+		if err := s.insertMatchOutbox(ctx, current, "match.feed_state", now); err != nil {
+			return matches.Match{}, err
+		}
+		return current, nil
+	}
+	if current.TradingState == "open" {
 		current.TradingVersion++
 	}
-	current.FeedState = matches.FeedStateReconciling
 	current.HealthySnapshotCount = 0
 	current.TradingState = "blocked"
 	current.TradingBlockers = providerBlockers(current.TradingBlockers, "reconciling")
@@ -983,7 +1014,7 @@ func (s *Store) projectMarkets(ctx context.Context, match matches.Match, project
 		return nil
 	}
 	lifecycle := markets.MarketLifecyclePending
-	if match.HealthySnapshotCount >= 2 || providerMarketPreviouslyOpened(marketList, match.Innings) {
+	if match.HealthySnapshotCount >= 1 || matches.FeedAllowsTrading(match.FeedState) || providerMarketPreviouslyOpened(marketList, match.Innings) {
 		lifecycle = markets.MarketLifecycleOpen
 	}
 	currentSettlementReady := false
@@ -997,7 +1028,7 @@ func (s *Store) projectMarkets(ctx context.Context, match matches.Match, project
 	if (match.FeedState == matches.FeedStateFinalizing || match.FeedState == matches.FeedStateTerminal) && currentSettlementReady {
 		lifecycle = markets.MarketLifecycleSettling
 	}
-	if err := s.markets.SetProviderMarketGate(ctx, match.ID.Hex(), match.Innings, lifecycle, match.TradingBlockers, nil, 0); err != nil {
+	if err := s.markets.SetProviderMarketGate(ctx, match.ID.Hex(), match.Innings, lifecycle, matches.HardTradingBlockers(match.TradingBlockers), nil, 0); err != nil {
 		return err
 	}
 	for _, innings := range match.InningsSummaries {
@@ -1031,33 +1062,7 @@ func providerMarketPreviouslyOpened(marketsForMatch []markets.Market, innings in
 }
 
 func (s *Store) insertMarketSnapshots(ctx context.Context, match matches.Match, now time.Time) error {
-	if s.markets == nil || s.marketSnaps == nil {
-		return nil
-	}
-	marketList, err := s.markets.ListMarketsByMatchID(ctx, match.ID.Hex())
-	if err != nil {
-		return fmt.Errorf("list provider markets for snapshots: %w", err)
-	}
-	for _, market := range marketList {
-		if market.Kind != markets.MarketKindInningsScore || market.FormulaVersion != markets.FormulaVersionInningsScoreV1 {
-			continue
-		}
-		snapshot := MarketSnapshot{
-			ID:      fmt.Sprintf("%s:%d:%d", market.ID.Hex(), match.StateVersion, match.TradingVersion),
-			MatchID: match.ID.Hex(), MarketID: market.ID.Hex(), Innings: market.Innings,
-			Lifecycle: market.Lifecycle, Blockers: append([]string(nil), market.Blockers...),
-			FeedState: match.FeedState, TradingState: match.TradingState,
-			StateVersion: match.StateVersion, TradingVersion: match.TradingVersion,
-			CurrentScore: match.CurrentScore, WicketsLost: match.WicketsLost,
-			BallsLeft: match.BallsLeft, TargetScore: match.TargetScore,
-			FinalScore: market.FinalScore, FinalRevision: market.FinalRevision,
-			FormulaVersion: market.FormulaVersion, ProviderSnapshotID: match.LastSnapshotHash,
-			CreatedAt: now.UTC(),
-		}
-		if _, err := s.marketSnaps.UpdateOne(ctx, bson.M{"_id": snapshot.ID}, bson.M{"$setOnInsert": snapshot}, options.Update().SetUpsert(true)); err != nil {
-			return err
-		}
-	}
+	// Disabled: each snapshot insert permanently grows Atlas free-tier allocated disk.
 	return nil
 }
 
@@ -1380,7 +1385,111 @@ func (s *Store) enqueueTradingGateJob(ctx context.Context, match matches.Match, 
 	return nil
 }
 
+// publishBallByBallUpdates emits each new delivery with the score as of that
+// ball, then a progressive match.state tick, then the final canonical match.state.
+// That way a multi-ball poll catch-up still advances the UI one ball at a time.
+func (s *Store) publishBallByBallUpdates(ctx context.Context, match matches.Match, projection reconcile.Projection, changed []matches.BallEvent, now time.Time) error {
+	ordered := append([]matches.BallEvent(nil), changed...)
+	sortBallEvents(ordered)
+	byID := make(map[string]reconcile.Delivery, len(projection.Deliveries))
+	for _, delivery := range projection.Deliveries {
+		byID[delivery.ProviderEventID] = delivery
+	}
+	for _, event := range ordered {
+		snap := match
+		if !event.Tombstoned {
+			if delivery, ok := byID[event.ProviderEventID]; ok {
+				snap = progressiveMatchView(match, projection, delivery)
+			}
+		}
+		if err := s.insertDeliveryOutbox(ctx, snap, event, now); err != nil {
+			return err
+		}
+		if event.Tombstoned || event.Revision > 1 {
+			continue
+		}
+		if err := s.insertProgressiveScoreOutbox(ctx, snap, event, now); err != nil {
+			return err
+		}
+	}
+	return s.insertMatchOutbox(ctx, match, "match.state", now)
+}
+
+func progressiveMatchView(base matches.Match, projection reconcile.Projection, through reconcile.Delivery) matches.Match {
+	next := base
+	score, wickets, legal := 0, 0, 0
+	throughDeliveries := make([]reconcile.Delivery, 0, len(projection.Deliveries))
+	for _, delivery := range projection.Deliveries {
+		if delivery.Innings != through.Innings || deliveryAfter(delivery, through) {
+			continue
+		}
+		throughDeliveries = append(throughDeliveries, delivery)
+		score += delivery.TeamRuns
+		if delivery.LegalBall {
+			legal++
+		}
+		if delivery.Dismissal != nil {
+			wickets++
+		}
+	}
+	scheduled := projection.ScheduledBalls
+	if scheduled <= 0 {
+		scheduled = base.ScheduledBalls
+	}
+	next.CurrentScore = score
+	next.WicketsLost = wickets
+	next.BallsLeft = max(0, scheduled-legal)
+	next.OversText = fmt.Sprintf("%d.%d", legal/6, legal%6)
+	next.ThisOver = reconcile.BuildThisOver(throughDeliveries, through.Innings, legal)
+	// Keep batter/bowler cards on the final tick only so they do not jump ahead of score.
+	next.LiveContext = nil
+	next.MatchPulse = nil
+	return next
+}
+
+func deliveryAfter(candidate, through reconcile.Delivery) bool {
+	if candidate.Innings != through.Innings {
+		return candidate.Innings > through.Innings
+	}
+	if candidate.Sequence != 0 && through.Sequence != 0 && candidate.Sequence != through.Sequence {
+		return candidate.Sequence > through.Sequence
+	}
+	cOver, cBall := displayBall(candidate.ProviderBall)
+	tOver, tBall := displayBall(through.ProviderBall)
+	if cOver != tOver {
+		return cOver > tOver
+	}
+	if cBall != tBall {
+		return cBall > tBall
+	}
+	return candidate.ProviderEventID > through.ProviderEventID
+}
+
+func sortBallEvents(events []matches.BallEvent) {
+	sort.SliceStable(events, func(i, j int) bool {
+		left, right := events[i], events[j]
+		if left.Innings != right.Innings {
+			return left.Innings < right.Innings
+		}
+		if left.Sequence != 0 && right.Sequence != 0 && left.Sequence != right.Sequence {
+			return left.Sequence < right.Sequence
+		}
+		if left.Over != right.Over {
+			return left.Over < right.Over
+		}
+		if left.Ball != right.Ball {
+			return left.Ball < right.Ball
+		}
+		return left.ProviderEventID < right.ProviderEventID
+	})
+}
+
 func (s *Store) insertMatchOutbox(ctx context.Context, match matches.Match, eventType string, now time.Time) error {
+	// Always publish live score ticks. Skipping reconciling/stale left the UI
+	// stuck on old overs until the feed flipped healthy again.
+	if match.Status == matches.StatusUpcoming {
+		return nil
+	}
 	event := OutboxEvent{
 		EventID: fmt.Sprintf("sportmonks:%d:%d:%d:%s", match.ProviderFixtureID, match.StateVersion, match.TradingVersion, eventType),
 		Topic:   realtime.MatchScoreTopic(match.ID.Hex()), Type: eventType,
@@ -1388,6 +1497,26 @@ func (s *Store) insertMatchOutbox(ctx context.Context, match matches.Match, even
 		Sequence: match.StateVersion, OccurredAt: now, Payload: scorePayload(match), CreatedAt: now,
 	}
 	_, err := s.outbox.InsertOne(ctx, event)
+	if mongo.IsDuplicateKeyError(err) {
+		return nil
+	}
+	return err
+}
+
+func (s *Store) insertProgressiveScoreOutbox(ctx context.Context, match matches.Match, event matches.BallEvent, now time.Time) error {
+	if match.Status == matches.StatusUpcoming {
+		return nil
+	}
+	outbox := OutboxEvent{
+		EventID: fmt.Sprintf("sportmonks:%d:%d:%d:match.ball:%s", match.ProviderFixtureID, match.StateVersion, match.TradingVersion, event.ProviderEventID),
+		Topic:   realtime.MatchScoreTopic(match.ID.Hex()), Type: "match.state",
+		MatchID: match.ID.Hex(), StateVersion: match.StateVersion, TradingVersion: match.TradingVersion,
+		Sequence: event.Sequence, OccurredAt: now, Payload: scorePayload(match), CreatedAt: now,
+	}
+	_, err := s.outbox.InsertOne(ctx, outbox)
+	if mongo.IsDuplicateKeyError(err) {
+		return nil
+	}
 	return err
 }
 
@@ -1425,6 +1554,7 @@ func (s *Store) insertDeliveryOutbox(ctx context.Context, match matches.Match, e
 }
 
 func scorePayload(match matches.Match) map[string]any {
+	matches.AnnotateTradable(&match)
 	payload := map[string]any{
 		"matchId": match.ID.Hex(), "innings": match.Innings,
 		"currentScore": match.CurrentScore, "wicketsLost": match.WicketsLost,
@@ -1432,6 +1562,7 @@ func scorePayload(match matches.Match) map[string]any {
 		"oversText": match.OversText, "status": match.Status,
 		"providerPhase": match.ProviderPhase, "feedState": match.FeedState,
 		"tradingState": match.TradingState, "tradingBlockers": match.TradingBlockers,
+		"tradable": match.Tradable,
 		"stateVersion": match.StateVersion, "tradingVersion": match.TradingVersion,
 		"inningsSummaries":     match.InningsSummaries,
 		"lastSuccessfulPollAt": match.LastSuccessfulPollAt, "feedValidUntil": match.FeedValidUntil,
@@ -1493,7 +1624,7 @@ func inningsHoldPending(current matches.Match, projection reconcile.Projection) 
 func tradingGateRefreshNeeded(current matches.Match, projection reconcile.Projection) bool {
 	return projection.Status == matches.StatusLive &&
 		current.FeedState == matches.FeedStateHealthy &&
-		current.HealthySnapshotCount >= 2 &&
+		current.HealthySnapshotCount >= 1 &&
 		current.TradingState != "open" &&
 		len(providerBlockers(current.TradingBlockers)) == 0
 }
@@ -1541,6 +1672,9 @@ func providerBlockers(existing []string, desired ...string) []string {
 			seen[blocker] = struct{}{}
 			out = append(out, blocker)
 		}
+	}
+	if out == nil {
+		return []string{}
 	}
 	return out
 }

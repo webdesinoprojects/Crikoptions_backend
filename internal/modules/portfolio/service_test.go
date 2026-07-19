@@ -107,8 +107,8 @@ func TestSummaryAggregatesPortfolioMetrics(t *testing.T) {
 		t.Fatalf("GetSummary: %v", err)
 	}
 
-	if summary.TotalEquity != 1250 {
-		t.Fatalf("totalEquity = %.2f, want 1250", summary.TotalEquity)
+	if summary.TotalEquity != 1050 {
+		t.Fatalf("totalEquity = %.2f, want 1050", summary.TotalEquity)
 	}
 	if summary.TotalPnL != 80 || summary.DailyPnL != 80 {
 		t.Fatalf("pnl/daily = %.2f/%.2f, want 80/80", summary.TotalPnL, summary.DailyPnL)
@@ -116,8 +116,8 @@ func TestSummaryAggregatesPortfolioMetrics(t *testing.T) {
 	if summary.MarginUsagePct != 10 {
 		t.Fatalf("marginUsagePct = %.2f, want 10", summary.MarginUsagePct)
 	}
-	if summary.RiskMetrics.LeverageRatio != 0.2 {
-		t.Fatalf("leverage = %.2f, want 0.2", summary.RiskMetrics.LeverageRatio)
+	if summary.RiskMetrics.LeverageRatio != 0.24 {
+		t.Fatalf("leverage = %.2f, want 0.24", summary.RiskMetrics.LeverageRatio)
 	}
 	if len(summary.Positions) != 1 || summary.Positions[0].Allocation != 100 {
 		t.Fatalf("positions/allocation = %+v, want one 100%% allocation", summary.Positions)
@@ -192,8 +192,8 @@ func TestSummaryHandlesShortPositionsAndClosedShortTrades(t *testing.T) {
 	if open.Side != "SELL" || open.Quantity != 10 || open.AverageEntryPrice != 50 || open.UnrealizedPnL != 50 {
 		t.Fatalf("open short = %+v, want SELL qty 10 entry 50 pnl 50", open)
 	}
-	if summary.TotalEquity != 550 {
-		t.Fatalf("totalEquity = %.2f, want 550", summary.TotalEquity)
+	if summary.TotalEquity != 1050 {
+		t.Fatalf("totalEquity = %.2f, want 1050", summary.TotalEquity)
 	}
 	if len(summary.ClosedTrades) != 1 {
 		t.Fatalf("closed trades = %d, want 1", len(summary.ClosedTrades))

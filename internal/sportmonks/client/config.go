@@ -62,8 +62,8 @@ func LoadConfigFromEnv() (Config, error) {
 		HTTPTimeout:             15 * time.Second,
 		QuotaReservePercent:     20,
 		HourlyRequestLimit:      2000,
-		MinPollInterval:         5 * time.Second,
-		MaxPollInterval:         15 * time.Second,
+		MinPollInterval:         2 * time.Second,
+		MaxPollInterval:         6 * time.Second,
 		DiscoveryInterval:       30 * time.Second,
 		FixtureSyncInterval:     6 * time.Hour,
 		MetadataSyncInterval:    24 * time.Hour,
@@ -72,11 +72,11 @@ func LoadConfigFromEnv() (Config, error) {
 		FinalizingInterval:      15 * time.Second,
 		MaxConcurrency:          4,
 		LeaseTTL:                30 * time.Second,
-		StaleMinimum:            20 * time.Second,
-		ActiveFreezeTimeout:     90 * time.Second,
+		StaleMinimum:            60 * time.Second,
+		ActiveFreezeTimeout:     5 * time.Minute,
 		InningsFinalizationHold: time.Minute,
 		MatchFinalizationHold:   2 * time.Minute,
-		RawPayloadTTL:           30 * 24 * time.Hour,
+		RawPayloadTTL:           2 * time.Hour,
 	}
 
 	if value := strings.ToLower(strings.TrimSpace(os.Getenv("SPORTMONKS_MODE"))); value != "" {
@@ -122,9 +122,15 @@ func LoadConfigFromEnv() (Config, error) {
 	if err := parseIntEnv("SPORTMONKS_HOURLY_REQUEST_LIMIT", &cfg.HourlyRequestLimit); err != nil {
 		return Config{}, err
 	}
-	cfg.FastPollingEnabled = parseBoolEnv("SPORTMONKS_FAST_POLLING_ENABLED")
 	cfg.AllowLiveCorrections = parseBoolEnv("SPORTMONKS_ALLOW_LIVE_CORRECTIONS")
 	cfg.AllowMidMatchLiveAdmission = parseBoolEnv("SPORTMONKS_ALLOW_MID_MATCH_LIVE_ADMISSION")
+	// Live mode always uses fast polling for ball-by-ball trading UX. The env flag
+	// only applies in shadow mode (quota-sensitive dry runs).
+	if cfg.Mode == ModeLive {
+		cfg.FastPollingEnabled = true
+	} else if raw, ok := os.LookupEnv("SPORTMONKS_FAST_POLLING_ENABLED"); ok {
+		cfg.FastPollingEnabled = parseBoolValue(raw)
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -228,7 +234,11 @@ func parseIntEnv(name string, target *int) error {
 }
 
 func parseBoolEnv(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	return parseBoolValue(os.Getenv(name))
+}
+
+func parseBoolValue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "1", "true", "yes", "on":
 		return true
 	default:

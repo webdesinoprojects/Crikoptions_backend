@@ -34,7 +34,9 @@ func BuildLiveContext(battingItems, bowlingItems []map[string]any, input LiveCon
 
 	striker, nonStriker, partnership := battingPair(battingItems, scoreboard)
 	bowler := activeBowler(bowlingItems, scoreboard, input.Deliveries, input.CurrentInnings)
-	if striker.Name == "" || nonStriker.Name == "" || bowler.Name == "" {
+	// Partial on-field data is still useful for the UI. Only skip when nothing
+	// resolved — trading health no longer depends on a full matrix.
+	if striker.Name == "" && nonStriker.Name == "" && bowler.Name == "" {
 		return nil
 	}
 	if partnership.Runs == 0 && partnership.Balls == 0 {

@@ -262,17 +262,18 @@ func (r *MemoryRepository) VerifyProviderMarketGate(_ context.Context, id primit
 		if market.ID != id {
 			continue
 		}
+		// Match-level gate owns version fencing; market gate only requires open+active.
 		valid := market.Kind == MarketKindInningsScore &&
 			market.Lifecycle == MarketLifecycleOpen &&
 			market.Status == MarketStatusActive &&
-			len(market.Blockers) == 0 &&
-			market.MatchStateVersion == stateVersion &&
-			market.TradingVersion == tradingVersion
+			len(market.Blockers) == 0
 		if !valid {
 			return nil, false, nil
 		}
 		now := time.Now().UTC()
 		market.TradingGateCheckedAt = &now
+		market.MatchStateVersion = stateVersion
+		market.TradingVersion = tradingVersion
 		market.GateCheckSeq++
 		out := *market
 		return &out, true, nil
@@ -786,19 +787,31 @@ func (r *MongoRepository) VerifyProviderMarketGate(ctx context.Context, id primi
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 	now := time.Now().UTC()
+	// Match-level VerifyTradingGate already fences state/trading versions.
+	// Requiring the same versions on the market doc races with every Sportmonks
+	// score tick (Ensure updates market versions slightly out of band) and breaks sells.
+	_ = stateVersion
+	_ = tradingVersion
 	result := r.col.FindOneAndUpdate(
 		ctx,
 		bson.M{
-			"_id":               id,
-			"kind":              MarketKindInningsScore,
-			"lifecycle":         MarketLifecycleOpen,
-			"status":            MarketStatusActive,
-			"blockers":          bson.M{"$size": 0},
-			"matchStateVersion": stateVersion,
-			"tradingVersion":    tradingVersion,
+			"_id":       id,
+			"kind":      MarketKindInningsScore,
+			"lifecycle": MarketLifecycleOpen,
+			"status":    MarketStatusActive,
+			"$or": bson.A{
+				bson.M{"blockers": bson.M{"$exists": false}},
+				bson.M{"blockers": nil},
+				bson.M{"blockers": bson.A{}},
+			},
 		},
 		bson.M{
-			"$set": bson.M{"tradingGateCheckedAt": now},
+			"$set": bson.M{
+				"tradingGateCheckedAt": now,
+				"blockers":             bson.A{},
+				"matchStateVersion":    stateVersion,
+				"tradingVersion":       tradingVersion,
+			},
 			"$inc": bson.M{"gateCheckSeq": 1},
 		},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),

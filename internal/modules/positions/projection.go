@@ -169,7 +169,11 @@ func (p *PositionProjection) apply(exec executions.Execution) float64 {
 	if p.MatchedLots > 0 && p.BuyLots > 0 && p.SellLots > 0 {
 		avgBuy := p.BuyNotional / float64(p.BuyLots)
 		avgSell := p.SellNotional / float64(p.SellLots)
-		p.RealizedPnL = round2((avgSell - avgBuy) * float64(p.MatchedLots))
+		if avgBuy > 0 && avgSell >= 0 {
+			p.RealizedPnL = round2((avgSell - avgBuy) * float64(p.MatchedLots))
+		} else {
+			p.RealizedPnL = 0
+		}
 	}
 	if p.UpdatedAt.IsZero() || createdAt.After(p.UpdatedAt) {
 		p.UpdatedAt = createdAt
