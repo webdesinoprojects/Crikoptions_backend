@@ -70,7 +70,7 @@ func Load() (Config, error) {
 	return Config{
 		Port: port, MongoURI: mongoConfig.URI, MongoDB: mongoConfig.Database, JWTSecret: jwtSecret, TokenHours: tokenHours,
 		ChatEnabled:    parseBool(os.Getenv("CHAT_ENABLED")),
-		AllowedOrigins: parseCSVWithDefault(os.Getenv("ALLOWED_ORIGINS"), []string{"http://localhost:3000"}),
+		AllowedOrigins: allowedOrigins(os.Getenv("ALLOWED_ORIGINS")),
 	}, nil
 }
 
@@ -95,6 +95,24 @@ func parseCSVWithDefault(value string, fallback []string) []string {
 		return fallback
 	}
 	return out
+}
+
+func allowedOrigins(value string) []string {
+	defaults := []string{
+		"http://localhost:3000",
+		"https://cricoptions.vercel.app",
+	}
+	origins := parseCSVWithDefault(value, defaults)
+	seen := make(map[string]struct{}, len(origins)+len(defaults))
+	for _, origin := range origins {
+		seen[origin] = struct{}{}
+	}
+	for _, origin := range defaults {
+		if _, ok := seen[origin]; !ok {
+			origins = append(origins, origin)
+		}
+	}
+	return origins
 }
 
 func toPositiveInt(s string) (int, bool) {
