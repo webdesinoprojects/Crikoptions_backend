@@ -1010,6 +1010,13 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 				setFields["status"] = matches.StatusUpcoming
 			}
 		}
+		// Mongo rejects an update that touches the same path in both $set and
+		// $setOnInsert. Fields the not-started branch refreshes on every sync
+		// are owned by $set; drop them from the insert-only defaults. $set also
+		// applies on an upsert insert, so the inserted document is unchanged.
+		for key := range setFields {
+			delete(setOnInsert, key)
+		}
 		_, err = s.matches.UpdateOne(ctx, bson.M{
 			"provider": ProviderName, "providerFixtureId": fixture.ID,
 		}, bson.M{
