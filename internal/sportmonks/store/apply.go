@@ -815,6 +815,14 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 		next.FeedState = matches.FeedStateHealthy
 		next.TradingState = "open"
 		next.TradingBlockers = providerBlockers(current.TradingBlockers)
+		// providerBlockers keeps cancellation_pending (it is not an automated
+		// blocker), and the len(blockers) > 0 check below would then re-block
+		// immediately — so a single feed hiccup left a live, healthy match
+		// untradable until the gate job happened to drain. The cancellation work
+		// itself lives in trading_gate_jobs, not in this marker, and is now
+		// version-fenced, so dropping the marker here cannot lose or misapply it.
+		// Matches applyReconcilingPoll, which has always cleared it.
+		next.TradingBlockers = removeValue(next.TradingBlockers, "cancellation_pending")
 		if next.HealthySnapshotCount < 1 {
 			next.HealthySnapshotCount = 1
 		}

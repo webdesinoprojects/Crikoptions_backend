@@ -143,7 +143,7 @@ func TestCancelProviderWorkingOrdersPreservesReadFailures(t *testing.T) {
 				nil,
 				nil,
 			)
-			if _, err := svc.CancelProviderWorkingOrders(context.Background(), matchID.Hex()); !errors.Is(err, readErr) {
+			if _, err := svc.CancelProviderWorkingOrders(context.Background(), matchID.Hex(), 0); !errors.Is(err, readErr) {
 				t.Fatalf("CancelProviderWorkingOrders() error = %v, want %v", err, readErr)
 			}
 		})

@@ -311,6 +311,10 @@ func (s *Store) HealFalselyStaleLiveMatches(ctx context.Context, now time.Time, 
 		}
 		match.TradingState = "open"
 		match.TradingBlockers = providerBlockers(match.TradingBlockers)
+		// Same sticky-marker trap as the healthy live path: without this the
+		// heal writes TradingState "open" but IsTradable still reports false,
+		// so the match stays untradable and the badge stays on SYNCING.
+		match.TradingBlockers = removeValue(match.TradingBlockers, "cancellation_pending")
 		match.FeedValidUntil = timePointer(now.Add(freshWithin))
 		match.UpdatedAt = now
 		result, err := s.matches.ReplaceOne(ctx, bson.M{"_id": match.ID, "stateVersion": previousVersion}, match)

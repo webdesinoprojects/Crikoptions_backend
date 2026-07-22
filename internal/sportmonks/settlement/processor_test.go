@@ -48,15 +48,17 @@ func (f *fakeStore) FailSettlementJob(_ context.Context, id, _ string, _ error, 
 }
 
 type fakeRunner struct {
-	settlement string
-	err        error
+	settlement        string
+	err               error
+	cancelGateVersion int64
 }
 
 func (r *fakeRunner) SettleProviderInnings(_ context.Context, matchID string, innings int, finalRevision int64) error {
 	r.settlement = fmt.Sprintf("%d:%s:%d", innings, matchID, finalRevision)
 	return r.err
 }
-func (r *fakeRunner) CancelProviderWorkingOrders(context.Context, string) (int, error) {
+func (r *fakeRunner) CancelProviderWorkingOrders(_ context.Context, _ string, gateTradingVersion int64) (int, error) {
+	r.cancelGateVersion = gateTradingVersion
 	return 0, nil
 }
 func (r *fakeRunner) VoidProviderInningsMarket(context.Context, string, int) error {

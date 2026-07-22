@@ -331,12 +331,17 @@ func isValidMarketLifecycle(lifecycle string) bool {
 	}
 }
 
+// compatibilityStatus mirrors IsTradable for legacy clients. Only hard blockers
+// suspend a market: a soft sync marker (reconciling/warming) rides on the
+// blockers array during normal feed churn, and treating it as a suspension
+// flipped every live market to SUSPENDED mid-over, which disabled Buy/Sell in
+// the terminal for the duration of the sync.
 func compatibilityStatus(lifecycle string, blockers []string) string {
-	if lifecycle == MarketLifecycleOpen && len(normalizeBlockers(blockers)) == 0 {
-		return MarketStatusActive
-	}
 	if lifecycle == MarketLifecycleSettled || lifecycle == MarketLifecycleVoid {
 		return MarketStatusClosed
+	}
+	if lifecycle == MarketLifecycleOpen && !matches.HasHardTradingBlockers(normalizeBlockers(blockers)) {
+		return MarketStatusActive
 	}
 	return MarketStatusSuspended
 }

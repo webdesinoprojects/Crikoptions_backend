@@ -3,6 +3,7 @@ package markets
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 )
 
 type Repository interface {
@@ -262,11 +265,13 @@ func (r *MemoryRepository) VerifyProviderMarketGate(_ context.Context, id primit
 		if market.ID != id {
 			continue
 		}
-		// Match-level gate owns version fencing; market gate only requires open+active.
+		// Match-level gate owns version fencing; market gate only requires
+		// open+active with no hard blocker. Soft sync markers must pass, or the
+		// order 409s for the whole duration of a feed sync.
 		valid := market.Kind == MarketKindInningsScore &&
 			market.Lifecycle == MarketLifecycleOpen &&
 			market.Status == MarketStatusActive &&
-			len(market.Blockers) == 0
+			!matches.HasHardTradingBlockers(market.Blockers)
 		if !valid {
 			return nil, false, nil
 		}
@@ -679,7 +684,9 @@ func (r *MongoRepository) SetProviderManualBlocker(ctx context.Context, id primi
 		bson.M{"$cond": bson.A{
 			bson.M{"$and": bson.A{
 				bson.M{"$eq": bson.A{"$lifecycle", MarketLifecycleOpen}},
-				bson.M{"$eq": bson.A{bson.M{"$size": nextBlockers}, 0}},
+				// Soft sync markers must not suspend here either, or an admin
+				// toggle landing mid-sync would suspend a healthy contract.
+				bson.M{"$eq": bson.A{bson.M{"$size": hardBlockerSubsetExpression(nextBlockers)}, 0}},
 			}},
 			MarketStatusActive,
 			MarketStatusSuspended,
@@ -718,6 +725,9 @@ func providerMarketBlockerExpression(desired []string) bson.M {
 	}}
 }
 
+// providerMarketStatusExpression is the Mongo-side twin of compatibilityStatus.
+// Only hard blockers suspend: soft sync markers must leave the market ACTIVE so
+// the terminal keeps Buy/Sell enabled while the feed reconciles.
 func providerMarketStatusExpression(lifecycle string, blockers any) any {
 	if lifecycle == MarketLifecycleSettled || lifecycle == MarketLifecycleVoid {
 		return MarketStatusClosed
@@ -726,10 +736,36 @@ func providerMarketStatusExpression(lifecycle string, blockers any) any {
 		return MarketStatusSuspended
 	}
 	return bson.M{"$cond": bson.A{
-		bson.M{"$eq": bson.A{bson.M{"$size": blockers}, 0}},
+		bson.M{"$eq": bson.A{bson.M{"$size": hardBlockerSubsetExpression(blockers)}, 0}},
 		MarketStatusActive,
 		MarketStatusSuspended,
 	}}
+}
+
+// hardBlockerSubsetExpression drops the soft sync markers from a blockers
+// expression, leaving only blockers that must suspend trading.
+func hardBlockerSubsetExpression(blockers any) bson.M {
+	// $not takes a one-element array in the aggregation expression language.
+	return bson.M{"$filter": bson.M{
+		"input": blockers,
+		"as":    "blocker",
+		"cond":  bson.M{"$not": bson.A{bson.M{"$in": bson.A{"$$blocker", softBlockerValues()}}}},
+	}}
+}
+
+// softBlockerValues is matches.SoftSyncTradingBlockers in a stable order so the
+// generated pipeline stays deterministic across runs.
+func softBlockerValues() bson.A {
+	names := make([]string, 0, len(matches.SoftSyncTradingBlockers))
+	for blocker := range matches.SoftSyncTradingBlockers {
+		names = append(names, blocker)
+	}
+	sort.Strings(names)
+	values := make(bson.A, 0, len(names))
+	for _, name := range names {
+		values = append(values, name)
+	}
+	return values
 }
 
 func preserveProviderMarketBlockers(existing, desired []string) []string {
@@ -799,16 +835,18 @@ func (r *MongoRepository) VerifyProviderMarketGate(ctx context.Context, id primi
 			"kind":      MarketKindInningsScore,
 			"lifecycle": MarketLifecycleOpen,
 			"status":    MarketStatusActive,
-			"$or": bson.A{
-				bson.M{"blockers": bson.M{"$exists": false}},
-				bson.M{"blockers": nil},
-				bson.M{"blockers": bson.A{}},
-			},
+			// Soft sync markers ride on blockers during normal feed churn.
+			// Demanding a literally empty array made this the strictest gate in
+			// the system: IsTradable would pass moments earlier and the order
+			// still 409'd here for the whole duration of a sync. Reject only
+			// when a blocker outside the soft set is present.
+			"blockers": bson.M{"$not": bson.M{"$elemMatch": bson.M{"$nin": softBlockerValues()}}},
 		},
 		bson.M{
+			// blockers are deliberately not written here — the feed owns them.
+			// Clearing them would stomp the soft sync marker the badge reads.
 			"$set": bson.M{
 				"tradingGateCheckedAt": now,
-				"blockers":             bson.A{},
 				"matchStateVersion":    stateVersion,
 				"tradingVersion":       tradingVersion,
 			},

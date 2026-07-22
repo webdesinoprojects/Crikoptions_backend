@@ -1368,7 +1368,14 @@ func (s *Store) CompleteTradingGateJob(ctx context.Context, id, owner string, no
 			return nil, err
 		}
 		match.TradingBlockers = removeValue(match.TradingBlockers, "cancellation_pending")
-		if match.FeedState == matches.FeedStateHealthy && len(match.TradingBlockers) == 0 {
+		// Reopen on any soft-sync feed state, not only healthy. Requiring
+		// healthy meant a job that drained while the feed happened to be
+		// reconciling left the match blocked, and only a later live tick could
+		// recover it — which is exactly when cancellation_pending used to get
+		// re-added, so the match could stay blocked indefinitely.
+		if strings.EqualFold(strings.TrimSpace(match.Status), matches.StatusLive) &&
+			matches.FeedAllowsTrading(match.FeedState) &&
+			!matches.HasHardTradingBlockers(match.TradingBlockers) {
 			match.TradingState = "open"
 		} else {
 			match.TradingState = "blocked"

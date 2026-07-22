@@ -67,7 +67,11 @@ func (s *Service) GetUserClosedPositions(ctx context.Context, userID primitive.O
 
 func (s *Service) ListUserPositions(ctx context.Context, userID primitive.ObjectID, filter PositionFilter) ([]Position, error) {
 	if s.projections != nil {
-		return s.projectedUserPositions(ctx, userID, filter)
+		projected, err := s.projectedUserPositions(ctx, userID, filter)
+		if err != nil {
+			return nil, err
+		}
+		return dropEmptyOpenPositions(projected), nil
 	}
 
 	all, err := s.computeForUser(ctx, userID)
@@ -75,7 +79,22 @@ func (s *Service) ListUserPositions(ctx context.Context, userID primitive.Object
 		return nil, err
 	}
 	filter.UserID = ""
-	return applyStaticFilters(all, filter), nil
+	return dropEmptyOpenPositions(applyStaticFilters(all, filter)), nil
+}
+
+// dropEmptyOpenPositions removes open rows that carry no lots. Exit, mark-price
+// and square-off paths already skip Lots == 0, so leaving them in the user-facing
+// lists produced phantom "open positions" that no flow could clear. Closed rows
+// are kept — a closed position legitimately has zero lots.
+func dropEmptyOpenPositions(in []Position) []Position {
+	out := make([]Position, 0, len(in))
+	for _, p := range in {
+		if p.Status == "open" && p.Lots == 0 {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func (s *Service) GetUserPosition(ctx context.Context, userID primitive.ObjectID, positionID string) (*Position, error) {

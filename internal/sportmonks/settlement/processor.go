@@ -24,7 +24,7 @@ type JobStore interface {
 
 type Runner interface {
 	SettleProviderInnings(context.Context, string, int, int64) error
-	CancelProviderWorkingOrders(context.Context, string) (int, error)
+	CancelProviderWorkingOrders(context.Context, string, int64) (int, error)
 	VoidProviderInningsMarket(context.Context, string, int) error
 }
 
@@ -73,7 +73,7 @@ func (p *Processor) runNextGate(ctx context.Context) error {
 	leaseLost := make(chan error, 1)
 	leaseDone := make(chan struct{})
 	go p.maintainGateLease(jobCtx, job.ID, cancel, leaseLost, leaseDone)
-	_, err = p.runner.CancelProviderWorkingOrders(jobCtx, job.MatchID)
+	_, err = p.runner.CancelProviderWorkingOrders(jobCtx, job.MatchID, job.TradingVersion)
 	cancel()
 	<-leaseDone
 	select {

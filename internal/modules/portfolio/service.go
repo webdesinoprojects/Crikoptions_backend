@@ -381,9 +381,18 @@ func (s *Service) listPositions(ctx context.Context, userID primitive.ObjectID) 
 func filterPositionsByStatus(in []positions.Position, status string) []positions.Position {
 	out := make([]positions.Position, 0, len(in))
 	for _, position := range in {
-		if position.Status == status {
-			out = append(out, position)
+		if position.Status != status {
+			continue
 		}
+		// A zero-lot row holds no exposure. The rest of the system already
+		// treats these as non-positions (positions.OpenCloseTargets,
+		// ListOpenByMatch, the mark-price gate and square-off all skip
+		// Lots == 0), so counting them here surfaced phantom "1 open position"
+		// cards that no exit flow could ever clear.
+		if status == "open" && position.Lots == 0 {
+			continue
+		}
+		out = append(out, position)
 	}
 	return out
 }
@@ -434,18 +443,28 @@ func fillAllocations(positions []PortfolioPosition) {
 	}
 }
 
-// computeDailyPnL is open mark-to-market on every open position, plus realized
-// from trades closed today and partial realizes updated today.
+// computeDailyPnL is the P&L attributable to the current trading day: for
+// positions opened today, their open mark-to-market plus any realized slice;
+// for trades closed today, their realized P&L.
+//
+// Mark-to-market on a position carried in from an earlier day is deliberately
+// excluded. That move is (currentMark - entryPrice), which is the position's
+// lifetime P&L, not today's — including it made "Today's P&L" show a non-zero
+// number that drifted on every re-quote for users who had not traded today.
+// Attributing an intra-day slice of a carried position would need a
+// previous-close mark baseline, which this system does not record; contracts
+// here settle within the match, so carried positions are the exception.
 func computeDailyPnL(positions []PortfolioPosition, closedTrades []ClosedTrade, now time.Time) float64 {
 	total := 0.0
 	for _, position := range positions {
-		total += position.UnrealizedPnL
-		if isSameLocalDay(parseTime(position.OpenedAt), now) {
-			total += position.RealizedPnL
+		if !isSameTradingDay(parseTime(position.OpenedAt), now) {
+			continue
 		}
+		total += position.UnrealizedPnL
+		total += position.RealizedPnL
 	}
 	for _, trade := range closedTrades {
-		if isSameLocalDay(parseTime(trade.ClosedAt), now) {
+		if isSameTradingDay(parseTime(trade.ClosedAt), now) {
 			total += trade.RealizedPnL
 		}
 	}
@@ -619,15 +638,6 @@ func parseTime(value string) time.Time {
 		return time.Time{}
 	}
 	return parsed
-}
-
-func isSameLocalDay(a, b time.Time) bool {
-	if a.IsZero() {
-		return false
-	}
-	aa := a.In(time.Local)
-	bb := b.In(time.Local)
-	return aa.Year() == bb.Year() && aa.Month() == bb.Month() && aa.Day() == bb.Day()
 }
 
 func computeMarginUsage(used, available float64) float64 {

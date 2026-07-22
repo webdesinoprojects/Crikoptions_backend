@@ -84,9 +84,15 @@ func (s *Service) SettleProviderInnings(ctx context.Context, matchID string, inn
 	return err
 }
 
-// CancelProviderWorkingOrders releases every working order after the feed
-// transaction has closed the match gate. It is safe to retry.
-func (s *Service) CancelProviderWorkingOrders(ctx context.Context, matchID string) (int, error) {
+// CancelProviderWorkingOrders releases the working orders that were resting
+// when the feed transaction closed the match gate. It is safe to retry.
+//
+// gateTradingVersion is the match's TradingVersion at the moment the gate
+// closed. Only orders placed against an earlier version are cancelled: once the
+// gate reopens it bumps the version again, so an order the user places after
+// the match resumes must survive a gate job that is still draining. Pass 0 to
+// cancel every working order regardless of version.
+func (s *Service) CancelProviderWorkingOrders(ctx context.Context, matchID string, gateTradingVersion int64) (int, error) {
 	match, err := s.matches.GetMatchByID(ctx, strings.TrimSpace(matchID))
 	if err != nil || match == nil {
 		return 0, ErrMatchNotFound
@@ -102,7 +108,7 @@ func (s *Service) CancelProviderWorkingOrders(ctx context.Context, matchID strin
 	for _, market := range marketList {
 		marketIDs[market.ID.Hex()] = struct{}{}
 	}
-	cancelled, failed, err := s.cancelWorkingOrders(ctx, match, marketIDs)
+	cancelled, failed, err := s.cancelWorkingOrders(ctx, match, marketIDs, gateTradingVersion)
 	if err != nil {
 		return cancelled, fmt.Errorf("list provider working orders: %w", err)
 	}
@@ -144,7 +150,8 @@ func (s *Service) VoidProviderInningsMarket(ctx context.Context, matchID string,
 		return errors.New("provider market is not voidable")
 	}
 	marketIDs := map[string]struct{}{market.ID.Hex(): {}}
-	_, failed, err := s.cancelWorkingOrders(ctx, match, marketIDs)
+	// Voiding the contract: every resting order goes, whatever version it holds.
+	_, failed, err := s.cancelWorkingOrders(ctx, match, marketIDs, 0)
 	if err != nil {
 		return fmt.Errorf("list provider working orders: %w", err)
 	}
@@ -446,7 +453,8 @@ func (s *Service) squareOff(ctx context.Context, matchID string, scope string, e
 	}
 
 	var cancellationFailures int
-	result.OrdersCancelled, cancellationFailures, err = s.cancelWorkingOrders(ctx, match, settleMarketIDs)
+	// Settlement: every resting order goes, whatever version it holds.
+	result.OrdersCancelled, cancellationFailures, err = s.cancelWorkingOrders(ctx, match, settleMarketIDs, 0)
 	if err != nil {
 		if providerMatch {
 			return result, fmt.Errorf("list provider working orders: %w", err)
@@ -679,7 +687,7 @@ func (s *Service) settlementPrice(match *matches.Match, market *markets.Market, 
 	return 0, false
 }
 
-func (s *Service) cancelWorkingOrders(ctx context.Context, match *matches.Match, marketIDs map[string]struct{}) (cancelled, failed int, err error) {
+func (s *Service) cancelWorkingOrders(ctx context.Context, match *matches.Match, marketIDs map[string]struct{}, gateTradingVersion int64) (cancelled, failed int, err error) {
 	matchKeys := matchIDKeys(match)
 	for marketID := range marketIDs {
 		for _, matchKey := range matchKeys {
@@ -690,6 +698,11 @@ func (s *Service) cancelWorkingOrders(ctx context.Context, match *matches.Match,
 				}
 				for i := range orders {
 					if isInternalClientOrderID(orders[i].ClientOrderID) {
+						continue
+					}
+					// Placed after the gate closed, i.e. after it reopened.
+					// Draining an old job must not cancel live orders.
+					if gateTradingVersion > 0 && orders[i].TradingVersion >= gateTradingVersion {
 						continue
 					}
 					if err := s.cancelWorkingOrder(ctx, &orders[i]); err != nil {
