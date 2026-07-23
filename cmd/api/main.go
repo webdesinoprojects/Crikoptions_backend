@@ -89,9 +89,12 @@ func main() {
 	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
 	if providerConfig.Mode != sportmonksclient.ModeLive {
 		seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
-		if err := matchesRepo.EnsureDefaultMatches(context.Background()); err != nil {
-			log.Fatalf("MongoDB ensure default matches: %v", err)
-		}
+	}
+	// Demo matches (incl. CSK vs MI / RCB vs KKR) exist in every mode. In live
+	// mode they are hidden immediately below and only revealed by the fallback
+	// controller when no real Sportmonks match is in play.
+	if err := matchesRepo.EnsureDefaultMatches(context.Background()); err != nil {
+		log.Fatalf("MongoDB ensure default matches: %v", err)
 	}
 	matchEventsRepo := matches.NewMongoEventRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "match_events", matchEventsRepo.EnsureIndexes)
@@ -132,9 +135,11 @@ func main() {
 	mustEnsureIndexes(context.Background(), "markets", marketsRepo.EnsureIndexes)
 	if providerConfig.Mode != sportmonksclient.ModeLive {
 		seedMongoDefaults(context.Background(), "markets", marketsRepo.SeedDefaults)
-		if err := marketsRepo.EnsureDefaultMarkets(context.Background()); err != nil {
-			log.Printf("markets EnsureDefaultMarkets: %v", err)
-		}
+	}
+	// Demo markets back the fallback replay matches, so they are needed in live
+	// mode too (the matches themselves stay hidden until the fallback activates).
+	if err := marketsRepo.EnsureDefaultMarkets(context.Background()); err != nil {
+		log.Printf("markets EnsureDefaultMarkets: %v", err)
 	}
 	marketsService := markets.NewService(marketsRepo)
 	marketsHandler := markets.NewHandler(marketsService, matchesService)
@@ -292,7 +297,13 @@ func main() {
 	simService.SetLockStore(simLocks)
 	simHandler := simulator.NewHandler(simService)
 	defer simService.Shutdown()
-	if providerConfig.Mode != sportmonksclient.ModeLive {
+	if providerConfig.Mode == sportmonksclient.ModeLive {
+		// Live mode: surface the built-in replays (CSK vs MI, RCB vs KKR) as a
+		// fallback only while no real Sportmonks match is in play, and wind them
+		// down — exiting all DEMO trades — 30 minutes before a real match starts.
+		fallback := simulator.NewFallbackController(simService, matchesService, simulator.FallbackSpecs(), 20*time.Second, 30*time.Minute)
+		go fallback.Run(providerCtx)
+	} else {
 		simService.AutoStartOnBoot(context.Background())
 	}
 

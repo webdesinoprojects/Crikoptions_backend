@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -93,17 +94,26 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	all := s.repo.GetAll(ctx)
 	live := make([]Match, 0, len(all))
 	upcoming := make([]Match, 0, len(all))
+	// Demo/simulator replays (e.g. CSK vs MI, RCB vs KKR). The fallback controller
+	// only leaves these visible while no real Sportmonks match is in play, so they
+	// act as a fallback that keeps the terminal populated between live fixtures.
+	fallback := make([]Match, 0)
 	for i := range all {
 		if all[i].Hidden {
-			continue
-		}
-		// Home feed is Sportmonks only; manual/simulator demo matches are excluded.
-		if all[i].DataSource != DataSourceSportmonks {
 			continue
 		}
 		all[i].Status = NormalizeStatus(all[i].Status)
 		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)
 		AnnotateTradable(&all[i])
+		if all[i].DataSource != DataSourceSportmonks {
+			// Non-provider matches are fallback demo games, surfaced below only
+			// when there is no live Sportmonks fixture.
+			switch all[i].Status {
+			case StatusLive, StatusInningsBreak:
+				fallback = append(fallback, all[i])
+			}
+			continue
+		}
 		switch all[i].Status {
 		case StatusLive, StatusInningsBreak:
 			live = append(live, all[i])
@@ -111,11 +121,58 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 			upcoming = append(upcoming, all[i])
 		}
 	}
-	// Prefer live fixtures; when nothing is in play, surface upcoming Sportmonks matches.
+	// Prefer real live fixtures; when none are in play, surface the demo fallback
+	// games; otherwise fall back to upcoming Sportmonks matches.
 	if len(live) > 0 {
 		return SortHomeMatches(live)
 	}
+	if len(fallback) > 0 {
+		return SortHomeMatches(fallback)
+	}
 	return SortHomeMatches(upcoming)
+}
+
+// CountLiveProviderMatches returns how many real (Sportmonks) matches are in
+// play (live or innings break) and visible on the home feed.
+func (s *Service) CountLiveProviderMatches(ctx context.Context) (int, error) {
+	return s.repo.CountLiveProviderMatches(ctx)
+}
+
+// ProviderMatchImminent reports whether a real (Sportmonks) match is already in
+// play OR is scheduled to start within the given lead time. The fallback
+// controller uses this to wind down the demo games ahead of a real fixture.
+func (s *Service) ProviderMatchImminent(ctx context.Context, within time.Duration) (bool, error) {
+	all := s.repo.GetAll(ctx)
+	cutoff := time.Now().UTC().Add(within)
+	for i := range all {
+		m := all[i]
+		if m.Hidden || m.DataSource != DataSourceSportmonks {
+			continue
+		}
+		switch NormalizeStatus(m.Status) {
+		case StatusLive, StatusInningsBreak:
+			return true, nil
+		case StatusUpcoming:
+			if !m.StartTime.IsZero() && !m.StartTime.After(cutoff) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// SetDemoMatchesHidden toggles the hidden flag on the given demo/simulator match
+// ids, so the fallback controller can reveal or hide them.
+func (s *Service) SetDemoMatchesHidden(ctx context.Context, hidden bool, hexIDs ...string) error {
+	ids := make([]primitive.ObjectID, 0, len(hexIDs))
+	for _, hx := range hexIDs {
+		id, err := primitive.ObjectIDFromHex(strings.TrimSpace(hx))
+		if err != nil {
+			return fmt.Errorf("invalid match id %q: %w", hx, err)
+		}
+		ids = append(ids, id)
+	}
+	return s.repo.SetHidden(ctx, hidden, ids...)
 }
 
 // GetUpcomingMatches returns Sportmonks fixtures that have not started yet,

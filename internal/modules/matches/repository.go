@@ -24,6 +24,11 @@ type Repository interface {
 	NormalizeLegacyStatuses(ctx context.Context) error
 	EnsureDefaultMatches(ctx context.Context) error
 	EnsureIndexes(ctx context.Context) error
+	// CountLiveProviderMatches counts visible Sportmonks matches that are in play
+	// (live or innings break). Used to decide whether demo fallback games show.
+	CountLiveProviderMatches(ctx context.Context) (int, error)
+	// SetHidden toggles the hidden flag on the given match ids.
+	SetHidden(ctx context.Context, hidden bool, ids ...primitive.ObjectID) error
 }
 
 type MemoryRepository struct {
@@ -220,6 +225,45 @@ func (r *MemoryRepository) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
 
+func (r *MemoryRepository) CountLiveProviderMatches(_ context.Context) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	n := 0
+	for i := range r.matches {
+		m := r.matches[i]
+		if m.Hidden || m.DataSource != DataSourceSportmonks {
+			continue
+		}
+		switch NormalizeStatus(m.Status) {
+		case StatusLive, StatusInningsBreak:
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (r *MemoryRepository) SetHidden(_ context.Context, hidden bool, ids ...primitive.ObjectID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	want := make(map[primitive.ObjectID]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	now := time.Now().UTC()
+	for i := range r.matches {
+		if want[r.matches[i].ID] {
+			r.matches[i].Hidden = hidden
+			r.matches[i].UpdatedAt = now
+		}
+	}
+	return nil
+}
+
 type MongoRepository struct {
 	col *mongo.Collection
 }
@@ -307,6 +351,40 @@ func (r *MongoRepository) HideNonSportmonksMatches(ctx context.Context) (int64, 
 		return 0, err
 	}
 	return result.ModifiedCount, nil
+}
+
+// CountLiveProviderMatches counts visible Sportmonks matches that are in play.
+func (r *MongoRepository) CountLiveProviderMatches(ctx context.Context) (int, error) {
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	filter := bson.M{
+		"dataSource": DataSourceSportmonks,
+		"hidden":     bson.M{"$ne": true},
+		"status": bson.M{"$in": bson.A{
+			StatusLive, "LIVE", "active", "ACTIVE", StatusInningsBreak, "innings break",
+		}},
+	}
+	n, err := r.col.CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+// SetHidden toggles the hidden flag on the given match ids.
+func (r *MongoRepository) SetHidden(ctx context.Context, hidden bool, ids ...primitive.ObjectID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ctx, cancel := timeoutCtx(ctx)
+	defer cancel()
+
+	_, err := r.col.UpdateMany(ctx,
+		bson.M{"_id": bson.M{"$in": ids}},
+		bson.M{"$set": bson.M{"hidden": hidden, "updatedAt": time.Now().UTC()}},
+	)
+	return err
 }
 
 // EnsureDefaultMatches upserts the built-in sample matches (T20 + ODI) so

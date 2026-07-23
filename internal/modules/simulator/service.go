@@ -153,6 +153,8 @@ type StartRequest struct {
 // SquareOffPort settles open positions when innings 1 ends and reopens markets on replay reset.
 type SquareOffPort interface {
 	SquareOffInnings1(ctx context.Context, matchID string) error
+	// SquareOffMatch exits every open position for the match (scoped by matchID).
+	SquareOffMatch(ctx context.Context, matchID string) error
 	ReopenMatchMarkets(ctx context.Context, matchID string) error
 }
 
@@ -300,6 +302,15 @@ func (s *Service) attachWorker(matchID string, ds *CSVDataset, w *Worker) {
 	w.squareOff = s.squareOff
 	s.workers.Store(matchID, w)
 	go w.Run()
+}
+
+// StopMatch stops any running replay worker for the match without clearing its
+// persisted score/events. Safe to call when no worker is running.
+func (s *Service) StopMatch(matchID string) {
+	if prev, ok := s.workers.Load(matchID); ok {
+		prev.(*Worker).Stop()
+		s.workers.Delete(matchID)
+	}
 }
 
 // Pause suspends the running worker (cursor is preserved).
