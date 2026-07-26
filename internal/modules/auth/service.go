@@ -13,6 +13,17 @@ type Service struct {
 	repo        UserRepository
 	jwt         *jwt
 	adminEmails map[string]struct{}
+	google      *googleVerifier
+}
+
+// EnableGoogleAuth turns on Google sign-in by configuring the OAuth client ID
+// that ID tokens must be issued for. A blank clientID leaves Google auth
+// disabled (the endpoint then reports it is not configured).
+func (s *Service) EnableGoogleAuth(clientID string) {
+	if strings.TrimSpace(clientID) == "" {
+		return
+	}
+	s.google = newGoogleVerifier(clientID)
 }
 
 func NewService(repo UserRepository, jwtSecret string, tokenTTL time.Duration, adminEmails []string) (*Service, error) {
@@ -114,6 +125,93 @@ func (s *Service) Login(ctx context.Context, req loginRequest) (User, string, er
 	}
 
 	return user, token, nil
+}
+
+// LoginWithGoogle verifies a Google ID token ("credential"), finds or creates
+// the matching user by email, and issues a session JWT. The returned bool is
+// true when a brand-new account was provisioned (so callers can grant the
+// welcome bonus).
+func (s *Service) LoginWithGoogle(ctx context.Context, credential string) (User, string, bool, error) {
+	if s.google == nil {
+		return User{}, "", false, errGoogleNotConfigured
+	}
+
+	claims, err := s.google.Verify(ctx, credential)
+	if err != nil {
+		return User{}, "", false, err
+	}
+
+	email := strings.ToLower(strings.TrimSpace(claims.Email))
+	if email == "" || !emailRegexp.MatchString(email) {
+		return User{}, "", false, errGoogleInvalidToken
+	}
+
+	created := false
+	rec, ok, err := s.repo.FindByEmail(ctx, email)
+	if err != nil {
+		return User{}, "", false, err
+	}
+
+	var user User
+	if ok {
+		user = rec.User
+	} else {
+		user, err = s.createGoogleUser(ctx, email, claims.Name)
+		if err != nil {
+			return User{}, "", false, err
+		}
+		created = true
+	}
+
+	user = s.withEffectiveRole(user)
+	token, err := s.jwt.Issue(user.ID.Hex(), user.Role)
+	if err != nil {
+		return User{}, "", false, errUnauthorized
+	}
+	return user, token, created, nil
+}
+
+// createGoogleUser provisions a passwordless account for a Google sign-in.
+func (s *Service) createGoogleUser(ctx context.Context, email, name string) (User, error) {
+	name = strings.TrimSpace(name)
+	if len(name) < 2 {
+		name = strings.Split(email, "@")[0]
+	}
+	if len(name) > 80 {
+		name = name[:80]
+	}
+
+	role := "user"
+	if s.isAdminEmail(email) {
+		role = "admin"
+	}
+
+	now := time.Now().UTC()
+	rec := userRecord{
+		User: User{
+			ID:    primitive.NewObjectID(),
+			Name:  name,
+			Email: email,
+			Tier:  "STANDARD",
+			Role:  role,
+			Settings: UserSettings{
+				RiskLimits: RiskLimits{
+					MaxExposure:     10000.0,
+					DefaultLeverage: 1,
+					AutoKillSwitch:  false,
+				},
+				Preferences: Preferences{
+					Theme:                "TERMINAL_DARK",
+					DataDensity:          "COMPACT",
+					NotificationsEnabled: true,
+				},
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		// No password hash — this account signs in via Google only.
+	}
+	return s.repo.Create(ctx, rec)
 }
 
 // ParseToken verifies a JWT and returns the authenticated user ID and role.

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strings"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
@@ -133,6 +134,57 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			"message": msg,
 		})
 		return
+	}
+
+	httpjson.Write(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": "Login successful",
+		"data": map[string]any{
+			"token": token,
+			"user":  user,
+		},
+	})
+}
+
+// Google authenticates a user from a Google ID token. It signs in an existing
+// account or provisions a new one (crediting the welcome bonus), then returns
+// the same {token, user} envelope as Login.
+func (h *Handler) Google(w http.ResponseWriter, r *http.Request) {
+	var req googleAuthRequest
+	if err := decodeJSON(r, &req); err != nil {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Invalid request body",
+		})
+		return
+	}
+
+	if strings.TrimSpace(req.Credential) == "" {
+		httpjson.Write(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"message": "Missing Google credential",
+		})
+		return
+	}
+
+	user, token, created, err := h.service.LoginWithGoogle(r.Context(), req.Credential)
+	if err != nil {
+		status, msg := mapAuthError(err)
+		httpjson.Write(w, status, map[string]any{
+			"success": false,
+			"message": msg,
+		})
+		return
+	}
+
+	// Credit the welcome bonus for freshly provisioned accounts, mirroring the
+	// email/password registration flow.
+	if created && h.welcomeCreditor != nil {
+		go func(id primitive.ObjectID) {
+			if credErr := h.welcomeCreditor.ApplyWelcomeCredit(context.Background(), id); credErr != nil {
+				_ = credErr
+			}
+		}(user.ID)
 	}
 
 	httpjson.Write(w, http.StatusOK, map[string]any{

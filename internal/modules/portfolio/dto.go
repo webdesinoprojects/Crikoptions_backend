@@ -50,12 +50,15 @@ type RiskMetrics struct {
 	StressTestLoss       float64 `json:"stressTestLoss"`
 }
 
-// LeaderboardEntry is one ranked row: rank, name, country, roi.
+// LeaderboardEntry is one ranked row: rank, name, country, roi, win rate.
 type LeaderboardEntry struct {
 	Rank    int     `json:"rank"`
 	Name    string  `json:"name"`
 	Country string  `json:"country"`
 	ROI     float64 `json:"roi"`
+	// WinRate is the share of the trader's closed positions that ended in
+	// profit, expressed as a percentage (0-100). Zero when no closed trades.
+	WinRate float64 `json:"winRate"`
 	UserID  string  `json:"userId,omitempty"`
 }
 

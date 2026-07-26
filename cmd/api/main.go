@@ -82,6 +82,8 @@ func main() {
 		log.Fatalf("auth service: %v", err)
 	}
 	mustEnsureIndexes(context.Background(), "users", authService.EnsureIndexes)
+	// Enable Google sign-in when a client ID is configured (no-op otherwise).
+	authService.EnableGoogleAuth(cfg.GoogleClientID)
 	authHandler := auth.NewHandler(authService)
 
 	// Matches.

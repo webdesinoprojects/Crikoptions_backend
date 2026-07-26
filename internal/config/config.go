@@ -16,6 +16,7 @@ type Config struct {
 	TokenHours     int
 	ChatEnabled    bool
 	AllowedOrigins []string
+	GoogleClientID string
 }
 
 type MongoConfig struct {
@@ -71,6 +72,7 @@ func Load() (Config, error) {
 		Port: port, MongoURI: mongoConfig.URI, MongoDB: mongoConfig.Database, JWTSecret: jwtSecret, TokenHours: tokenHours,
 		ChatEnabled:    parseBool(os.Getenv("CHAT_ENABLED")),
 		AllowedOrigins: allowedOrigins(os.Getenv("ALLOWED_ORIGINS")),
+		GoogleClientID: strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")),
 	}, nil
 }
 

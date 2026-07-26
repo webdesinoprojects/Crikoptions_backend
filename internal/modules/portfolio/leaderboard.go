@@ -12,9 +12,10 @@ import (
 )
 
 type leaderboardCandidate struct {
-	userID primitive.ObjectID
-	name   string
-	roi    float64
+	userID  primitive.ObjectID
+	name    string
+	roi     float64
+	winRate float64
 }
 
 type adminPositionLister interface {
@@ -67,6 +68,8 @@ func (s *Service) allLeaderboardPositions(ctx context.Context) ([]positions.Posi
 
 func (s *Service) buildLeaderboardFromPositions(ctx context.Context, users []auth.User, allPositions []positions.Position) ([]LeaderboardEntry, error) {
 	pnlByUser := make(map[primitive.ObjectID]float64, len(users))
+	closedByUser := make(map[primitive.ObjectID]int, len(users))
+	winsByUser := make(map[primitive.ObjectID]int, len(users))
 	for _, position := range allPositions {
 		switch strings.ToLower(strings.TrimSpace(position.Status)) {
 		case "open":
@@ -74,6 +77,12 @@ func (s *Service) buildLeaderboardFromPositions(ctx context.Context, users []aut
 			pnlByUser[position.UserID] = round2(pnlByUser[position.UserID] + position.PnL + position.RealizedPnL)
 		case "closed":
 			pnlByUser[position.UserID] = round2(pnlByUser[position.UserID] + realizedPnL(position))
+			// Win rate counts each closed position; a "win" is a positive
+			// realized PnL on that closed trade.
+			closedByUser[position.UserID]++
+			if realizedPnL(position) > 0 {
+				winsByUser[position.UserID]++
+			}
 		}
 	}
 
@@ -96,7 +105,12 @@ func (s *Service) buildLeaderboardFromPositions(ctx context.Context, users []aut
 			}
 			roi = round2(pct(totalPnL, account.CashBalance))
 		}
-		candidates = append(candidates, leaderboardCandidate{userID: user.ID, name: name, roi: roi})
+
+		winRate := 0.0
+		if closed := closedByUser[user.ID]; closed > 0 {
+			winRate = round2(float64(winsByUser[user.ID]) / float64(closed) * 100)
+		}
+		candidates = append(candidates, leaderboardCandidate{userID: user.ID, name: name, roi: roi, winRate: winRate})
 	}
 
 	return rankLeaderboardCandidates(candidates), nil
@@ -117,6 +131,7 @@ func rankLeaderboardCandidates(candidates []leaderboardCandidate) []LeaderboardE
 			Name:    c.name,
 			Country: "India",
 			ROI:     c.roi,
+			WinRate: c.winRate,
 			UserID:  c.userID.Hex(),
 		})
 	}

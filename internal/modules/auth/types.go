@@ -11,7 +11,7 @@ type User struct {
 	ID        primitive.ObjectID `json:"id" bson:"_id,omitempty"`
 	Name      string             `json:"name" bson:"name"`
 	Email     string             `json:"email" bson:"email"`
-	Phone     string             `json:"phone" bson:"phone"`
+	Phone     string             `json:"phone" bson:"phone,omitempty"`
 	Tier      string             `json:"tier" bson:"tier"` // e.g. "STANDARD", "PRO", "INSTITUTIONAL"
 	Role      string             `json:"role" bson:"role"` // "user" (default) or "admin"
 	Settings  UserSettings       `json:"settings" bson:"settings"`
@@ -56,6 +56,12 @@ type registerRequest struct {
 type loginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+// googleAuthRequest carries the ID token ("credential") returned by Google
+// Identity Services on the client.
+type googleAuthRequest struct {
+	Credential string `json:"credential"`
 }
 
 type updateMeRequest struct {

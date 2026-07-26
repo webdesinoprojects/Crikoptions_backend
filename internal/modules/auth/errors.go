@@ -44,6 +44,10 @@ func mapAuthError(err error) (int, string) {
 		return http.StatusNotFound, "User not found"
 	case errors.Is(err, errNothingToUpdate):
 		return http.StatusBadRequest, "Nothing to update"
+	case errors.Is(err, errGoogleNotConfigured):
+		return http.StatusServiceUnavailable, "Google sign-in is not available"
+	case errors.Is(err, errGoogleInvalidToken):
+		return http.StatusUnauthorized, "Could not verify Google sign-in"
 	case errors.Is(err, errTokenExpired), errors.Is(err, errInvalidToken), errors.Is(err, errUnauthorized):
 		return http.StatusUnauthorized, "Unauthorized"
 	default:
