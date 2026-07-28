@@ -10,6 +10,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/reconcile"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
@@ -228,4 +229,172 @@ func (s *Store) CompleteStuckTerminalMatches(ctx context.Context, now time.Time)
 		log.Printf("sportmonks completed %d stuck terminal matches", updated)
 	}
 	return updated, nil
+}
+
+// AbandonDeadLiveMatches closes provider matches that still claim to be in play
+// but whose feed died without Sportmonks ever reporting a terminal phase.
+//
+// CompleteStuckTerminalMatches cannot reach these: it keys off providerPhase,
+// which only a successful poll can set. When polling stops first (fixture drops
+// off livescores, quota exhausted, key expired, league disabled) the match is
+// orphaned at live/innings_break forever.
+//
+// Such a match is closed as ABANDONED, not completed: we never saw a result, so
+// settling on a frozen scoreboard would be wrong. Abandonment freezes the
+// dispositions — innings that genuinely finalised still settle, everything else
+// voids and refunds.
+func (s *Store) AbandonDeadLiveMatches(ctx context.Context, now time.Time, deadAfter, maxDuration time.Duration) (int64, error) {
+	now = now.UTC()
+	if deadAfter <= 0 {
+		deadAfter = 2 * time.Hour
+	}
+	if maxDuration <= 0 {
+		maxDuration = matches.DeadLiveMatchAfter
+	}
+	pollCutoff := now.Add(-deadAfter)
+	startCutoff := now.Add(-maxDuration)
+
+	cursor, err := s.matches.Find(ctx, bson.M{
+		"provider":  ProviderName,
+		"feedState": bson.M{"$ne": matches.FeedStateTerminal},
+		"status": bson.M{"$in": []string{
+			matches.StatusLive, matches.StatusInningsBreak,
+		}},
+		// Both guards must hold: a long-running match with a healthy feed is fine,
+		// and a brief outage on a match that started an hour ago is fine.
+		"startTime": bson.M{"$lte": startCutoff},
+		"$or": bson.A{
+			bson.M{"lastSuccessfulPollAt": bson.M{"$lte": pollCutoff}},
+			bson.M{"lastSuccessfulPollAt": bson.M{"$exists": false}},
+			bson.M{"lastSuccessfulPollAt": nil},
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var rows []matches.Match
+	if err := cursor.All(ctx, &rows); err != nil {
+		return 0, err
+	}
+	var updated int64
+	for _, match := range rows {
+		closed, err := s.abandonDeadMatch(ctx, match.ID, now)
+		if err != nil {
+			return updated, err
+		}
+		if closed {
+			updated++
+		}
+	}
+	if updated > 0 {
+		log.Printf("sportmonks abandoned %d dead live matches (no poll for %s)", updated, deadAfter)
+	}
+	return updated, nil
+}
+
+// abandonDeadMatch transitions one orphaned match to abandoned and enqueues the
+// resulting settlement/void work, mirroring ApplyProviderTerminalClosure but
+// driven by our own wall clock rather than a provider phase.
+func (s *Store) abandonDeadMatch(ctx context.Context, id primitive.ObjectID, now time.Time) (bool, error) {
+	session, err := s.db.Client().StartSession()
+	if err != nil {
+		return false, err
+	}
+	defer session.EndSession(ctx)
+
+	closed := false
+	_, err = session.WithTransaction(ctx, func(sessionContext mongo.SessionContext) (any, error) {
+		var match matches.Match
+		err := s.matches.FindOne(sessionContext, bson.M{"_id": id}).Decode(&match)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if match.FeedState == matches.FeedStateTerminal {
+			return false, nil
+		}
+		switch match.Status {
+		case matches.StatusLive, matches.StatusInningsBreak:
+		default:
+			return false, nil
+		}
+		if err := s.resetPendingFinalization(sessionContext, &match, now); err != nil {
+			return nil, err
+		}
+		previousVersion := match.StateVersion
+		previousTradingVersion := match.TradingVersion
+		match.StateVersion++
+
+		current := match
+		match.Status = matches.StatusAbandoned
+		match.FeedState = matches.FeedStateTerminal
+		match.TradingState = "closed"
+		match.TradingBlockers = providerBlockers(match.TradingBlockers, "not_live", "feed_dead")
+		match.LiveContext = nil
+		match.MatchPulse = nil
+		match.ThisOver = nil
+		match.ProviderReconcilePolls = 0
+		match.HealthySnapshotCount = 0
+		match.FinalCandidate = nil
+		// Settle only innings that genuinely finalised; void the rest.
+		freezeAbandonmentDispositions(current, &match)
+		if match.TradingVersion == previousTradingVersion {
+			match.TradingVersion++
+		}
+		match.UpdatedAt = now
+
+		result, err := s.matches.ReplaceOne(sessionContext, bson.M{
+			"_id": match.ID, "stateVersion": previousVersion,
+		}, match)
+		if err != nil {
+			return nil, err
+		}
+		if result.ModifiedCount != 1 {
+			return nil, ErrConcurrentApply
+		}
+		if err := s.projectMarkets(sessionContext, match, reconcile.Projection{CurrentInnings: match.Innings}); err != nil {
+			return nil, err
+		}
+		if err := s.insertMarketSnapshots(sessionContext, match, now); err != nil {
+			return nil, err
+		}
+		if err := s.enqueueSettlementJobs(sessionContext, match, now); err != nil {
+			return nil, err
+		}
+		if err := s.enqueueVoidJobs(sessionContext, match, now); err != nil {
+			return nil, err
+		}
+		if err := s.enqueueTradingGateJob(sessionContext, match, now); err != nil {
+			return nil, err
+		}
+		if err := s.insertMatchOutbox(sessionContext, match, "match.state", now); err != nil {
+			return nil, err
+		}
+		closed = true
+		log.Printf(
+			"sportmonks match %s (fixture %d): abandoned — feed dead since %s, no terminal provider phase",
+			match.ID.Hex(), match.ProviderFixtureID, lastPollLabel(current),
+		)
+		return true, nil
+	}, options.Transaction().
+		SetReadConcern(readconcern.Snapshot()).
+		SetWriteConcern(writeconcern.Majority()))
+	if err != nil {
+		if errors.Is(err, ErrConcurrentApply) || errors.Is(err, ErrSettlementInFlight) {
+			return false, nil
+		}
+		return false, err
+	}
+	return closed, nil
+}
+
+func lastPollLabel(match matches.Match) string {
+	if match.LastSuccessfulPollAt == nil {
+		return "never"
+	}
+	return match.LastSuccessfulPollAt.UTC().Format(time.RFC3339)
 }

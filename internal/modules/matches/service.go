@@ -98,6 +98,7 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	// only leaves these visible while no real Sportmonks match is in play, so they
 	// act as a fallback that keeps the terminal populated between live fixtures.
 	fallback := make([]Match, 0)
+	now := time.Now().UTC()
 	for i := range all {
 		if all[i].Hidden {
 			continue
@@ -105,6 +106,12 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 		all[i].Status = NormalizeStatus(all[i].Status)
 		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)
 		AnnotateTradable(&all[i])
+		// A provider match whose feed died still carries its last live status.
+		// Without this guard the frozen scoreboard sits on the home feed forever,
+		// because only a provider-reported terminal phase can clear the status.
+		if LiveFeedExpired(&all[i], now) {
+			continue
+		}
 		if all[i].DataSource != DataSourceSportmonks {
 			// Non-provider matches are fallback demo games, surfaced below only
 			// when there is no live Sportmonks fixture.
@@ -147,6 +154,11 @@ func (s *Service) ProviderMatchImminent(ctx context.Context, within time.Duratio
 	for i := range all {
 		m := all[i]
 		if m.Hidden || m.DataSource != DataSourceSportmonks {
+			continue
+		}
+		// A zombie (frozen-feed) match must not count as a real fixture in play,
+		// otherwise it keeps the demo replays hidden indefinitely.
+		if LiveFeedExpired(&m, time.Now()) {
 			continue
 		}
 		switch NormalizeStatus(m.Status) {

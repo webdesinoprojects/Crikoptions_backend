@@ -11,18 +11,18 @@ import (
 
 // LiveContextInput carries provider scoreboard rows for the active innings.
 type LiveContextInput struct {
-	CurrentInnings int
-	BattingTeamID  int64
-	LocalTeamID    int64
-	VisitorTeamID  int64
-	LocalTeamName  string
+	CurrentInnings  int
+	BattingTeamID   int64
+	LocalTeamID     int64
+	VisitorTeamID   int64
+	LocalTeamName   string
 	VisitorTeamName string
-	CurrentScore   int
-	Wickets        int
-	LegalBalls     int
-	ScheduledBalls int
-	Target         int
-	Deliveries     []Delivery
+	CurrentScore    int
+	Wickets         int
+	LegalBalls      int
+	ScheduledBalls  int
+	Target          int
+	Deliveries      []Delivery
 }
 
 // BuildLiveContext maps Sportmonks batting/bowling scoreboards to the on-field matrix.
@@ -32,7 +32,7 @@ func BuildLiveContext(battingItems, bowlingItems []map[string]any, input LiveCon
 	}
 	scoreboard := fmt.Sprintf("S%d", input.CurrentInnings)
 
-	striker, nonStriker, partnership := battingPair(battingItems, scoreboard)
+	striker, nonStriker, partnership := battingPair(battingItems, scoreboard, input.Deliveries, input.CurrentInnings)
 	bowler := activeBowler(bowlingItems, scoreboard, input.Deliveries, input.CurrentInnings)
 	// Partial on-field data is still useful for the UI. Only skip when nothing
 	// resolved — trading health no longer depends on a full matrix.
@@ -190,22 +190,41 @@ func BuildThisOver(deliveries []Delivery, innings, legalBalls int) []matches.Ove
 	return out
 }
 
-func battingPair(items []map[string]any, scoreboard string) (matches.BatterStats, matches.BatterStats, matches.PartnershipStats) {
-	var atCrease []matches.BatterStats
+// creaseBatter pairs a batter's display stats with the identity needed to match
+// them against the ball-by-ball feed.
+type creaseBatter struct {
+	stats  matches.BatterStats
+	id     int64
+	active bool
+	notOut bool
+}
+
+// battingPair resolves the two batters currently at the crease and which of them
+// is on strike.
+//
+// Strike order is taken from the ball-by-ball feed rather than the scoreboard:
+// the last delivery records who faced it, and standard rotation (odd runs run,
+// end of over) gives who is on strike now. That holds regardless of how the
+// provider populates active, and unlike the previous implementation it never
+// depends on the order rows happen to arrive in.
+func battingPair(items []map[string]any, scoreboard string, deliveries []Delivery, innings int) (matches.BatterStats, matches.BatterStats, matches.PartnershipStats) {
 	var partnership matches.PartnershipStats
+	var candidates []creaseBatter
+
 	for _, item := range items {
 		if !scoreboardMatches(item, scoreboard) {
 			continue
 		}
-		if !batsmanAtCrease(item) {
-			continue
-		}
-		runs := statInt(item, "score", "runs")
-		balls := statInt(item, "ball", "balls")
-		atCrease = append(atCrease, matches.BatterStats{
-			Name:  playerName(item, "batsman", "player"),
-			Runs:  runs,
-			Balls: balls,
+		active, hasActive := boolField(item, "active")
+		candidates = append(candidates, creaseBatter{
+			stats: matches.BatterStats{
+				Name:  playerName(item, "batsman", "player"),
+				Runs:  statInt(item, "score", "runs"),
+				Balls: statInt(item, "ball", "balls"),
+			},
+			id:     batterIdentity(item),
+			active: active && hasActive,
+			notOut: batsmanAtCrease(item),
 		})
 		if pRuns := statInt(item, "partnership_runs"); pRuns > 0 {
 			partnership.Runs = pRuns
@@ -222,50 +241,175 @@ func battingPair(items []map[string]any, scoreboard string) (matches.BatterStats
 			}
 		}
 	}
+
+	atCrease := selectAtCrease(candidates)
 	if len(atCrease) == 0 {
 		return matches.BatterStats{}, matches.BatterStats{}, partnership
 	}
+	if len(atCrease) == 1 {
+		return atCrease[0].stats, matches.BatterStats{}, partnership
+	}
 
-	var striker, nonStriker matches.BatterStats
-	for _, batter := range atCrease {
-		if item := itemForBatter(items, scoreboard, batter.Name); item != nil && isActivePlayer(item, "active") {
-			striker = batter
-			break
-		}
-	}
-	if striker.Name == "" {
-		striker = atCrease[0]
-		for _, batter := range atCrease[1:] {
-			if batter.Runs > striker.Runs || (batter.Runs == striker.Runs && batter.Balls > striker.Balls) {
-				striker = batter
-			}
-		}
-	}
-	for _, batter := range atCrease {
-		if batter.Name != striker.Name {
-			if nonStriker.Name == "" || batter.Balls > nonStriker.Balls {
-				nonStriker = batter
-			}
-		}
-	}
+	strikerIdx := strikerIndex(atCrease, deliveries, innings)
+	striker := atCrease[strikerIdx].stats
+	nonStriker := atCrease[1-strikerIdx].stats
 	return striker, nonStriker, partnership
 }
 
-func itemForBatter(items []map[string]any, scoreboard, name string) map[string]any {
-	for _, item := range items {
-		if !scoreboardMatches(item, scoreboard) {
+// selectAtCrease narrows the innings scoreboard to the two batters out in the
+// middle.
+//
+// Providers disagree on what active means: some flag both crease batters, others
+// flag only the one on strike. Rather than betting on either reading, we treat
+// active rows as definitely at the crease and top up from the not-out rows when
+// only one is flagged. Dismissed batters are excluded in both paths — letting
+// them through was why a long-departed top scorer could appear on the card.
+func selectAtCrease(candidates []creaseBatter) []creaseBatter {
+	var active, notOut []creaseBatter
+	for _, candidate := range candidates {
+		if candidate.stats.Name == "" {
 			continue
 		}
-		if playerName(item, "batsman", "player") == name {
-			return item
+		if candidate.active {
+			active = append(active, candidate)
+			continue
+		}
+		if candidate.notOut {
+			notOut = append(notOut, candidate)
 		}
 	}
-	return nil
+	switch {
+	case len(active) >= 2:
+		// Both crease batters flagged: take the most recent pair.
+		return active[len(active)-2:]
+	case len(active) == 1:
+		// Only the striker is flagged; partner is the latest not-out batter.
+		// active stays first so it wins the strike tie-break below.
+		out := active
+		if len(notOut) > 0 {
+			out = append(out, notOut[len(notOut)-1])
+		}
+		return out
+	default:
+		if len(notOut) > 2 {
+			notOut = notOut[len(notOut)-2:]
+		}
+		return notOut
+	}
 }
 
+// strikerIndex returns which of the two at-crease batters is on strike, derived
+// from the last delivery of the innings. Falls back to index 0 when the feed
+// cannot resolve it (for example immediately after a wicket, before the new
+// batter has faced a ball).
+func strikerIndex(pair []creaseBatter, deliveries []Delivery, innings int) int {
+	last, ok := lastDelivery(deliveries, innings)
+	if !ok || last.BatterID <= 0 {
+		return 0
+	}
+	faced := -1
+	for i, batter := range pair {
+		if batter.id > 0 && batter.id == last.BatterID {
+			faced = i
+			break
+		}
+	}
+	if faced < 0 {
+		// Whoever faced the last ball is no longer at the crease — they were just
+		// dismissed. Which end the replacement takes depends on whether the batters
+		// had crossed, which the feed does not tell us, so keep the provider's own
+		// ordering (active row first) until the next ball resolves it.
+		return 0
+	}
+	if strikeRotates(last, deliveries, innings) {
+		return 1 - faced
+	}
+	return faced
+}
+
+// strikeRotates reports whether the batters changed ends after this delivery:
+// an odd number of runs physically run, and/or the completion of an over.
+func strikeRotates(last Delivery, deliveries []Delivery, innings int) bool {
+	run := last.BatterRuns + last.Extras.Byes + last.Extras.LegByes
+	if last.Extras.Wides > 0 {
+		// The one-run wide penalty is not run between the wickets; anything beyond
+		// it is. No-ball penalties work the same way and are already excluded from
+		// BatterRuns by the reducer.
+		run += last.Extras.Wides - 1
+	}
+	rotate := run%2 == 1
+	if last.LegalBall && legalBallsInInnings(deliveries, innings)%6 == 0 {
+		rotate = !rotate
+	}
+	return rotate
+}
+
+func lastDelivery(deliveries []Delivery, innings int) (Delivery, bool) {
+	for i := len(deliveries) - 1; i >= 0; i-- {
+		if deliveries[i].Innings == innings {
+			return deliveries[i], true
+		}
+	}
+	return Delivery{}, false
+}
+
+func legalBallsInInnings(deliveries []Delivery, innings int) int {
+	count := 0
+	for _, d := range deliveries {
+		if d.Innings == innings && d.LegalBall {
+			count++
+		}
+	}
+	return count
+}
+
+// batterIdentity extracts the provider player id from a batting scoreboard row
+// so it can be matched against a delivery's batsman_id.
+func batterIdentity(item map[string]any) int64 {
+	return playerIdentity(item,
+		[]string{"batsman_id", "player_id", "batsmanId", "playerId"},
+		[]string{"batsman", "player"},
+	)
+}
+
+// playerIdentity reads a provider player id from a scoreboard row, checking flat
+// id fields first and then the embedded player relation.
+func playerIdentity(item map[string]any, idKeys, relations []string) int64 {
+	for _, key := range idKeys {
+		if id, ok := int64Field(item, key); ok && id > 0 {
+			return id
+		}
+	}
+	for _, key := range relations {
+		nested, exists := item[key]
+		if !exists || nested == nil {
+			continue
+		}
+		if items, err := unwrapItems(nested); err == nil && len(items) > 0 {
+			if id, ok := int64Field(items[0], "id"); ok && id > 0 {
+				return id
+			}
+		}
+		if object, ok := nested.(map[string]any); ok {
+			if id, ok := int64Field(object, "id"); ok && id > 0 {
+				return id
+			}
+		}
+	}
+	return 0
+}
+
+// activeBowler resolves who is currently bowling. As with the batting pair, the
+// last delivery's bowler_id is authoritative; the active flag is the fallback.
+// Array position is deliberately not trusted — the previous behaviour of taking
+// the first row pinned the display to the opening bowler for the whole innings.
 func activeBowler(items []map[string]any, scoreboard string, deliveries []Delivery, innings int) matches.BowlerStats {
-	var selected matches.BowlerStats
-	found := false
+	type bowlerCandidate struct {
+		stats  matches.BowlerStats
+		id     int64
+		active bool
+	}
+	var candidates []bowlerCandidate
 	for _, item := range items {
 		if !scoreboardMatches(item, scoreboard) {
 			continue
@@ -274,34 +418,54 @@ func activeBowler(items []map[string]any, scoreboard string, deliveries []Delive
 		if name == "" {
 			continue
 		}
-		runs := statInt(item, "runs")
-		wickets := statInt(item, "wickets")
-		maidens := statInt(item, "medians", "maidens")
 		balls := 0
 		if overs, ok := stringField(item, "overs"); ok {
 			if parsed, valid := ballsFromOvers(overs); valid {
 				balls = parsed
 			}
 		}
-		candidate := matches.BowlerStats{
-			Name:    name,
-			Balls:   balls,
-			Maidens: maidens,
-			Runs:    runs,
-			Wickets: wickets,
-		}
-		if isActivePlayer(item, "active") || !found {
-			selected = candidate
-			found = true
-			if isActivePlayer(item, "active") {
+		active, hasActive := boolField(item, "active")
+		candidates = append(candidates, bowlerCandidate{
+			stats: matches.BowlerStats{
+				Name:    name,
+				Balls:   balls,
+				Maidens: statInt(item, "medians", "maidens"),
+				Runs:    statInt(item, "runs"),
+				Wickets: statInt(item, "wickets"),
+			},
+			id:     playerIdentity(item, []string{"bowler_id", "player_id", "bowlerId", "playerId"}, []string{"bowler", "player"}),
+			active: active && hasActive,
+		})
+	}
+	if len(candidates) == 0 {
+		return matches.BowlerStats{}
+	}
+
+	selected := -1
+	if last, ok := lastDelivery(deliveries, innings); ok && last.BowlerID > 0 {
+		for i, candidate := range candidates {
+			if candidate.id > 0 && candidate.id == last.BowlerID {
+				selected = i
 				break
 			}
 		}
 	}
-	if selected.Name != "" {
-		selected.CurrentOverRuns = bowlerOverRuns(deliveries, innings, selected.Name)
+	if selected < 0 {
+		for i, candidate := range candidates {
+			if candidate.active {
+				selected = i
+				break
+			}
+		}
 	}
-	return selected
+	if selected < 0 {
+		// Most recently added row is the closest thing to "current" we have left.
+		selected = len(candidates) - 1
+	}
+
+	stats := candidates[selected].stats
+	stats.CurrentOverRuns = bowlerOverRuns(deliveries, innings, stats.Name)
+	return stats
 }
 
 func bowlerOverRuns(deliveries []Delivery, innings int, bowlerName string) int {
@@ -331,13 +495,32 @@ func bowlerOverRuns(deliveries []Delivery, innings int, bowlerName string) int {
 	return total
 }
 
+// batsmanAtCrease reports whether a batting row belongs to a batter who has not
+// been dismissed.
+//
+// Sportmonks does not send a how-out string on the batting resource, so the
+// original text-only check passed every row through and dismissed batters stayed
+// eligible for the on-field card. The structured dismissal columns
+// (catch_stump_player_id, runout_by_id) and the fall-of-wicket pair are the
+// signals that actually appear.
 func batsmanAtCrease(item map[string]any) bool {
 	for _, key := range []string{"wicket_type", "how_out", "dismissal"} {
 		if value, ok := stringField(item, key); ok {
 			lower := strings.ToLower(strings.TrimSpace(value))
 			if lower == "" || strings.Contains(lower, "not out") {
-				return true
+				continue
 			}
+			return false
+		}
+	}
+	for _, key := range []string{"catch_stump_player_id", "runout_by_id", "catchstump_id"} {
+		if id, ok := int64Field(item, key); ok && id > 0 {
+			return false
+		}
+	}
+	// A recorded fall of wicket means this batter's wicket fell.
+	for _, key := range []string{"fow_score", "fow_balls"} {
+		if value, ok := int64Field(item, key); ok && value > 0 {
 			return false
 		}
 	}

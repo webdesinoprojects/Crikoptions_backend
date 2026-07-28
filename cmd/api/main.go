@@ -37,6 +37,27 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/watchdog"
 )
 
+// deadFeedAbandonAfter is how long a live provider match may go with no
+// successful poll before the reaper closes it as abandoned. Deliberately far
+// longer than the home feed's display grace (matches.StaleLiveGrace): hiding a
+// frozen card is cheap and reversible, voiding trades is not.
+//
+// Override with SPORTMONKS_DEAD_FEED_ABANDON_AFTER (e.g. "90m").
+var deadFeedAbandonAfter = envDuration("SPORTMONKS_DEAD_FEED_ABANDON_AFTER", 2*time.Hour)
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		log.Printf("%s=%q is not a positive duration; using %s", key, raw, fallback)
+		return fallback
+	}
+	return parsed
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -165,7 +186,13 @@ func main() {
 		} else if n > 0 {
 			log.Printf("sportmonks healed %d falsely stale live matches on startup", n)
 		}
+		if n, err := feedStore.AbandonDeadLiveMatches(context.Background(), time.Now().UTC(), deadFeedAbandonAfter, matches.DeadLiveMatchAfter); err != nil {
+			log.Printf("sportmonks abandon dead live matches: %v", err)
+		} else if n > 0 {
+			log.Printf("sportmonks abandoned %d dead live matches on startup", n)
+		}
 		go watchdog.Run(providerCtx, feedStore, 5*time.Second)
+		go watchdog.RunReaper(providerCtx, feedStore, 5*time.Minute, deadFeedAbandonAfter, matches.DeadLiveMatchAfter)
 		provider, providerErr := sportmonksclient.New(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
 		if providerErr != nil {
 			log.Fatalf("Sportmonks client: %v", providerErr)
