@@ -129,6 +129,9 @@ type ScoreUpdate struct {
 	TargetScore  int               `json:"targetScore,omitempty"`
 	Status       string            `json:"status"`
 	LiveContext  *LiveMatchContext `json:"-"`
+	// ThisOver is the active over for the ball strip. Nil leaves the stored value
+	// untouched; a non-nil (possibly empty) slice replaces it.
+	ThisOver []OverBall `json:"-"`
 }
 
 type BatterStats struct {

@@ -496,6 +496,17 @@ func (s *Service) recordBall(ctx context.Context, id string, req BallEventReques
 		applyDeliveryToLiveContext(liveContext, req, extra, legalBall, bowled)
 	}
 
+	extraValue := ""
+	if extra != nil {
+		extraValue = *extra
+	}
+	thisOver := s.currentOverBalls(ctx, matchID, innings, over, OverBall{
+		Runs:      req.Runs,
+		IsWicket:  req.IsWicket,
+		LegalBall: legalBall,
+		Extra:     extraValue,
+	})
+
 	match, err := s.repo.UpdateScore(ctx, objID, ScoreUpdate{
 		Innings:      innings,
 		CurrentScore: currentScore,
@@ -504,6 +515,7 @@ func (s *Service) recordBall(ctx context.Context, id string, req BallEventReques
 		TargetScore:  targetScore,
 		Status:       status,
 		LiveContext:  liveContext,
+		ThisOver:     thisOver,
 	})
 	if err != nil || match == nil {
 		return match, BallEvent{}, err
@@ -536,6 +548,39 @@ func (s *Service) recordBall(ctx context.Context, id string, req BallEventReques
 		s.publishCommentary(match.ID.Hex(), event, req, extra, match)
 	}
 	return match, event, nil
+}
+
+// currentOverBalls rebuilds the active over for the ball strip, including the
+// delivery being recorded (which is not persisted yet at call time).
+//
+// Provider matches get ThisOver from the Sportmonks reducer, but manual and
+// simulator matches had no equivalent, so warm-up games served a null thisOver
+// and the strip rendered empty. The persisted ball events are the same source
+// GetRecentEvents already uses for this widget.
+func (s *Service) currentOverBalls(ctx context.Context, matchID string, innings, over int, incoming OverBall) []OverBall {
+	balls := make([]OverBall, 0, 8)
+	if s.events != nil {
+		// Fetch enough of the trail that a full over plus its extras is covered.
+		if events, err := s.events.RecentEvents(ctx, matchID, innings, 12); err == nil {
+			for _, event := range filterEventsByOver(events, over) {
+				balls = append(balls, overBallFromEvent(event))
+			}
+		}
+	}
+	return append(balls, incoming)
+}
+
+func overBallFromEvent(event BallEvent) OverBall {
+	extra := ""
+	if event.Extra != nil {
+		extra = *event.Extra
+	}
+	return OverBall{
+		Runs:      event.Runs,
+		IsWicket:  event.IsWicket,
+		LegalBall: event.LegalBall,
+		Extra:     extra,
+	}
 }
 
 // GetRecentEvents returns deliveries for the current over only (plus extras in

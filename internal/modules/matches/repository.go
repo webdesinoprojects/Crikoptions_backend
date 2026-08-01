@@ -111,6 +111,9 @@ func (r *MemoryRepository) UpdateScore(ctx context.Context, id primitive.ObjectI
 				liveContext := *score.LiveContext
 				r.matches[i].LiveContext = &liveContext
 			}
+			if score.ThisOver != nil {
+				r.matches[i].ThisOver = append([]OverBall(nil), score.ThisOver...)
+			}
 			r.matches[i].UpdatedAt = time.Now().UTC()
 			return &r.matches[i], nil
 		}
@@ -537,6 +540,9 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 	}
 	if score.LiveContext != nil {
 		set["liveContext"] = score.LiveContext
+	}
+	if score.ThisOver != nil {
+		set["thisOver"] = score.ThisOver
 	}
 
 	res := r.col.FindOneAndUpdate(
