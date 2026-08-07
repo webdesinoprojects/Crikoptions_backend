@@ -41,6 +41,7 @@ type Storage interface {
 	PollableTargetCount(context.Context, time.Time) (int64, error)
 	OpenTargetCount(context.Context, time.Time, string) (int64, error)
 	ClaimTarget(context.Context, int64, string, time.Time, time.Duration) (string, bool, error)
+	RenewTargetLease(context.Context, int64, string, string, time.Time) error
 	CompleteTargetPoll(context.Context, int64, string, string, string, string, string, time.Time, time.Time) error
 	FailTargetPoll(context.Context, int64, string, string, error, time.Time, time.Time) error
 	DeferTarget(context.Context, int64, time.Time, string) error
@@ -407,19 +408,78 @@ func (w *Worker) dispatch(ctx context.Context) error {
 	return nil
 }
 
+// leaseHeartbeat keeps a claimed fixture lease alive for as long as this worker
+// is genuinely working on it. The lease exists to stop two workers polling the
+// same fixture, not to cap how long a poll may take — and a first apply that
+// backfills a whole innings of deliveries can exceed any fixed TTL. It returns
+// a stop func that must be called before the poll records its outcome.
+func (w *Worker) leaseHeartbeat(ctx context.Context, fixtureID int64, token string) func() {
+	ttl := w.cfg.LeaseTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	// Renew well inside the TTL so one slow or dropped renewal is survivable.
+	// Derived from the TTL rather than floored at a constant: a floor larger
+	// than the TTL would never renew in time, which is the very failure this
+	// heartbeat exists to prevent.
+	interval := ttl / 3
+	if interval > 10*time.Second {
+		interval = 10 * time.Second
+	}
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				err := w.store.RenewTargetLease(ctx, fixtureID, w.owner, token, w.now().UTC().Add(ttl))
+				if err == nil {
+					continue
+				}
+				// The lease is gone; another worker owns the fixture now. Stop
+				// renewing and let the poll's own fencing reject its result.
+				if errors.Is(err, store.ErrFixtureLeaseLost) {
+					w.logger.Printf("sportmonks fixture %d lease lost while polling", fixtureID)
+					return
+				}
+				w.logger.Printf("sportmonks fixture %d renew lease: %v", fixtureID, err)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+	}
+}
+
 func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, token string, activeInterval time.Duration) {
+	stopHeartbeat := w.leaseHeartbeat(ctx, target.ID, token)
+	defer stopHeartbeat()
 	now := w.now().UTC()
 	if !w.takeProviderQuota(ctx, "fixtures") {
 		if w.cfg.Mode == client.ModeLive {
 			if err := w.store.ResetFinalizationHolds(ctx, target.ID, w.owner, token, now); err != nil {
 				if errors.Is(err, store.ErrFixtureLeaseLost) {
+					w.logger.Printf("sportmonks fixture %d quota hold abandoned: lease lost", target.ID)
 					return
 				}
 				w.logger.Printf("sportmonks fixture %d reset finalization hold: %v", target.ID, err)
 			}
 			_ = w.store.MarkFeedUnavailable(ctx, target.ID, matches.FeedStateQuotaLimited, "quota_limited", now, nil)
 		}
-		_ = w.store.FailTargetPoll(ctx, target.ID, w.owner, token, ErrQuotaReserved, now, now.Add(w.cfg.MaxPollInterval))
+		if err := w.store.FailTargetPoll(ctx, target.ID, w.owner, token, ErrQuotaReserved, now, now.Add(w.cfg.MaxPollInterval)); err != nil {
+			w.logger.Printf("sportmonks fixture %d record quota hold: %v", target.ID, err)
+		}
 		return
 	}
 	envelope, err := w.provider.FixtureByID(ctx, target.ID, client.FixtureOptions{Includes: []string{
@@ -536,6 +596,10 @@ func (w *Worker) handlePollFailure(ctx context.Context, target store.FixtureTarg
 	now := w.now().UTC()
 	next := now.Add(w.failureBackoff(target, cause))
 	if errors.Is(cause, store.ErrFixtureLeaseLost) {
+		// Another worker owns the fixture; it will record the outcome. Log it —
+		// a silent return here once hid a fixture that retried for 90 minutes
+		// while leaving no failure, no error and no advancing poll timestamp.
+		w.logger.Printf("sportmonks fixture %d poll abandoned: lease lost", target.ID)
 		return
 	}
 	if w.cfg.Mode == client.ModeLive {
@@ -549,7 +613,9 @@ func (w *Worker) handlePollFailure(ctx context.Context, target store.FixtureTarg
 		cutoff := now.Add(-staleAfter)
 		_ = w.store.MarkFeedUnavailable(ctx, target.ID, matches.FeedStateStale, "feed_stale", now, &cutoff)
 	}
-	_ = w.store.FailTargetPoll(ctx, target.ID, w.owner, token, cause, now, next)
+	if err := w.store.FailTargetPoll(ctx, target.ID, w.owner, token, cause, now, next); err != nil {
+		w.logger.Printf("sportmonks fixture %d record poll failure (cause %v): %v", target.ID, cause, err)
+	}
 }
 
 // feedValidityForInterval is how long a successful poll keeps the feed fresh.

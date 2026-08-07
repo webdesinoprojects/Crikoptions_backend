@@ -1195,6 +1195,24 @@ func (s *Store) ClaimTarget(ctx context.Context, fixtureID int64, owner string, 
 	return token, result != nil && result.ModifiedCount == 1, err
 }
 
+// RenewTargetLease extends a lease the caller still holds. A poll that has to
+// backfill a long delivery history writes one event per round trip, which can
+// outrun a fixed lease TTL; without renewal the apply loses the lease, the
+// result is discarded, and the fixture retries forever without recording
+// anything. Fenced on owner+token so a stolen lease is never extended.
+func (s *Store) RenewTargetLease(ctx context.Context, fixtureID int64, owner, token string, until time.Time) error {
+	result, err := s.fixtures.UpdateOne(ctx,
+		bson.M{"_id": fixtureID, "leaseOwner": owner, "leaseToken": token},
+		bson.M{"$set": bson.M{"leaseUntil": until.UTC()}})
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount != 1 {
+		return ErrFixtureLeaseLost
+	}
+	return nil
+}
+
 func (s *Store) CompleteTargetPoll(ctx context.Context, fixtureID int64, owner, token, mode, snapshotHash, status string, now, next time.Time) error {
 	result, err := s.fixtures.UpdateOne(ctx, bson.M{"_id": fixtureID, "leaseOwner": owner, "leaseToken": token}, bson.M{
 		"$set": bson.M{
