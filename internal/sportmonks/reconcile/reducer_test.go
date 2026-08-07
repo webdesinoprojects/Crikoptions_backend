@@ -366,15 +366,39 @@ func TestFiftyOverFormatsRequireStructuredSchedule(t *testing.T) {
 	})
 }
 
-func TestStructuredOversMustMatchFormat(t *testing.T) {
+// A shortened match (rain delay, reduced-overs restart) stays a real fixture:
+// it reduces to the provider's over limit and is flagged so trading can be held,
+// rather than being dropped as an unsupported format.
+func TestReducedOversAreAdmittedAndFlagged(t *testing.T) {
 	reduced := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"T20","scheduled_overs":10`, 1)
-	if _, err := ReduceFixtureJSON([]byte(reduced), mustCatalog(t)); !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("conflicting T20 schedule error = %v", err)
+	projection, err := ReduceFixtureJSON([]byte(reduced), mustCatalog(t))
+	if err != nil {
+		t.Fatalf("shortened T20: %v", err)
 	}
+	if !projection.ReducedOvers || projection.ScheduledOvers != 10 || projection.ScheduledBalls != 60 {
+		t.Fatalf("shortened T20 = reduced:%v overs:%d balls:%d",
+			projection.ReducedOvers, projection.ScheduledOvers, projection.ScheduledBalls)
+	}
+
 	reducedODI := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"ODI","total_overs_played":20`, 1)
-	if _, err := ReduceFixtureJSON([]byte(reducedODI), mustCatalog(t)); !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("reduced ODI schedule error = %v", err)
+	projection, err = ReduceFixtureJSON([]byte(reducedODI), mustCatalog(t))
+	if err != nil {
+		t.Fatalf("shortened ODI: %v", err)
 	}
+	if !projection.ReducedOvers || projection.ScheduledOvers != 20 || projection.ScheduledBalls != 120 {
+		t.Fatalf("shortened ODI = reduced:%v overs:%d balls:%d",
+			projection.ReducedOvers, projection.ScheduledOvers, projection.ScheduledBalls)
+	}
+
+	// Longer than the format allows is an unknown competition, not a shortened
+	// match, so it must still fail closed.
+	overlong := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"T20","scheduled_overs":30`, 1)
+	if _, err := ReduceFixtureJSON([]byte(overlong), mustCatalog(t)); !errors.Is(err, ErrUnsupportedFormat) {
+		t.Fatalf("overlong T20 schedule error = %v", err)
+	}
+}
+
+func TestStructuredOversMustMatchFormat(t *testing.T) {
 	officialT20 := strings.Replace(fixtureJSON(2, 0, "0.1", 1), `"type":"T20"`, `"type":"T20","total_overs_played":20`, 1)
 	if _, err := ReduceFixtureJSON([]byte(officialT20), mustCatalog(t)); err != nil {
 		t.Fatalf("structured T20 schedule: %v", err)

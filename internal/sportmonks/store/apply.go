@@ -740,6 +740,7 @@ func initialMatch(projection reconcile.Projection, now time.Time) matches.Match 
 		TeamBName: teamName(projection.VisitorTeamName, projection.VisitorTeamID),
 		StartTime: projection.StartTime, Status: matches.StatusUpcoming,
 		Innings: 1, BallsLeft: projection.ScheduledBalls, ScheduledBalls: projection.ScheduledBalls,
+		ScheduledOvers: projection.ScheduledOvers, ReducedOvers: projection.ReducedOvers,
 		StateVersion: 0, TradingVersion: 0, FeedState: matches.FeedStateWarming,
 		TradingState: "blocked", TradingBlockers: []string{"warming"},
 		LastStateChangeAt: timePointer(now), CreatedAt: now, UpdatedAt: now,
@@ -759,6 +760,8 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 	next.StartTime = projection.StartTime
 	next.ProviderPhase = projection.ProviderStatus
 	next.ScheduledBalls = projection.ScheduledBalls
+	next.ScheduledOvers = projection.ScheduledOvers
+	next.ReducedOvers = projection.ReducedOvers
 	next.ProviderBattingTeamID = projection.BattingTeamID
 	next.Innings = projection.CurrentInnings
 	if next.Innings <= 0 {
@@ -809,6 +812,15 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 			next.HealthySnapshotCount = 1
 		} else {
 			next.HealthySnapshotCount = current.HealthySnapshotCount + 1
+		}
+		// A shortened match (rain delay, reduced-overs restart) stays visible and
+		// keeps scoring, but pricing and settlement assume the format's standard
+		// ball count, so buy/sell is held until that math is reduced-overs aware.
+		if projection.ReducedOvers {
+			next.FeedState = matches.FeedStateHealthy
+			next.TradingState = "blocked"
+			next.TradingBlockers = providerBlockers(current.TradingBlockers, "reduced_overs")
+			break
 		}
 		// Open on the first successful live poll. Requiring 2 polls forced a
 		// multi-interval "warming/SYNCING" badge that looked broken in production.
@@ -1656,7 +1668,7 @@ func advanceFinalCandidate(current *matches.FinalCandidate, hash string, revisio
 var automatedBlockers = map[string]struct{}{
 	"warming": {}, "not_live": {}, "feed_stale": {}, "reconciling": {},
 	"innings_break": {}, "quota_limited": {}, "unsupported": {}, "finalizing": {},
-	"league_disabled": {},
+	"league_disabled": {}, "reduced_overs": {}, "revised_target": {}, "super_over": {},
 }
 
 func providerBlockers(existing []string, desired ...string) []string {

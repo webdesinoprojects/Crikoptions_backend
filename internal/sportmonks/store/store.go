@@ -961,16 +961,31 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 		if !alreadyAdmitted && !futureNotStartedFixture(fixture, start, now.UTC()) && !midMatchAdmitted {
 			continue
 		}
-		format, scheduledBalls, formatErr := reconcile.ClassifyFixtureFormat(fixture.Raw, fixture.Type)
+		formatInfo, formatErr := reconcile.ClassifyFixtureFormatInfo(fixture.Raw, fixture.Type)
+		format, scheduledBalls := formatInfo.Format, formatInfo.ScheduledBalls
+		scheduledOvers := formatInfo.ScheduledOvers
 		feedState := matches.FeedStateWarming
 		blockers := []string{"not_live"}
 		identityValid := fixture.LeagueID > 0 && fixture.SeasonID > 0 && fixture.LocalTeamID > 0 && fixture.VisitorTeamID > 0 && fixture.LocalTeamID != fixture.VisitorTeamID
-		supported := identityValid && formatErr == nil && !fixture.SuperOver && !rawMeaningful(fixture.RPCOvers) && !rawMeaningful(fixture.RPCTarget)
+		revisedTarget := rawMeaningful(fixture.RPCOvers) || rawMeaningful(fixture.RPCTarget)
+		supported := identityValid && formatErr == nil && !fixture.SuperOver && !revisedTarget
 		if !supported {
 			format = fixture.Type
 			scheduledBalls = 0
+			scheduledOvers = 0
 			feedState = matches.FeedStateUnsupported
-			blockers = []string{"unsupported"}
+			switch {
+			case fixture.SuperOver:
+				blockers = []string{"super_over"}
+			case revisedTarget:
+				blockers = []string{"revised_target"}
+			default:
+				blockers = []string{"unsupported"}
+			}
+		} else if formatInfo.Reduced {
+			// Shortened fixture: publish it normally, but keep buy/sell held so the
+			// reason is visible rather than the fixture silently disappearing.
+			blockers = []string{"not_live", "reduced_overs"}
 		}
 		localName := fixtureTeamName(fixture.LocalTeam, fixture.LocalTeamID)
 		visitorName := fixtureTeamName(fixture.VisitorTeam, fixture.VisitorTeamID)
@@ -986,6 +1001,7 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 			"teamBId": fmt.Sprintf("sportmonks:%d", fixture.VisitorTeamID),
 			"status":  matches.StatusUpcoming, "innings": 1,
 			"scheduledBalls": scheduledBalls, "ballsLeft": scheduledBalls, "oversText": "0.0",
+			"scheduledOvers": scheduledOvers, "reducedOvers": formatInfo.Reduced,
 			"stateVersion": 1, "tradingVersion": 1, "feedState": feedState,
 			"tradingState": "blocked", "tradingBlockers": blockers, "createdAt": now.UTC(),
 		}
@@ -1002,6 +1018,8 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 			setFields["format"] = format
 			setFields["scheduledBalls"] = scheduledBalls
 			setFields["ballsLeft"] = scheduledBalls
+			setFields["scheduledOvers"] = scheduledOvers
+			setFields["reducedOvers"] = formatInfo.Reduced
 			setFields["oversText"] = "0.0"
 			setFields["feedState"] = feedState
 			setFields["tradingState"] = "blocked"

@@ -21,7 +21,25 @@ var (
 	ErrUnknownScore       = errors.New("unknown Sportmonks score type")
 	ErrAggregateDrift     = errors.New("Sportmonks aggregate does not match deliveries")
 	ErrUnsupportedFormat  = errors.New("unsupported cricket format")
+	// ErrSuperOver and ErrRevisedTarget refine ErrUnsupportedFormat so the
+	// reason a live fixture is held reaches the UI as something explainable
+	// rather than a bare "unsupported".
+	ErrSuperOver     = errors.New("super over")
+	ErrRevisedTarget = errors.New("revised/DLS target")
 )
+
+// UnsupportedBlocker maps a rejected snapshot to the trading blocker that best
+// describes why the fixture is being held.
+func UnsupportedBlocker(err error) string {
+	switch {
+	case errors.Is(err, ErrSuperOver):
+		return "super_over"
+	case errors.Is(err, ErrRevisedTarget):
+		return "revised_target"
+	default:
+		return "unsupported"
+	}
+}
 
 type ScoreDefinition struct {
 	ID         int64
@@ -85,6 +103,8 @@ type Projection struct {
 	StartTime         time.Time
 	Format            string
 	ScheduledBalls    int
+	ScheduledOvers    int
+	ReducedOvers      bool
 	ProviderStatus    string
 	Status            string
 	CurrentInnings    int
@@ -186,17 +206,18 @@ func ReduceFixtureJSON(raw []byte, catalog Catalog) (Projection, error) {
 		return Projection{}, fmt.Errorf("%w: fixture identity is incomplete", ErrIncompleteSnapshot)
 	}
 	if superOver, _ := boolField(root, "super_over"); superOver {
-		return Projection{}, fmt.Errorf("%w: super over", ErrUnsupportedFormat)
+		return Projection{}, fmt.Errorf("%w: %w", ErrUnsupportedFormat, ErrSuperOver)
 	}
 	if meaningfulValue(root["rpc_overs"]) || meaningfulValue(root["rpc_target"]) ||
 		meaningfulDLSData(root["localteam_dl_data"]) || meaningfulDLSData(root["visitorteam_dl_data"]) {
-		return Projection{}, fmt.Errorf("%w: reduced/DLS target is not deterministic", ErrUnsupportedFormat)
+		return Projection{}, fmt.Errorf("%w: %w is not deterministic", ErrUnsupportedFormat, ErrRevisedTarget)
 	}
 	formatRaw, _ := stringField(root, "type")
-	format, scheduledBalls, err := normalizeSnapshotFormat(root, formatRaw)
+	formatInfo, err := classifySnapshotFormat(root, formatRaw)
 	if err != nil {
 		return Projection{}, err
 	}
+	format, scheduledBalls := formatInfo.Format, formatInfo.ScheduledBalls
 
 	ballItems, err := requiredRelation(root, "balls")
 	if err != nil {
@@ -353,6 +374,7 @@ func ReduceFixtureJSON(raw []byte, catalog Catalog) (Projection, error) {
 		LocalTeamID: localID, VisitorTeamID: visitorID,
 		LocalTeamName: localName, VisitorTeamName: visitorName,
 		StartTime: startTime, Format: format, ScheduledBalls: scheduledBalls,
+		ScheduledOvers: formatInfo.ScheduledOvers, ReducedOvers: formatInfo.Reduced,
 		ProviderStatus: status, Status: normalizeStatus(status),
 		CurrentInnings: currentInnings, BattingTeamID: current.BattingTeamID,
 		CurrentScore: current.Runs, Wickets: current.Wickets,
@@ -650,12 +672,30 @@ func normalizeFormat(raw string) (string, int, error) {
 	}
 }
 
-func normalizeSnapshotFormat(root map[string]any, raw string) (string, int, error) {
+// FormatInfo describes the playing conditions a fixture is actually being
+// played under. ScheduledOvers is what the provider scheduled per innings,
+// which drops below StandardOvers when a match is shortened (rain delay,
+// reduced-overs restart). Such a match stays a real ODI/T20 and keeps a
+// deterministic ball count, so it is admitted read-only rather than dropped —
+// callers gate trading on Reduced.
+type FormatInfo struct {
+	Format         string
+	ScheduledBalls int
+	ScheduledOvers int
+	StandardOvers  int
+	Reduced        bool
+}
+
+func classifySnapshotFormat(root map[string]any, raw string) (FormatInfo, error) {
 	format, scheduledBalls, err := normalizeFormat(raw)
 	if err != nil {
-		return "", 0, err
+		return FormatInfo{}, err
 	}
-	expectedOvers := scheduledBalls / 6
+	standardOvers := scheduledBalls / 6
+	info := FormatInfo{
+		Format: format, ScheduledBalls: scheduledBalls,
+		ScheduledOvers: standardOvers, StandardOvers: standardOvers,
+	}
 	structuredOvers := 0
 	hasStructuredOvers := false
 	for _, field := range []string{"total_overs_played", "scheduled_overs", "max_overs", "number_of_overs", "innings_overs"} {
@@ -665,15 +705,22 @@ func normalizeSnapshotFormat(root map[string]any, raw string) (string, int, erro
 		}
 		overs, ok := intField(root, field)
 		if !ok || overs <= 0 {
-			return "", 0, fmt.Errorf("%w: %s is malformed", ErrUnsupportedFormat, field)
+			return FormatInfo{}, fmt.Errorf("%w: %s is malformed", ErrUnsupportedFormat, field)
 		}
 		if hasStructuredOvers && structuredOvers != overs {
-			return "", 0, fmt.Errorf("%w: conflicting structured over limits", ErrUnsupportedFormat)
+			return FormatInfo{}, fmt.Errorf("%w: conflicting structured over limits", ErrUnsupportedFormat)
 		}
 		structuredOvers, hasStructuredOvers = overs, true
 	}
-	if hasStructuredOvers && structuredOvers != expectedOvers {
-		return "", 0, fmt.Errorf("%w: %s scheduled for %d overs", ErrUnsupportedFormat, raw, structuredOvers)
+	if hasStructuredOvers && structuredOvers != standardOvers {
+		// Longer than the format allows is not a shortened match, it is an
+		// unknown competition. Keep failing closed there.
+		if structuredOvers > standardOvers {
+			return FormatInfo{}, fmt.Errorf("%w: %s scheduled for %d overs", ErrUnsupportedFormat, raw, structuredOvers)
+		}
+		info.ScheduledOvers = structuredOvers
+		info.ScheduledBalls = structuredOvers * 6
+		info.Reduced = true
 	}
 	clean := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(raw), "_", ""))
 	clean = strings.ReplaceAll(clean, " ", "")
@@ -681,9 +728,17 @@ func normalizeSnapshotFormat(root map[string]any, raw string) (string, int, erro
 	// yet populated total_overs_played (typical for NS / upcoming). List A remains
 	// unsupported until a structured 50-over schedule is present.
 	if clean == "lista" && !hasStructuredOvers {
-		return "", 0, fmt.Errorf("%w: %s has no structured 50-over schedule", ErrUnsupportedFormat, raw)
+		return FormatInfo{}, fmt.Errorf("%w: %s has no structured 50-over schedule", ErrUnsupportedFormat, raw)
 	}
-	return format, scheduledBalls, nil
+	return info, nil
+}
+
+func normalizeSnapshotFormat(root map[string]any, raw string) (string, int, error) {
+	info, err := classifySnapshotFormat(root, raw)
+	if err != nil {
+		return "", 0, err
+	}
+	return info.Format, info.ScheduledBalls, nil
 }
 
 // ClassifyFormat exposes the reducer's allowlist to fixture discovery without
@@ -696,22 +751,32 @@ func ClassifyFormat(raw string) (string, int, error) {
 // on structured fixture metadata. Discovery can still poll a nominal List A
 // fixture, but it must remain unsupported publicly until 50 overs are explicit.
 func ClassifyFixtureFormat(raw []byte, fallbackType string) (string, int, error) {
+	info, err := ClassifyFixtureFormatInfo(raw, fallbackType)
+	if err != nil {
+		return "", 0, err
+	}
+	return info.Format, info.ScheduledBalls, nil
+}
+
+// ClassifyFixtureFormatInfo is ClassifyFixtureFormat with the reduced-overs
+// detail publication needs to gate trading without hiding the fixture.
+func ClassifyFixtureFormatInfo(raw []byte, fallbackType string) (FormatInfo, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return normalizeSnapshotFormat(map[string]any{}, fallbackType)
+		return classifySnapshotFormat(map[string]any{}, fallbackType)
 	}
 	value, err := decodeJSON(raw)
 	if err != nil {
-		return "", 0, err
+		return FormatInfo{}, err
 	}
 	root, err := unwrapObject(value)
 	if err != nil {
-		return "", 0, err
+		return FormatInfo{}, err
 	}
 	fixtureType, ok := stringField(root, "type")
 	if !ok || fixtureType == "" {
 		fixtureType = fallbackType
 	}
-	return normalizeSnapshotFormat(root, fixtureType)
+	return classifySnapshotFormat(root, fixtureType)
 }
 
 func inningsFromStatus(status string) int {

@@ -44,6 +44,12 @@ type Match struct {
 
 	ProviderPhase         string           `json:"providerPhase,omitempty" bson:"providerPhase,omitempty"`
 	ScheduledBalls        int              `json:"scheduledBalls,omitempty" bson:"scheduledBalls,omitempty"`
+	// ScheduledOvers is the per-innings over limit actually in force, and
+	// ReducedOvers marks it as shortened from the format standard (rain delay,
+	// reduced-overs restart). Both are surfaced so clients can explain why a
+	// live match is not tradable instead of showing a bare "unsupported".
+	ScheduledOvers        int              `json:"scheduledOvers,omitempty" bson:"scheduledOvers,omitempty"`
+	ReducedOvers          bool             `json:"reducedOvers,omitempty" bson:"reducedOvers,omitempty"`
 	ProviderBattingTeamID int64            `json:"providerBattingTeamId,omitempty" bson:"providerBattingTeamId,omitempty"`
 	ProviderReconcilePolls int              `json:"-" bson:"providerReconcilePolls,omitempty"`
 	InningsSummaries      []InningsSummary `json:"inningsSummaries,omitempty" bson:"inningsSummaries,omitempty"`

@@ -464,7 +464,7 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 			}
 			state, blocker := matches.FeedStateReconciling, "reconciling"
 			if errors.Is(err, reconcile.ErrUnsupportedFormat) {
-				state, blocker = matches.FeedStateUnsupported, "unsupported"
+				state, blocker = matches.FeedStateUnsupported, reconcile.UnsupportedBlocker(err)
 			}
 			_ = w.store.MarkFeedUnavailable(ctx, target.ID, state, blocker, receivedAt, nil)
 		}
