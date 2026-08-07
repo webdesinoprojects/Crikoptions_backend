@@ -372,19 +372,19 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 	for _, delivery := range projection.Deliveries {
 		candidateByID[delivery.ProviderEventID] = delivery
 	}
+	resets := make([]mongo.WriteModel, 0, len(existingEvents))
 	for providerID, event := range existingEvents {
 		if _, present := candidateByID[providerID]; !present || event.MissingPolls == 0 {
 			continue
 		}
-		result, err := s.events.UpdateOne(ctx, bson.M{"_id": event.ID, "revision": event.Revision}, bson.M{"$set": bson.M{"missingPolls": 0}})
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		if result.ModifiedCount != 1 {
-			return ApplyResult{}, ErrConcurrentApply
-		}
+		resets = append(resets, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": event.ID, "revision": event.Revision}).
+			SetUpdate(bson.M{"$set": bson.M{"missingPolls": 0}}))
 		event.MissingPolls = 0
 		existingEvents[providerID] = event
+	}
+	if err := s.bulkEventWrites(ctx, resets, len(resets), 0); err != nil {
+		return ApplyResult{}, err
 	}
 
 	firstMissing := false
@@ -424,18 +424,8 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 		reason := "correction_blocked"
 		if firstMissing {
 			reason = "missing_delivery"
-			for providerID, event := range existingEvents {
-				if event.Active && !event.Tombstoned {
-					if _, present := candidateByID[providerID]; !present {
-						result, err := s.events.UpdateOne(ctx, bson.M{"_id": event.ID, "revision": event.Revision}, bson.M{"$inc": bson.M{"missingPolls": 1}})
-						if err != nil {
-							return ApplyResult{}, err
-						}
-						if result.ModifiedCount != 1 {
-							return ApplyResult{}, ErrConcurrentApply
-						}
-					}
-				}
+			if err := s.incrementMissingPolls(ctx, existingEvents, candidateByID); err != nil {
+				return ApplyResult{}, err
 			}
 		}
 		updated, err := s.applyReconcilingPoll(ctx, current, projection, receivedAt, cfg, reason)
@@ -459,18 +449,8 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 	}
 
 	if firstMissing {
-		for providerID, event := range existingEvents {
-			if event.Active && !event.Tombstoned {
-				if _, present := candidateByID[providerID]; !present {
-					result, err := s.events.UpdateOne(ctx, bson.M{"_id": event.ID, "revision": event.Revision}, bson.M{"$inc": bson.M{"missingPolls": 1}})
-					if err != nil {
-						return ApplyResult{}, err
-					}
-					if result.ModifiedCount != 1 {
-						return ApplyResult{}, ErrConcurrentApply
-					}
-				}
-			}
+		if err := s.incrementMissingPolls(ctx, existingEvents, candidateByID); err != nil {
+			return ApplyResult{}, err
 		}
 	}
 
@@ -608,25 +588,64 @@ func (s *Store) providerEvents(ctx context.Context, fixtureID int64) (map[string
 	return byID, nil
 }
 
+// bulkEventWrites applies revision-fenced event writes in as few round trips as
+// the driver allows. A first apply that backfills a whole innings used to issue
+// one round trip per delivery, which ran the enclosing transaction past Mongo's
+// lifetime limit and aborted it — the fixture then retried forever, never
+// getting further. Every model here is still fenced on the document revision,
+// so a short match count means a concurrent apply touched the same events and
+// the transaction must retry, exactly as the per-document checks did.
+func (s *Store) bulkEventWrites(ctx context.Context, ops []mongo.WriteModel, expectedModified, expectedInserted int) error {
+	if len(ops) == 0 {
+		return nil
+	}
+	result, err := s.events.BulkWrite(ctx, ops, options.BulkWrite().SetOrdered(false))
+	if err != nil {
+		return err
+	}
+	if int(result.ModifiedCount) != expectedModified || int(result.InsertedCount) != expectedInserted {
+		return ErrConcurrentApply
+	}
+	return nil
+}
+
+// incrementMissingPolls marks every active event the provider stopped sending.
+func (s *Store) incrementMissingPolls(ctx context.Context, existing map[string]matches.BallEvent, candidateByID map[string]reconcile.Delivery) error {
+	ops := make([]mongo.WriteModel, 0, len(existing))
+	for providerID, event := range existing {
+		if !event.Active || event.Tombstoned {
+			continue
+		}
+		if _, present := candidateByID[providerID]; present {
+			continue
+		}
+		ops = append(ops, mongo.NewUpdateOneModel().
+			SetFilter(bson.M{"_id": event.ID, "revision": event.Revision}).
+			SetUpdate(bson.M{"$inc": bson.M{"missingPolls": 1}}))
+	}
+	return s.bulkEventWrites(ctx, ops, len(ops), 0)
+}
+
 func (s *Store) applyEvents(ctx context.Context, matchID string, projection reconcile.Projection, existing map[string]matches.BallEvent, receivedAt time.Time) (int, int, []matches.BallEvent, error) {
 	corrections := 0
 	tombstones := 0
 	changed := make([]matches.BallEvent, 0)
 	present := make(map[string]struct{}, len(projection.Deliveries))
+	// Collected up front and written in bulk below; the transaction commits all
+	// of it or none, so batching changes nothing about atomicity.
+	eventOps := make([]mongo.WriteModel, 0, len(projection.Deliveries))
+	revisionDocs := make([]any, 0, len(projection.Deliveries))
+	expectModified, expectInserted := 0, 0
+
 	for _, delivery := range projection.Deliveries {
 		present[delivery.ProviderEventID] = struct{}{}
 		old, exists := existing[delivery.ProviderEventID]
 		if exists && old.PayloadHash == delivery.PayloadHash && !old.Tombstoned {
 			if old.MissingPolls != 0 || !old.Active {
-				result, err := s.events.UpdateOne(ctx, bson.M{"_id": old.ID, "revision": old.Revision}, bson.M{"$set": bson.M{
-					"missingPolls": 0, "active": true,
-				}})
-				if err != nil {
-					return 0, 0, nil, err
-				}
-				if result.ModifiedCount != 1 {
-					return 0, 0, nil, ErrConcurrentApply
-				}
+				eventOps = append(eventOps, mongo.NewUpdateOneModel().
+					SetFilter(bson.M{"_id": old.ID, "revision": old.Revision}).
+					SetUpdate(bson.M{"$set": bson.M{"missingPolls": 0, "active": true}}))
+				expectModified++
 			}
 			continue
 		}
@@ -640,23 +659,19 @@ func (s *Store) applyEvents(ctx context.Context, matchID string, projection reco
 			corrections++
 		}
 		event := deliveryEvent(matchID, projection.FixtureID, delivery, revision, id, createdAt, receivedAt)
-		if _, err := s.revisions.InsertOne(ctx, EventRevision{
+		revisionDocs = append(revisionDocs, EventRevision{
 			Provider: ProviderName, ProviderFixtureID: projection.FixtureID,
 			ProviderEventID: delivery.ProviderEventID, Revision: revision,
 			Event: event, ObservedAt: receivedAt,
-		}); err != nil {
-			return 0, 0, nil, err
-		}
+		})
 		if exists {
-			result, err := s.events.ReplaceOne(ctx, bson.M{"_id": old.ID, "revision": old.Revision}, event)
-			if err != nil {
-				return 0, 0, nil, err
-			}
-			if result.ModifiedCount != 1 {
-				return 0, 0, nil, ErrConcurrentApply
-			}
-		} else if _, err := s.events.InsertOne(ctx, event); err != nil {
-			return 0, 0, nil, err
+			eventOps = append(eventOps, mongo.NewReplaceOneModel().
+				SetFilter(bson.M{"_id": old.ID, "revision": old.Revision}).
+				SetReplacement(event))
+			expectModified++
+		} else {
+			eventOps = append(eventOps, mongo.NewInsertOneModel().SetDocument(event))
+			expectInserted++
 		}
 		changed = append(changed, event)
 	}
@@ -674,21 +689,25 @@ func (s *Store) applyEvents(ctx context.Context, matchID string, projection reco
 		old.MissingPolls++
 		old.SupersededRevision = revision
 		old.ReceivedAt = &receivedAt
-		if _, err := s.revisions.InsertOne(ctx, EventRevision{
+		revisionDocs = append(revisionDocs, EventRevision{
 			Provider: ProviderName, ProviderFixtureID: projection.FixtureID,
 			ProviderEventID: providerID, Revision: revision, Event: old, ObservedAt: receivedAt,
-		}); err != nil {
-			return 0, 0, nil, err
-		}
-		result, err := s.events.ReplaceOne(ctx, bson.M{"_id": old.ID, "revision": revision - 1}, old)
-		if err != nil {
-			return 0, 0, nil, err
-		}
-		if result.ModifiedCount != 1 {
-			return 0, 0, nil, ErrConcurrentApply
-		}
+		})
+		eventOps = append(eventOps, mongo.NewReplaceOneModel().
+			SetFilter(bson.M{"_id": old.ID, "revision": revision - 1}).
+			SetReplacement(old))
+		expectModified++
 		tombstones++
 		changed = append(changed, old)
+	}
+
+	if len(revisionDocs) > 0 {
+		if _, err := s.revisions.InsertMany(ctx, revisionDocs, options.InsertMany().SetOrdered(false)); err != nil {
+			return 0, 0, nil, err
+		}
+	}
+	if err := s.bulkEventWrites(ctx, eventOps, expectModified, expectInserted); err != nil {
+		return 0, 0, nil, err
 	}
 	return corrections, tombstones, changed, nil
 }
@@ -1415,6 +1434,10 @@ func (s *Store) publishBallByBallUpdates(ctx context.Context, match matches.Matc
 	for _, delivery := range projection.Deliveries {
 		byID[delivery.ProviderEventID] = delivery
 	}
+	// Built in order, then published in one round trip. A catch-up poll can carry
+	// a whole innings, and one insert per ball put the enclosing transaction over
+	// Mongo's lifetime limit.
+	docs := make([]any, 0, len(ordered)*2)
 	for _, event := range ordered {
 		snap := match
 		if !event.Tombstoned {
@@ -1422,15 +1445,16 @@ func (s *Store) publishBallByBallUpdates(ctx context.Context, match matches.Matc
 				snap = progressiveMatchView(match, projection, delivery)
 			}
 		}
-		if err := s.insertDeliveryOutbox(ctx, snap, event, now); err != nil {
-			return err
-		}
+		docs = append(docs, deliveryOutboxEvent(snap, event, now))
 		if event.Tombstoned || event.Revision > 1 {
 			continue
 		}
-		if err := s.insertProgressiveScoreOutbox(ctx, snap, event, now); err != nil {
-			return err
+		if outbox, ok := progressiveScoreOutboxEvent(snap, event, now); ok {
+			docs = append(docs, outbox)
 		}
+	}
+	if err := s.insertOutboxBatch(ctx, docs); err != nil {
+		return err
 	}
 	return s.insertMatchOutbox(ctx, match, "match.state", now)
 }
@@ -1523,9 +1547,35 @@ func (s *Store) insertMatchOutbox(ctx context.Context, match matches.Match, even
 	return err
 }
 
-func (s *Store) insertProgressiveScoreOutbox(ctx context.Context, match matches.Match, event matches.BallEvent, now time.Time) error {
-	if match.Status == matches.StatusUpcoming {
+// insertOutboxBatch publishes realtime events in one round trip. A duplicate
+// event ID means the same ball was already published and is ignored, matching
+// the per-insert behaviour this replaced.
+func (s *Store) insertOutboxBatch(ctx context.Context, docs []any) error {
+	if len(docs) == 0 {
 		return nil
+	}
+	_, err := s.outbox.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	if err == nil {
+		return nil
+	}
+	var bulkErr mongo.BulkWriteException
+	if errors.As(err, &bulkErr) {
+		for _, writeErr := range bulkErr.WriteErrors {
+			if !mongo.IsDuplicateKeyError(writeErr) {
+				return err
+			}
+		}
+		return nil
+	}
+	if mongo.IsDuplicateKeyError(err) {
+		return nil
+	}
+	return err
+}
+
+func progressiveScoreOutboxEvent(match matches.Match, event matches.BallEvent, now time.Time) (OutboxEvent, bool) {
+	if match.Status == matches.StatusUpcoming {
+		return OutboxEvent{}, false
 	}
 	outbox := OutboxEvent{
 		EventID: fmt.Sprintf("sportmonks:%d:%d:%d:match.ball:%s", match.ProviderFixtureID, match.StateVersion, match.TradingVersion, event.ProviderEventID),
@@ -1533,14 +1583,10 @@ func (s *Store) insertProgressiveScoreOutbox(ctx context.Context, match matches.
 		MatchID: match.ID.Hex(), StateVersion: match.StateVersion, TradingVersion: match.TradingVersion,
 		Sequence: event.Sequence, OccurredAt: now, Payload: scorePayload(match), CreatedAt: now,
 	}
-	_, err := s.outbox.InsertOne(ctx, outbox)
-	if mongo.IsDuplicateKeyError(err) {
-		return nil
-	}
-	return err
+	return outbox, true
 }
 
-func (s *Store) insertDeliveryOutbox(ctx context.Context, match matches.Match, event matches.BallEvent, now time.Time) error {
+func deliveryOutboxEvent(match matches.Match, event matches.BallEvent, now time.Time) OutboxEvent {
 	payload := map[string]any{
 		"matchId": match.ID.Hex(), "eventId": event.ProviderEventID,
 		"innings": event.Innings, "over": event.Over, "ball": event.Ball,
@@ -1569,8 +1615,7 @@ func (s *Store) insertDeliveryOutbox(ctx context.Context, match matches.Match, e
 		MatchID: match.ID.Hex(), StateVersion: match.StateVersion, TradingVersion: match.TradingVersion,
 		Sequence: event.Sequence, OccurredAt: now, Payload: payload, CreatedAt: now,
 	}
-	_, err := s.outbox.InsertOne(ctx, outbox)
-	return err
+	return outbox
 }
 
 func scorePayload(match matches.Match) map[string]any {
