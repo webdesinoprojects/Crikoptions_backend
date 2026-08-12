@@ -542,6 +542,12 @@ func buildEquityCurve(closedTrades []ClosedTrade) []EquityCurvePoint {
 		if peak > 0 {
 			drawdown = ((peak - equity) / peak) * 100
 		}
+		if drawdown > 100.0 {
+			drawdown = 100.0
+		}
+		if drawdown < 0.0 {
+			drawdown = 0.0
+		}
 		points = append(points, EquityCurvePoint{
 			Timestamp: parseTime(trade.ClosedAt).Unix(),
 			Equity:    round2(equity),

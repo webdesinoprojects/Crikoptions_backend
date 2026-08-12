@@ -1,6 +1,6 @@
 module github.com/webdesinoprojects/Crikoptions/backend
 
-go 1.26
+go 1.23
 
 require (
 	github.com/gorilla/websocket v1.5.3
