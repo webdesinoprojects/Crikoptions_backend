@@ -18,6 +18,9 @@ const (
 	LedgerProviderVoid = "PROVIDER_VOID_REVERSAL"
 	LedgerWelcomeBonus = "WELCOME_BONUS"
 	LedgerUserTopUp    = "USER_TOPUP"
+	// LedgerChallengeReward keeps earned rewards distinguishable from a manual
+	// self top-up, so challenge payouts are auditable in the ledger.
+	LedgerChallengeReward = "CHALLENGE_REWARD"
 
 	AccountActive = "ACTIVE"
 )

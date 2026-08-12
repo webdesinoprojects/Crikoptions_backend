@@ -46,6 +46,31 @@ func (s *Service) ApplyWelcomeCredit(ctx context.Context, userID primitive.Objec
 	return err
 }
 
+// ChallengeReferenceType tags ledger entries created by a challenge payout.
+const ChallengeReferenceType = "CHALLENGE"
+
+// CreditChallengeReward pays a verified challenge reward. The caller decides
+// whether the challenge was earned; this call guarantees it is paid at most
+// once by scoping an operation key to the user and challenge, which the unique
+// (userId, idempotencyKey) index enforces even under concurrent requests.
+func (s *Service) CreditChallengeReward(ctx context.Context, userID primitive.ObjectID, challengeID, description string, amount float64) (*AdjustmentResult, error) {
+	amount = math.Round(amount*100) / 100
+	if amount <= 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return nil, ErrTopUpAmountInvalid
+	}
+	ctx = WithOperationKey(ctx, "challenge:"+userID.Hex()+":"+challengeID)
+	return s.repo.ApplyAdjustment(ctx, Adjustment{
+		UserID:        userID,
+		Delta:         amount,
+		Amount:        amount,
+		Type:          LedgerChallengeReward,
+		ReferenceType: ChallengeReferenceType,
+		ReferenceID:   challengeID,
+		Description:   description,
+		CreatedBy:     userID,
+	})
+}
+
 // UserTopUp credits paper money to the user's own wallet.
 // Amount must be between ₹1 and ₹99,999 per transaction.
 func (s *Service) UserTopUp(ctx context.Context, userID primitive.ObjectID, amount float64) (*FundingResponse, error) {

@@ -1,112 +1,115 @@
 package challenges
 
 import (
-	"math"
+	"sort"
+
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 )
 
+// Position sides. The client calls these "long call" and "short call"; the
+// market model only distinguishes buy from sell.
+const (
+	sideBuy  = "BUY"
+	sideSell = "SELL"
+)
+
+// sideStats summarises one side of a user's book. Every field is derived from
+// settled position data, never from anything the client sends.
+type sideStats struct {
+	// opened is how many positions were ever taken on this side.
+	opened int
+	// profitableCloses counts positions with lots closed at a realised profit.
+	profitableCloses int
+	// bestInningsWins is the most profitable closes inside one innings market.
+	bestInningsWins int
+	// bestInningsStreak is the longest unbroken run of profitable closes inside
+	// one innings market, ordered by when each position was last settled.
+	bestInningsStreak int
+}
+
+// closed reports whether any lots of this position have been settled.
+func closed(p positions.Position) bool { return p.MatchedLots > 0 }
+
+// profitable reports a realised gain on the settled slice.
+func profitable(p positions.Position) bool { return closed(p) && p.RealizedPnL > 0 }
+
+func buildSideStats(pos []positions.Position, side string) sideStats {
+	var stats sideStats
+	// A market is one innings-score contract, so grouping by market is grouping
+	// by innings.
+	byMarket := make(map[string][]positions.Position)
+	for _, p := range pos {
+		if p.Side != side {
+			continue
+		}
+		stats.opened++
+		if profitable(p) {
+			stats.profitableCloses++
+		}
+		byMarket[p.MarketID] = append(byMarket[p.MarketID], p)
+	}
+
+	for _, inMarket := range byMarket {
+		sort.SliceStable(inMarket, func(i, j int) bool {
+			return inMarket[i].UpdatedAt.Before(inMarket[j].UpdatedAt)
+		})
+		wins, streak := 0, 0
+		for _, p := range inMarket {
+			if !closed(p) {
+				continue // still running; neither a win nor a break
+			}
+			if p.RealizedPnL > 0 {
+				wins++
+				streak++
+				if streak > stats.bestInningsStreak {
+					stats.bestInningsStreak = streak
+				}
+				continue
+			}
+			streak = 0
+		}
+		if wins > stats.bestInningsWins {
+			stats.bestInningsWins = wins
+		}
+	}
+	return stats
+}
+
+// EvaluatePositions derives every challenge's progress from a user's positions.
+// It is the only place completion is decided.
 func EvaluatePositions(pos []positions.Position) []Challenge {
-	var challenges []Challenge
-
-	// 1. The First Step
-	c1 := Challenge{ID: "first_step", Title: "The First Step", Description: "Execute your very first trade", Target: 1, XP: 100}
-	c1.Progress = len(pos)
-	challenges = append(challenges, finalize(c1))
-
-	// 2. Diversification
-	c2 := Challenge{ID: "diversification", Title: "Diversification", Description: "Place trades in at least 3 different matches", Target: 3, XP: 200}
-	matches := make(map[string]bool)
-	for _, p := range pos {
-		matches[p.MatchID] = true
+	statsBySide := map[string]sideStats{
+		AcademyLongCall:  buildSideStats(pos, sideBuy),
+		AcademyShortCall: buildSideStats(pos, sideSell),
 	}
-	c2.Progress = len(matches)
-	challenges = append(challenges, finalize(c2))
 
-	// 3. Volume Trader
-	c3 := Challenge{ID: "volume_trader", Title: "Volume Trader", Description: "Trade 10 different contracts", Target: 10, XP: 300}
-	c3.Progress = len(pos)
-	challenges = append(challenges, finalize(c3))
-
-	// 4. First Blood
-	c4 := Challenge{ID: "first_blood", Title: "First Blood", Description: "Close your first profitable trade", Target: 1, XP: 150}
-	for _, p := range pos {
-		if p.RealizedPnL > 0 {
-			c4.Progress = 1
-			break
+	out := make([]Challenge, 0, len(definitions))
+	for _, d := range definitions {
+		c := Challenge{
+			ID: d.ID, AcademyID: d.AcademyID, Title: d.Title,
+			Description: d.Description, Target: d.Target, Reward: d.Reward,
+			LockedReason: d.LockedReason,
 		}
-	}
-	challenges = append(challenges, finalize(c4))
-
-	// 5. The Hat-Trick
-	c5 := Challenge{ID: "hat_trick", Title: "The Hat-Trick", Description: "Close 3 profitable trades", Target: 3, XP: 250}
-	profCount := 0
-	for _, p := range pos {
-		if p.RealizedPnL > 0 {
-			profCount++
+		if d.LockedReason != "" || d.Progress == nil {
+			c.Status = StatusLocked
+			out = append(out, c)
+			continue
 		}
+		c.Progress = d.Progress(statsBySide[d.AcademyID])
+		out = append(out, finalize(c))
 	}
-	c5.Progress = profCount
-	challenges = append(challenges, finalize(c5))
-
-	// 6. Hot Hand
-	c6 := Challenge{ID: "hot_hand", Title: "Hot Hand", Description: "Close 5 profitable trades", Target: 5, XP: 400}
-	c6.Progress = profCount
-	challenges = append(challenges, finalize(c6))
-
-	// 7. Matchday Hero
-	c7 := Challenge{ID: "matchday_hero", Title: "Matchday Hero", Description: "Achieve a total net profit > Rs 1000", Target: 1000, XP: 500}
-	totalPnL := 0.0
-	for _, p := range pos {
-		totalPnL += (p.PnL + p.RealizedPnL)
-	}
-	c7.Progress = int(math.Max(0, totalPnL))
-	challenges = append(challenges, finalize(c7))
-
-	// 8. Diamond Hands
-	c8 := Challenge{ID: "diamond_hands", Title: "Diamond Hands", Description: "Hold an open position with > Rs 500 profit", Target: 500, XP: 300}
-	maxOpenPnl := 0.0
-	for _, p := range pos {
-		if p.Status == "open" && p.PnL > maxOpenPnl {
-			maxOpenPnl = p.PnL
-		}
-	}
-	c8.Progress = int(maxOpenPnl)
-	challenges = append(challenges, finalize(c8))
-
-	// 9. The Scalper
-	c9 := Challenge{ID: "scalper", Title: "The Scalper", Description: "Realize > Rs 500 profit on a single trade", Target: 500, XP: 350}
-	maxRealized := 0.0
-	for _, p := range pos {
-		if p.RealizedPnL > maxRealized {
-			maxRealized = p.RealizedPnL
-		}
-	}
-	c9.Progress = int(maxRealized)
-	challenges = append(challenges, finalize(c9))
-
-	// 10. High Roller
-	c10 := Challenge{ID: "high_roller", Title: "High Roller", Description: "Trade 50 or more lots in a single contract", Target: 50, XP: 450}
-	maxLots := 0
-	for _, p := range pos {
-		total := int(math.Abs(float64(p.Lots))) + p.MatchedLots
-		if total > maxLots {
-			maxLots = total
-		}
-	}
-	c10.Progress = maxLots
-	challenges = append(challenges, finalize(c10))
-
-	return challenges
+	return out
 }
 
 func finalize(c Challenge) Challenge {
-	if c.Progress >= c.Target {
+	switch {
+	case c.Progress >= c.Target:
 		c.Progress = c.Target
-		c.Status = "COMPLETE"
-	} else if c.Progress > 0 {
-		c.Status = "IN_PROGRESS"
-	} else {
-		c.Status = "LOCKED"
+		c.Status = StatusComplete
+	case c.Progress > 0:
+		c.Status = StatusInProgress
+	default:
+		c.Status = StatusLocked
 	}
 	return c
 }

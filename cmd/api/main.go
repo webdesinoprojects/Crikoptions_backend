@@ -16,6 +16,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/middleware"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/challenges"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/chat"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/health"
@@ -317,6 +318,10 @@ func main() {
 		log.Printf("chat disabled")
 	}
 
+	// Challenges — progress is derived from real positions and rewards are paid
+	// through the wallet, so completion can never be self-reported.
+	challengesHandler := challenges.NewHandler(challenges.NewService(positionsService, walletService))
+
 	// Simulator — replay ball events from CSV datasets automatically.
 	simCfg := simulator.LoadConfig()
 	simLocks := simulator.NewMongoLockStore(mongo.DB)
@@ -336,7 +341,7 @@ func main() {
 		simService.AutoStartOnBoot(context.Background())
 	}
 
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, sportmonksAdminHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, challengesHandler, sportmonksAdminHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS(cfg.AllowedOrigins))
 
 	srv := &http.Server{
