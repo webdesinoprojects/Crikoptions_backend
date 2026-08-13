@@ -57,8 +57,8 @@ var definitions = []definition{
 	},
 	{
 		ID: "lc-5", AcademyID: AcademyLongCall,
-		Title: "Rider", Description: "Hold a long call trade for at least 50 overs.",
-		Target: 50, Reward: 10_000, LockedReason: lockedNoHoldTracking,
+		Title: "Rider", Description: "Hold a long call trade for at least 5 overs.",
+		Target: 5, Reward: 10_000, LockedReason: lockedNoHoldTracking,
 	},
 	{
 		ID: "sc-1", AcademyID: AcademyShortCall,
@@ -86,8 +86,8 @@ var definitions = []definition{
 	},
 	{
 		ID: "sc-5", AcademyID: AcademyShortCall,
-		Title: "Rider", Description: "Hold a short call trade for at least 50 overs.",
-		Target: 50, Reward: 10_000, LockedReason: lockedNoHoldTracking,
+		Title: "Rider", Description: "Hold a short call trade for at least 5 overs.",
+		Target: 5, Reward: 10_000, LockedReason: lockedNoHoldTracking,
 	},
 }
 
