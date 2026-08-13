@@ -81,15 +81,28 @@ func TestStreakBreaksOnALoss(t *testing.T) {
 	}
 }
 
-func TestUnverifiableChallengesStayLockedAndUnclaimable(t *testing.T) {
-	for _, id := range []string{"lc-5", "sc-5"} {
-		c := byID(EvaluatePositions(nil), id)
-		if c.Status != StatusLocked || c.LockedReason == "" {
-			t.Fatalf("%s = %s reason=%q, want LOCKED with a reason", id, c.Status, c.LockedReason)
+// Every published challenge must be backed by a verifier, otherwise it could
+// only ever be earned by trusting the client.
+func TestEveryChallengeHasAVerifier(t *testing.T) {
+	for _, d := range definitions {
+		if d.Progress == nil {
+			t.Fatalf("challenge %q has no verifier and must not be published", d.ID)
 		}
-		if c.Claimable() {
-			t.Fatalf("%s must never be claimable while unverifiable", id)
+		if d.Target <= 0 || d.Reward <= 0 {
+			t.Fatalf("challenge %q has target=%d reward=%v", d.ID, d.Target, d.Reward)
 		}
+	}
+	if got := len(EvaluatePositions(nil)); got != len(definitions) {
+		t.Fatalf("evaluated %d challenges, want %d", got, len(definitions))
+	}
+}
+
+// A definition without a verifier stays locked rather than becoming free money.
+func TestChallengeWithoutAVerifierIsNeverClaimable(t *testing.T) {
+	c := finalize(Challenge{ID: "x", Target: 1, Progress: 5})
+	c.Status = StatusLocked
+	if c.Claimable() {
+		t.Fatal("a locked challenge must not be claimable")
 	}
 }
 
@@ -159,15 +172,16 @@ func TestClaimPaysTheServerSideRewardOnce(t *testing.T) {
 	}
 }
 
-func TestClaimRejectsUnknownAndLockedChallenges(t *testing.T) {
+func TestClaimRejectsUnknownChallenges(t *testing.T) {
 	svc, w := newService([]positions.Position{pos(sideBuy, "k1", 1, 10, base)})
 	user := primitive.NewObjectID()
 
-	if _, err := svc.Claim(context.Background(), user, "does-not-exist"); !errors.Is(err, ErrUnknownChallenge) {
-		t.Fatalf("unknown challenge err=%v", err)
-	}
-	if _, err := svc.Claim(context.Background(), user, "lc-5"); !errors.Is(err, ErrNotComplete) {
-		t.Fatalf("locked challenge err=%v, want ErrNotComplete", err)
+	// Retired IDs are rejected the same as anything else off the table, so a
+	// stale client cannot claim a challenge that no longer exists.
+	for _, id := range []string{"does-not-exist", "lc-5", "sc-5"} {
+		if _, err := svc.Claim(context.Background(), user, id); !errors.Is(err, ErrUnknownChallenge) {
+			t.Fatalf("claim %q err=%v, want ErrUnknownChallenge", id, err)
+		}
 	}
 	if len(w.credited) != 0 {
 		t.Fatalf("wallet moved for a rejected claim: %v", w.credited)

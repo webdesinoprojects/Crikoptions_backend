@@ -19,14 +19,10 @@ type Challenge struct {
 	Reward      float64 `json:"reward"`
 	Status      string  `json:"status"`
 	Claimed     bool    `json:"claimed"`
-	// LockedReason is set when a challenge cannot be verified from the data the
-	// platform records today. Such a challenge is shown but never claimable,
-	// rather than being silently gated on an unenforced check.
-	LockedReason string `json:"lockedReason,omitempty"`
 }
 
 // Claimable reports whether a reward may still be paid out for this challenge.
 // This is the single gate the claim path enforces.
 func (c Challenge) Claimable() bool {
-	return c.Status == StatusComplete && !c.Claimed && c.LockedReason == ""
+	return c.Status == StatusComplete && !c.Claimed
 }

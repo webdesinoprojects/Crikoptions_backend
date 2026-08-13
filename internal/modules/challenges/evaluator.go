@@ -88,9 +88,10 @@ func EvaluatePositions(pos []positions.Position) []Challenge {
 		c := Challenge{
 			ID: d.ID, AcademyID: d.AcademyID, Title: d.Title,
 			Description: d.Description, Target: d.Target, Reward: d.Reward,
-			LockedReason: d.LockedReason,
 		}
-		if d.LockedReason != "" || d.Progress == nil {
+		// A definition with no verifier can never be earned, so it stays locked
+		// rather than being gated on a check that does not exist.
+		if d.Progress == nil {
 			c.Status = StatusLocked
 			out = append(out, c)
 			continue

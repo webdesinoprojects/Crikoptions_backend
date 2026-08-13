@@ -8,11 +8,6 @@ const (
 	AcademyShortCall = "short-call"
 )
 
-// lockedNoHoldTracking explains the one rule the platform cannot yet police:
-// nothing records the over count at which a position was opened, so "held for N
-// overs" is unverifiable. Shown to the user rather than silently approved.
-const lockedNoHoldTracking = "Hold duration is not tracked yet — coming soon"
-
 // definition is the server-owned source of truth for a challenge. Rewards live
 // here and are never read from the request, so a claim cannot be inflated.
 type definition struct {
@@ -22,10 +17,8 @@ type definition struct {
 	Description string
 	Target      int
 	Reward      float64
-	// LockedReason marks a challenge that cannot be honestly verified today.
-	LockedReason string
 	// Progress measures how far the user has come using only authoritative
-	// position data. Nil when the challenge is locked.
+	// position data. A definition without one is never claimable.
 	Progress func(s sideStats) int
 }
 
@@ -56,11 +49,6 @@ var definitions = []definition{
 		Progress: func(s sideStats) int { return s.bestInningsStreak },
 	},
 	{
-		ID: "lc-5", AcademyID: AcademyLongCall,
-		Title: "Rider", Description: "Hold a long call trade for at least 5 overs.",
-		Target: 5, Reward: 10_000, LockedReason: lockedNoHoldTracking,
-	},
-	{
 		ID: "sc-1", AcademyID: AcademyShortCall,
 		Title: "First Premium", Description: "Sell your first call option.",
 		Target: 1, Reward: 500,
@@ -83,11 +71,6 @@ var definitions = []definition{
 		Title: "Expert Seller", Description: "Finish 5 consecutive short call trades in a single inning.",
 		Target: 5, Reward: 5_000,
 		Progress: func(s sideStats) int { return s.bestInningsStreak },
-	},
-	{
-		ID: "sc-5", AcademyID: AcademyShortCall,
-		Title: "Rider", Description: "Hold a short call trade for at least 5 overs.",
-		Target: 5, Reward: 10_000, LockedReason: lockedNoHoldTracking,
 	},
 }
 
