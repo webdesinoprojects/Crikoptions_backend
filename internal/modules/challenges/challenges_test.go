@@ -128,6 +128,16 @@ func (f *fakeWallet) CreditChallengeReward(_ context.Context, _ primitive.Object
 	return &wallet.AdjustmentResult{}, nil
 }
 
+func (f *fakeWallet) CreditDailyChallengeReward(_ context.Context, _ primitive.ObjectID, challengeID, dateUTC, _ string, amount float64) (*wallet.AdjustmentResult, error) {
+	ref := challengeID + ":" + dateUTC
+	if f.credited == nil {
+		f.credited = map[string]float64{}
+	}
+	f.credited[challengeID] += amount
+	f.ledger = append(f.ledger, wallet.LedgerEntry{Type: wallet.LedgerChallengeReward, ReferenceID: ref, Amount: amount})
+	return &wallet.AdjustmentResult{}, nil
+}
+
 func (f *fakeWallet) GetLedger(context.Context, primitive.ObjectID, int64) ([]wallet.LedgerEntry, error) {
 	return f.ledger, nil
 }
@@ -185,6 +195,29 @@ func TestClaimRejectsUnknownChallenges(t *testing.T) {
 	}
 	if len(w.credited) != 0 {
 		t.Fatalf("wallet moved for a rejected claim: %v", w.credited)
+	}
+}
+
+func TestEvaluateKeepsAcademyAndAlwaysIncludesDaily(t *testing.T) {
+	svc, _ := newService([]positions.Position{pos(sideBuy, "k1", 1, 10, base)})
+	got, err := svc.Evaluate(context.Background(), primitive.NewObjectID())
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if byID(got, "lc-1").Status != StatusComplete {
+		t.Fatalf("academy lc-1 missing or incomplete: %+v", byID(got, "lc-1"))
+	}
+	if byID(got, "sc-1").Status == StatusComplete {
+		t.Fatal("a BUY must not complete a short-call academy challenge")
+	}
+	for _, id := range []string{DailyPowerplayPro, DailyMiddleOverGenius, DailyDeathOverAssassin, DailyLastOverHero} {
+		c := byID(got, id)
+		if c.ID != id || c.AcademyID != AcademyToday || c.Status == StatusLocked {
+			t.Fatalf("daily %s = %+v", id, c)
+		}
+	}
+	if len(got) != len(dailyDefinitions)+len(definitions) {
+		t.Fatalf("got %d challenges, want %d academy + %d daily", len(got), len(definitions), len(dailyDefinitions))
 	}
 }
 

@@ -38,7 +38,7 @@ func (h *Handler) GetChallenges(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": challenges})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": challenges})
 }
 
 // ClaimChallenge pays out a reward. The challenge ID comes from the path and
@@ -54,7 +54,7 @@ func (h *Handler) ClaimChallenge(w http.ResponseWriter, r *http.Request) {
 	claimed, err := h.service.Claim(r.Context(), userID, r.PathValue("challengeId"))
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, map[string]any{"data": claimed})
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": claimed})
 	case errors.Is(err, ErrUnknownChallenge):
 		writeError(w, http.StatusNotFound, "unknown challenge")
 	case errors.Is(err, ErrAlreadyClaimed):

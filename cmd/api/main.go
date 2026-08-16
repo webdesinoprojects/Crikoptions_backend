@@ -34,8 +34,8 @@ import (
 	sportmonksclient "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/client"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/settlement"
 	sportmonksstore "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/store"
-	sportmonksworker "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/worker"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/watchdog"
+	sportmonksworker "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/worker"
 )
 
 // deadFeedAbandonAfter is how long a live provider match may go with no
@@ -318,9 +318,13 @@ func main() {
 		log.Printf("chat disabled")
 	}
 
-	// Challenges — progress is derived from real positions and rewards are paid
-	// through the wallet, so completion can never be self-reported.
-	challengesHandler := challenges.NewHandler(challenges.NewService(positionsService, walletService))
+	// Challenges — academy progress is derived from positions; daily "today"
+	// challenges are incremented from fill-time match clocks and paid through
+	// the wallet, so completion can never be self-reported.
+	challengesService := challenges.NewServiceWithStore(positionsService, walletService, challenges.NewMongoDailyStore(mongo.DB))
+	mustEnsureIndexes(context.Background(), "challenges", challengesService.EnsureIndexes)
+	positionsService.SetCloseObserver(challengesService)
+	challengesHandler := challenges.NewHandler(challengesService)
 
 	// Simulator — replay ball events from CSV datasets automatically.
 	simCfg := simulator.LoadConfig()

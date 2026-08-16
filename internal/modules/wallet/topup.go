@@ -54,18 +54,30 @@ const ChallengeReferenceType = "CHALLENGE"
 // once by scoping an operation key to the user and challenge, which the unique
 // (userId, idempotencyKey) index enforces even under concurrent requests.
 func (s *Service) CreditChallengeReward(ctx context.Context, userID primitive.ObjectID, challengeID, description string, amount float64) (*AdjustmentResult, error) {
+	return s.creditChallengeReward(ctx, userID, challengeID, challengeID, description, amount)
+}
+
+// CreditDailyChallengeReward pays a verified daily challenge. The operation key
+// and ledger reference include the UTC date so the same id can be claimed again
+// on a later day, while a second claim for today is still rejected.
+func (s *Service) CreditDailyChallengeReward(ctx context.Context, userID primitive.ObjectID, challengeID, dateUTC, description string, amount float64) (*AdjustmentResult, error) {
+	ref := challengeID + ":" + dateUTC
+	return s.creditChallengeReward(ctx, userID, ref, ref, description, amount)
+}
+
+func (s *Service) creditChallengeReward(ctx context.Context, userID primitive.ObjectID, operationID, referenceID, description string, amount float64) (*AdjustmentResult, error) {
 	amount = math.Round(amount*100) / 100
 	if amount <= 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
 		return nil, ErrTopUpAmountInvalid
 	}
-	ctx = WithOperationKey(ctx, "challenge:"+userID.Hex()+":"+challengeID)
+	ctx = WithOperationKey(ctx, "challenge:"+userID.Hex()+":"+operationID)
 	return s.repo.ApplyAdjustment(ctx, Adjustment{
 		UserID:        userID,
 		Delta:         amount,
 		Amount:        amount,
 		Type:          LedgerChallengeReward,
 		ReferenceType: ChallengeReferenceType,
-		ReferenceID:   challengeID,
+		ReferenceID:   referenceID,
 		Description:   description,
 		CreatedBy:     userID,
 	})

@@ -1246,9 +1246,15 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 
 	var updated *Order
 	err := s.repo.DoTx(ctx, func(txCtx context.Context) error {
+		var match *matches.Match
+		if s.matches != nil {
+			live, matchErr := s.matches.GetMatchByID(txCtx, order.MatchID)
+			if matchErr == nil {
+				match = live
+			}
+		}
 		if enforceTradingGate {
-			match, txErr := s.matches.GetMatchByID(txCtx, order.MatchID)
-			if txErr != nil || match == nil || !isMatchTradable(match) {
+			if match == nil || !isMatchTradable(match) {
 				return ErrTradingStateChanged
 			}
 			// Use the live match gate versions. Ball-by-ball Sportmonks polls bump
@@ -1257,6 +1263,9 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 			if txErr := s.verifyTradingGates(txCtx, match, order.MarketID, match.StateVersion, match.TradingVersion); txErr != nil {
 				return txErr
 			}
+		}
+		if match != nil {
+			execution.SetClock(snapshotMatchClock(match, execution.CreatedAt))
 		}
 
 		transition := PositionTransition{}

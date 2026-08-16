@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -41,12 +42,28 @@ type BatchMarketReader interface {
 	GetMarketsByIDs(ctx context.Context, ids []string) (map[string]*markets.Market, error)
 }
 
+// CloseFill is emitted when a fill realizes a profitable close lot. Daily
+// challenges consume these events with the match clock snapshotted at fill time.
+type CloseFill struct {
+	FillID      string
+	UserID      primitive.ObjectID
+	ClosedAt    time.Time
+	RealizedPnL float64
+	Open        executions.MatchClock
+	Close       executions.MatchClock
+}
+
+type CloseObserver interface {
+	OnProfitableClose(ctx context.Context, event CloseFill) error
+}
+
 type Service struct {
-	executions  ExecutionReader
-	markets     MarketReader
-	projections ProjectionRepository
-	matches     MatchReader
-	pricer      MarketPricer
+	executions    ExecutionReader
+	markets       MarketReader
+	projections   ProjectionRepository
+	matches       MatchReader
+	pricer        MarketPricer
+	closeObserver CloseObserver
 }
 
 func NewService(executions ExecutionReader, markets MarketReader, matches MatchReader, pricer MarketPricer) *Service {
@@ -55,6 +72,13 @@ func NewService(executions ExecutionReader, markets MarketReader, matches MatchR
 
 func NewServiceWithProjection(executions ExecutionReader, markets MarketReader, projections ProjectionRepository, matches MatchReader, pricer MarketPricer) *Service {
 	return &Service{executions: executions, markets: markets, projections: projections, matches: matches, pricer: pricer}
+}
+
+func (s *Service) SetCloseObserver(observer CloseObserver) {
+	if s == nil {
+		return
+	}
+	s.closeObserver = observer
 }
 
 func (s *Service) GetUserOpenPositions(ctx context.Context, userID primitive.ObjectID) ([]Position, error) {
@@ -276,6 +300,7 @@ func (s *Service) ApplyExecution(ctx context.Context, exec executions.Execution,
 	if err != nil {
 		return orders.PositionTransition{}, err
 	}
+	s.notifyProfitableClose(exec, transition)
 	return orders.PositionTransition{
 		NetLotsBefore:          transition.Before.Lots,
 		AverageSellBefore:      transition.Before.SellPrice,
@@ -283,6 +308,51 @@ func (s *Service) ApplyExecution(ctx context.Context, exec executions.Execution,
 		ShortCollateralRelease: transition.ShortCollateralRelease,
 		ProjectionRevision:     transition.After.Revision,
 	}, nil
+}
+
+func (s *Service) notifyProfitableClose(exec executions.Execution, transition ProjectionTransition) {
+	if s == nil || s.closeObserver == nil {
+		return
+	}
+	if exec.LiquiditySource == executions.LiquidityProviderVoidReverse {
+		return
+	}
+	if transition.After.MatchedLots <= transition.Before.MatchedLots {
+		return
+	}
+	pnlDelta := round2(transition.After.RealizedPnL - transition.Before.RealizedPnL)
+	if pnlDelta <= 0 {
+		return
+	}
+	closedAt := exec.CreatedAt
+	if closedAt.IsZero() {
+		closedAt = time.Now().UTC()
+	}
+	closeClock := exec.Clock()
+	if closeClock.MatchID == "" {
+		closeClock.MatchID = exec.MatchID
+	}
+	if closeClock.At.IsZero() {
+		closeClock.At = closedAt
+	}
+	openClock := transition.After.OpenClock
+	if openClock.MatchID == "" {
+		openClock.MatchID = exec.MatchID
+	}
+	// Detach from the fill transaction so a challenge-store blip cannot abort
+	// the user's trade or leave the Mongo session aborted.
+	obsCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.closeObserver.OnProfitableClose(obsCtx, CloseFill{
+		FillID:      exec.ID.Hex(),
+		UserID:      exec.UserID,
+		ClosedAt:    closedAt.UTC(),
+		RealizedPnL: pnlDelta,
+		Open:        openClock,
+		Close:       closeClock,
+	}); err != nil {
+		log.Printf("daily challenge progress fill=%s user=%s: %v", exec.ID.Hex(), exec.UserID.Hex(), err)
+	}
 }
 
 func intPtr(value int) *int {

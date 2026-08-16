@@ -263,3 +263,37 @@ func TestProjectionTracksCurrentShortCollateralAcrossLongToShortFlip(t *testing.
 		t.Fatalf("cover transition = %+v, want exact 500 collateral release", covered)
 	}
 }
+
+func TestProjectionStoresOpenClockOnFirstFill(t *testing.T) {
+	ctx := context.Background()
+	userID := primitive.NewObjectID()
+	repo := NewMemoryProjectionRepository()
+	now := time.Now().UTC()
+
+	opened, err := repo.ApplyExecution(ctx, executions.Execution{
+		UserID: userID, MatchID: "1", MarketID: "m1", Strike: 130,
+		Side: "buy", Quantity: 2, Price: 50, CreatedAt: now,
+		OversText: "19.1", LegalBalls: 115, Innings: 1, Format: "T20", ClockAt: now,
+	}, ProjectionConstraint{})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if opened.After.OpenClock.LegalBalls != 115 || opened.After.OpenClock.OversText != "19.1" {
+		t.Fatalf("open clock = %+v", opened.After.OpenClock)
+	}
+
+	closed, err := repo.ApplyExecution(ctx, executions.Execution{
+		UserID: userID, MatchID: "1", MarketID: "m1", Strike: 130,
+		Side: "sell", Quantity: 2, Price: 80, CreatedAt: now.Add(time.Second),
+		OversText: "19.5", LegalBalls: 119, Innings: 1, Format: "T20", ClockAt: now.Add(time.Second),
+	}, ProjectionConstraint{})
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if closed.After.OpenClock.LegalBalls != 115 {
+		t.Fatalf("close must keep open clock, got %+v", closed.After.OpenClock)
+	}
+	if closed.After.MatchedLots != 2 || closed.After.RealizedPnL <= 0 {
+		t.Fatalf("close transition = %+v", closed.After)
+	}
+}

@@ -72,6 +72,10 @@ type PositionProjection struct {
 	Revision        int64              `bson:"revision"`
 	CreatedAt       time.Time          `bson:"createdAt"`
 	UpdatedAt       time.Time          `bson:"updatedAt"`
+
+	// OpenClock is the match state at the first fill that opened this run of
+	// lots. Last Over Hero needs both this snapshot and the closing fill clock.
+	OpenClock executions.MatchClock `bson:"openClock,omitempty"`
 }
 
 func (p PositionProjection) ToPosition(ltp float64) Position {
@@ -154,6 +158,9 @@ func (p *PositionProjection) apply(exec executions.Execution) float64 {
 	}
 
 	p.Lots = p.BuyLots - p.SellLots
+	if beforeLots == 0 && p.Lots != 0 {
+		p.OpenClock = exec.Clock()
+	}
 	if p.Lots == 0 {
 		p.Status = "closed"
 	} else {

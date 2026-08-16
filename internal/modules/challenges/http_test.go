@@ -35,6 +35,12 @@ func (s *stubWallet) CreditChallengeReward(_ context.Context, _ primitive.Object
 	return &wallet.AdjustmentResult{}, nil
 }
 
+func (s *stubWallet) CreditDailyChallengeReward(_ context.Context, _ primitive.ObjectID, id, dateUTC, _ string, amount float64) (*wallet.AdjustmentResult, error) {
+	s.paid += amount
+	s.ledger = append(s.ledger, wallet.LedgerEntry{Type: wallet.LedgerChallengeReward, ReferenceID: id + ":" + dateUTC})
+	return &wallet.AdjustmentResult{}, nil
+}
+
 func (s *stubWallet) GetLedger(context.Context, primitive.ObjectID, int64) ([]wallet.LedgerEntry, error) {
 	return s.ledger, nil
 }
@@ -171,7 +177,9 @@ func TestListEndpointReportsServerDerivedProgress(t *testing.T) {
 	if len(body.Data) == 0 {
 		t.Fatal("no challenges returned")
 	}
+	seen := map[string]bool{}
 	for _, c := range body.Data {
+		seen[c.ID] = true
 		switch c.ID {
 		case "sc-1":
 			if c.Status != challenges.StatusComplete {
@@ -181,6 +189,25 @@ func TestListEndpointReportsServerDerivedProgress(t *testing.T) {
 			if c.Status == challenges.StatusComplete {
 				t.Fatal("a SELL completed a long-call challenge")
 			}
+		case challenges.DailyPowerplayPro, challenges.DailyMiddleOverGenius, challenges.DailyDeathOverAssassin, challenges.DailyLastOverHero:
+			if c.AcademyID != "today" {
+				t.Fatalf("%s academyId=%s, want today", c.ID, c.AcademyID)
+			}
+			if c.Status == challenges.StatusLocked {
+				t.Fatalf("%s must never be LOCKED", c.ID)
+			}
+			if c.Progress != 0 {
+				t.Fatalf("%s progress=%d, want 0 with no closes", c.ID, c.Progress)
+			}
+		}
+	}
+	for _, id := range []string{
+		challenges.DailyPowerplayPro, challenges.DailyMiddleOverGenius,
+		challenges.DailyDeathOverAssassin, challenges.DailyLastOverHero,
+		"lc-1", "sc-1",
+	} {
+		if !seen[id] {
+			t.Fatalf("GET /challenges missing %s", id)
 		}
 	}
 }

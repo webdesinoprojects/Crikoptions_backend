@@ -245,6 +245,9 @@ func TestCreateOrder_ExecutedFillCallsPositionProjectionWriter(t *testing.T) {
 	if got.UserID != userID || got.MarketID != marketID.Hex() || got.Strike != 130 || got.Quantity != 7 || got.Price != 55 {
 		t.Fatalf("projection writer exec = %+v", got)
 	}
+	if got.LegalBalls != 78 || got.Innings != 1 {
+		t.Fatalf("fill clock legalBalls=%d innings=%d, want 78/1 from live match snapshot", got.LegalBalls, got.Innings)
+	}
 }
 
 func TestCreateOrder_FillUsesAtomicPositionTransitionForShortCollateral(t *testing.T) {
