@@ -1,0 +1,44 @@
+# Render Blueprint - Crikoptions backend
+# Deploy: Render Dashboard -> New -> Blueprint -> pick this repo.
+# Vars marked `sync: false` are NOT stored in git; Render prompts for them
+# on first deploy and you can edit them later under Service -> Environment.
+services:
+  - type: web
+    name: crikoptions-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # --- required for boot (config.Load fails without these) ---
+      - key: PORT
+        value: "10000"
+      - key: MONGO_DB
+        sync: false            # mongodb+srv://... (Atlas M0; transactions required)
+      - key: JWT_SECRET
+        sync: false            # generate a fresh 64-hex secret for this deploy
+
+      # --- app config ---
+      - key: MONGO_DB_NAME
+        value: crikoptions
+      - key: TOKEN_HOURS
+        value: "24"
+      - key: ADMIN_EMAILS
+        sync: false            # comma-separated admin logins
+      - key: CHAT_ENABLED
+        value: "true"
+      - key: ALLOWED_ORIGINS
+        sync: false            # set to the Vercel URL once the frontend is up.
+                               # Gates CORS *and* the WebSocket CheckOrigin.
+                               # No trailing slashes.
+
+      # --- Sportmonks live feed (runs in-process inside cmd/api) ---
+      - key: SPORTMONKS_MODE
+        value: live
+      - key: SPORTMONKS_API_TOKEN
+        sync: false
+      - key: SPORTMONKS_BASE_URL
+        value: https://cricket.sportmonks.com/api/v2.0
