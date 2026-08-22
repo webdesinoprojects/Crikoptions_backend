@@ -1,0 +1,53 @@
+# Pings the Render free-tier service so it does not idle out.
+#
+# Render free web services sleep after ~15 minutes without inbound traffic.
+# While asleep the in-process Sportmonks feed worker and settlement processor
+# stop too, so live match data gaps until the next request wakes it (~50s).
+#
+# Set the repo variable RENDER_URL (Settings -> Secrets and variables ->
+# Actions -> Variables) to the service base URL, e.g.
+#   https://crikoptions-api.onrender.com
+# Until it is set this workflow no-ops instead of failing.
+#
+# NOTE: GitHub's scheduler is best-effort and can delay runs past 15 minutes
+# under load. Treat this as a backup; a dedicated pinger (UptimeRobot,
+# cron-job.org) is more reliable for holding the service awake.
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health
+        env:
+          RENDER_URL: ${{ vars.RENDER_URL }}
+        run: |
+          if [ -z "${RENDER_URL}" ]; then
+            echo "RENDER_URL repo variable not set; skipping."
+            exit 0
+          fi
+          url="${RENDER_URL%/}/health"
+          echo "Pinging ${url}"
+          for attempt in 1 2 3 4 5 6; do
+            code=$(curl -fsS -o /tmp/body -w '%{http_code}' --max-time 90 "${url}") && {
+              echo "HTTP ${code}"
+              cat /tmp/body
+              exit 0
+            }
+            echo "attempt ${attempt} failed; service may be cold-starting"
+            sleep 20
+          done
+          echo "::warning::keepalive ping never succeeded for ${url}"
