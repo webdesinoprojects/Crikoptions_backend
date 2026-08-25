@@ -96,7 +96,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Credit the ₹1,00,000 welcome bonus in a background goroutine so the
+	// Credit the ₹5,000 welcome bonus in a background goroutine so the
 	// registration response is never delayed by the wallet write.
 	if h.welcomeCreditor != nil {
 		userID := user.ID

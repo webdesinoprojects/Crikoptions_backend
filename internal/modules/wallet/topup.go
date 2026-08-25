@@ -16,9 +16,9 @@ var (
 	ErrTopUpAmountInvalid = errors.New("top-up amount must be between 1 and 99999")
 )
 
-const welcomeBonusAmount = 100000.0 // ₹1,00,000
+const welcomeBonusAmount = 5000.0 // ₹5,000
 
-// ApplyWelcomeCredit credits ₹1,00,000 paper money to a newly registered user.
+// ApplyWelcomeCredit credits ₹5,000 paper money to a newly registered user.
 // It is idempotent: if the user already has a WELCOME_BONUS ledger entry the
 // call returns nil without creating a duplicate credit.
 func (s *Service) ApplyWelcomeCredit(ctx context.Context, userID primitive.ObjectID) error {
@@ -40,7 +40,7 @@ func (s *Service) ApplyWelcomeCredit(ctx context.Context, userID primitive.Objec
 		Type:          LedgerWelcomeBonus,
 		ReferenceType: "SIGNUP_BONUS",
 		ReferenceID:   primitive.NewObjectID().Hex(),
-		Description:   "Welcome bonus — ₹1,00,000 paper money credited on signup",
+		Description:   "Welcome bonus — ₹5,000 paper money credited on signup",
 		CreatedBy:     userID,
 	})
 	return err
