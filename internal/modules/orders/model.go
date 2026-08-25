@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 const (
@@ -71,7 +73,7 @@ func (o Order) RemainingReservedAmount() float64 {
 	if o.Side != "buy" {
 		return 0
 	}
-	return round2(o.Price * float64(o.RemainingQuantity))
+	return round2(o.Price * float64(o.RemainingQuantity) * lotsize.Size)
 }
 
 func (o Order) ReservedReleaseForFill(fillQty int) float64 {
@@ -98,7 +100,7 @@ func (o Order) ReservedReleaseForFill(fillQty int) float64 {
 	if o.Side != "buy" {
 		return 0
 	}
-	return round2(o.Price * float64(fillQty))
+	return round2(o.Price * float64(fillQty) * lotsize.Size)
 }
 
 func (o Order) ReservedReleaseForQuantity(qty int) float64 {
@@ -118,7 +120,7 @@ func (o Order) ReservedReleaseForQuantity(qty int) float64 {
 	if o.Side != "buy" {
 		return 0
 	}
-	return round2(o.Price * float64(qty))
+	return round2(o.Price * float64(qty) * lotsize.Size)
 }
 
 func round2(v float64) float64 {

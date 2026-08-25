@@ -207,9 +207,9 @@ func TestExit_FullMarketSell(t *testing.T) {
 	if got := f.openQty(130); got != 0 {
 		t.Fatalf("open lots = %d, want 0", got)
 	}
-	// Start 100000 - buy 348.50 + sell 487.80 = 100139.30 (realized 139.30).
-	if bal := f.balance(t); bal != 100139.30 {
-		t.Fatalf("balance = %.2f, want 100139.30", bal)
+	// Start 100000 - buy 8712.50 + sell 12195.00 = 103482.50 (realized 3482.50, lot size 25).
+	if bal := f.balance(t); bal != 103482.50 {
+		t.Fatalf("balance = %.2f, want 103482.50", bal)
 	}
 
 	msg, ok := f.pub.last("user:" + f.userID.Hex() + ":positions")
@@ -322,8 +322,8 @@ func TestShortSelling_SellBeyondLongFlipsShort(t *testing.T) {
 		t.Fatalf("net lots = %d, want -5", got)
 	}
 	acct := f.account(t)
-	if acct.CashBalance != 100371.50 || acct.ReservedBalance != 480 || acct.AvailableBalance != 99891.50 {
-		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 100371.50/480/99891.50", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	if acct.CashBalance != 109287.50 || acct.ReservedBalance != 12000 || acct.AvailableBalance != 97287.50 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 109287.50/12000/97287.50", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
 	}
 }
 
@@ -347,15 +347,15 @@ func TestShortSelling_SellFromFlatOpensShort(t *testing.T) {
 	if order.Status != StatusExecuted || order.PositionIntent != "SELL_TO_OPEN_SHORT" {
 		t.Fatalf("order status/intent = %q/%q, want executed/SELL_TO_OPEN_SHORT", order.Status, order.PositionIntent)
 	}
-	if order.ReservedAmount != 240 || order.ReservedQuantity != 5 {
-		t.Fatalf("reserved = %.2f/%d, want 240/5", order.ReservedAmount, order.ReservedQuantity)
+	if order.ReservedAmount != 6000 || order.ReservedQuantity != 5 {
+		t.Fatalf("reserved = %.2f/%d, want 6000/5", order.ReservedAmount, order.ReservedQuantity)
 	}
 	if got := f.netQty(140); got != -5 {
 		t.Fatalf("net lots = %d, want -5", got)
 	}
 	acct := f.account(t)
-	if acct.CashBalance != 100240 || acct.ReservedBalance != 480 || acct.AvailableBalance != 99760 {
-		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 100240/480/99760", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	if acct.CashBalance != 106000 || acct.ReservedBalance != 12000 || acct.AvailableBalance != 94000 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 106000/12000/94000", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
 	}
 
 	msg, ok := f.pub.last("user:" + f.userID.Hex() + ":positions")
@@ -417,8 +417,8 @@ func TestShortSelling_BuyCoversShortAndReleasesCollateral(t *testing.T) {
 		t.Fatalf("partial intent/net = %q/%d, want BUY_TO_COVER/-6", partial.PositionIntent, f.netQty(140))
 	}
 	acct := f.account(t)
-	if acct.CashBalance != 100320 || acct.ReservedBalance != 576 || acct.AvailableBalance != 99744 {
-		t.Fatalf("partial wallet = cash %.2f reserved %.2f available %.2f, want 100320/576/99744", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	if acct.CashBalance != 108000 || acct.ReservedBalance != 14400 || acct.AvailableBalance != 93600 {
+		t.Fatalf("partial wallet = cash %.2f reserved %.2f available %.2f, want 108000/14400/93600", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
 	}
 
 	full, err := f.svc.CreateOrder(context.Background(), f.userID, CreateOrderRequest{
@@ -436,8 +436,8 @@ func TestShortSelling_BuyCoversShortAndReleasesCollateral(t *testing.T) {
 		t.Fatalf("full intent/net = %q/%d, want BUY_TO_COVER/0", full.PositionIntent, f.netQty(140))
 	}
 	acct = f.account(t)
-	if acct.CashBalance != 100080 || acct.ReservedBalance != 0 || acct.AvailableBalance != 100080 {
-		t.Fatalf("full wallet = cash %.2f reserved %.2f available %.2f, want 100080/0/100080", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	if acct.CashBalance != 102000 || acct.ReservedBalance != 0 || acct.AvailableBalance != 102000 {
+		t.Fatalf("full wallet = cash %.2f reserved %.2f available %.2f, want 102000/0/102000", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
 	}
 }
 
@@ -478,8 +478,8 @@ func TestShortSelling_BuyBeyondShortFlipsLong(t *testing.T) {
 		t.Fatalf("net lots = %d, want 3", got)
 	}
 	acct := f.account(t)
-	if acct.CashBalance != 99920 || acct.ReservedBalance != 0 || acct.AvailableBalance != 99920 {
-		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 99920/0/99920", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	if acct.CashBalance != 98000 || acct.ReservedBalance != 0 || acct.AvailableBalance != 98000 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 98000/0/98000", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
 	}
 }
 
@@ -560,12 +560,12 @@ func TestShortSelling_PendingShortLimitReservesAndCancelReleases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open short limit: %v", err)
 	}
-	if order.Status != StatusOpen || order.ReservedAmount != 600 || order.ReservedQuantity != 10 {
-		t.Fatalf("order status/reserved = %q/%.2f/%d, want open/600/10", order.Status, order.ReservedAmount, order.ReservedQuantity)
+	if order.Status != StatusOpen || order.ReservedAmount != 15000 || order.ReservedQuantity != 10 {
+		t.Fatalf("order status/reserved = %q/%.2f/%d, want open/15000/10", order.Status, order.ReservedAmount, order.ReservedQuantity)
 	}
 	acct := f.account(t)
-	if acct.ReservedBalance != 600 || acct.AvailableBalance != 99400 {
-		t.Fatalf("wallet after reserve = reserved %.2f available %.2f, want 600/99400", acct.ReservedBalance, acct.AvailableBalance)
+	if acct.ReservedBalance != 15000 || acct.AvailableBalance != 85000 {
+		t.Fatalf("wallet after reserve = reserved %.2f available %.2f, want 15000/85000", acct.ReservedBalance, acct.AvailableBalance)
 	}
 
 	cancelled, err := f.svc.CancelOrder(context.Background(), order.ID, f.userID)

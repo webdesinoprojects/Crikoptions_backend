@@ -18,6 +18,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 var errInvalidUserID = errors.New("invalid userId")
@@ -725,7 +726,7 @@ func computeRealized(b *aggregateBucket) float64 {
 	if avgBuy <= 0 || avgSell < 0 {
 		return 0
 	}
-	return round2((avgSell - avgBuy) * float64(matched))
+	return round2((avgSell - avgBuy) * float64(matched) * lotsize.Size)
 }
 
 func computePnL(p Position, matched int) float64 {
@@ -735,11 +736,11 @@ func computePnL(p Position, matched int) float64 {
 	}
 	switch {
 	case p.Status == "open" && p.Lots > 0 && p.BuyPrice > 0:
-		return round2((p.LTP - p.BuyPrice) * float64(absLots))
+		return round2((p.LTP - p.BuyPrice) * float64(absLots) * lotsize.Size)
 	case p.Status == "open" && p.Lots < 0 && p.SellPrice > 0:
-		return round2((p.SellPrice - p.LTP) * float64(absLots))
+		return round2((p.SellPrice - p.LTP) * float64(absLots) * lotsize.Size)
 	case p.Status == "closed" && p.BuyPrice > 0 && p.SellPrice > 0:
-		return round2((p.SellPrice - p.BuyPrice) * float64(matched))
+		return round2((p.SellPrice - p.BuyPrice) * float64(matched) * lotsize.Size)
 	}
 	return 0
 }

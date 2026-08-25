@@ -19,6 +19,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 const (
@@ -330,9 +331,9 @@ func providerVoidCompensations(originals []executions.Execution, matchID, market
 		}, "|"))
 		switch original.Side {
 		case "buy":
-			compensation.cashDelta = round2(compensation.cashDelta + round2(original.Price*float64(original.Quantity)))
+			compensation.cashDelta = round2(compensation.cashDelta + round2(original.Price*float64(original.Quantity)*lotsize.Size))
 		case "sell":
-			compensation.cashDelta = round2(compensation.cashDelta - round2(original.Price*float64(original.Quantity)))
+			compensation.cashDelta = round2(compensation.cashDelta - round2(original.Price*float64(original.Quantity)*lotsize.Size))
 		}
 	}
 
@@ -631,13 +632,13 @@ func (s *Service) forceClosePosition(
 		if buyPrice <= 0 {
 			buyPrice = fillPrice
 		}
-		realizedPnL = round2((fillPrice - buyPrice) * float64(closeQty))
+		realizedPnL = round2((fillPrice - buyPrice) * float64(closeQty) * lotsize.Size)
 	} else {
 		sellPrice := target.SellPrice
 		if sellPrice <= 0 {
 			sellPrice = fillPrice
 		}
-		realizedPnL = round2((sellPrice - fillPrice) * float64(closeQty))
+		realizedPnL = round2((sellPrice - fillPrice) * float64(closeQty) * lotsize.Size)
 	}
 
 	if filled != nil {

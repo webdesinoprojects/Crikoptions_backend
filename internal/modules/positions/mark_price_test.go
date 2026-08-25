@@ -65,7 +65,7 @@ func TestStrikeMarkPriceUsesBidForLongNotChainAverage(t *testing.T) {
 
 	pos := Position{Status: "open", Lots: 10, BuyPrice: 238.24, LTP: got}
 	pnl := computePnL(pos, 0)
-	if pnl != -6.6 {
-		t.Fatalf("pnl = %.2f, want -6.60 for buy 238.24 marked at bid 237.58 x10", pnl)
+	if pnl != -165 {
+		t.Fatalf("pnl = %.2f, want -165.00 for buy 238.24 marked at bid 237.58 x10 lots x25 lot size", pnl)
 	}
 }

@@ -116,8 +116,8 @@ func TestSummaryAggregatesPortfolioMetrics(t *testing.T) {
 	if summary.MarginUsagePct != 10 {
 		t.Fatalf("marginUsagePct = %.2f, want 10", summary.MarginUsagePct)
 	}
-	if summary.RiskMetrics.LeverageRatio != 0.24 {
-		t.Fatalf("leverage = %.2f, want 0.24", summary.RiskMetrics.LeverageRatio)
+	if summary.RiskMetrics.LeverageRatio != 5.95 {
+		t.Fatalf("leverage = %.2f, want 5.95", summary.RiskMetrics.LeverageRatio)
 	}
 	if len(summary.Positions) != 1 || summary.Positions[0].Allocation != 100 {
 		t.Fatalf("positions/allocation = %+v, want one 100%% allocation", summary.Positions)

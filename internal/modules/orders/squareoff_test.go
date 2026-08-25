@@ -12,6 +12,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 type squareOffPositions struct {
@@ -322,14 +323,14 @@ func TestVoidProviderInningsReversesClosedContractPnL(t *testing.T) {
 	}
 
 	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
-	if _, err := walletSvc.AdminCredit(ctx, primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 1000}); err != nil {
+	if _, err := walletSvc.AdminCredit(ctx, primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 25000}); err != nil {
 		t.Fatal(err)
 	}
 	executionRepo := executions.NewMemoryRepository()
 	executionSvc := executions.NewService(executionRepo)
 	buyOrderID := primitive.NewObjectID()
 	sellOrderID := primitive.NewObjectID()
-	if _, err := walletSvc.SettleBuyFill(ctx, userID, 100, 0, buyOrderID.Hex(), "original buy"); err != nil {
+	if _, err := walletSvc.SettleBuyFill(ctx, userID, 2500, 0, buyOrderID.Hex(), "original buy"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := executionSvc.Create(ctx, executions.Execution{
@@ -340,7 +341,7 @@ func TestVoidProviderInningsReversesClosedContractPnL(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := walletSvc.SettleSellFill(ctx, userID, 120, sellOrderID.Hex(), "original sell"); err != nil {
+	if _, err := walletSvc.SettleSellFill(ctx, userID, 3000, sellOrderID.Hex(), "original sell"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := executionSvc.Create(ctx, executions.Execution{
@@ -365,7 +366,7 @@ func TestVoidProviderInningsReversesClosedContractPnL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if account.CashBalance != 1000 || account.ReservedBalance != 0 || account.AvailableBalance != 1000 {
+	if account.CashBalance != 25000 || account.ReservedBalance != 0 || account.AvailableBalance != 25000 {
 		t.Fatalf("voided wallet = %+v", account)
 	}
 	voided := marketSvc.GetMarketsByMatchID(ctx, matchID.Hex())[0]
@@ -380,12 +381,12 @@ func TestVoidProviderInningsRestoresAllPositionHistoriesExactlyOnce(t *testing.T
 		seed  float64
 		fills []executions.Execution
 	}{
-		{name: "open long", seed: 1000, fills: []executions.Execution{{Side: "buy", Price: 100, Quantity: 2}}},
-		{name: "partially closed long", seed: 1000, fills: []executions.Execution{{Side: "buy", Price: 100, Quantity: 2}, {Side: "sell", Price: 120, Quantity: 1}}},
-		{name: "closed long", seed: 1000, fills: []executions.Execution{{Side: "buy", Price: 100, Quantity: 1}, {Side: "sell", Price: 120, Quantity: 1}}},
-		{name: "open short", seed: 1000, fills: []executions.Execution{{Side: "sell", Price: 100, Quantity: 2}}},
-		{name: "partially covered short", seed: 1000, fills: []executions.Execution{{Side: "sell", Price: 100, Quantity: 2}, {Side: "buy", Price: 80, Quantity: 1}}},
-		{name: "closed losing short", seed: 100, fills: []executions.Execution{{Side: "sell", Price: 1, Quantity: 1}, {Side: "buy", Price: 100, Quantity: 1}}},
+		{name: "open long", seed: 25000, fills: []executions.Execution{{Side: "buy", Price: 100, Quantity: 2}}},
+		{name: "partially closed long", seed: 25000, fills: []executions.Execution{{Side: "buy", Price: 100, Quantity: 2}, {Side: "sell", Price: 120, Quantity: 1}}},
+		{name: "closed long", seed: 25000, fills: []executions.Execution{{Side: "buy", Price: 100, Quantity: 1}, {Side: "sell", Price: 120, Quantity: 1}}},
+		{name: "open short", seed: 25000, fills: []executions.Execution{{Side: "sell", Price: 100, Quantity: 2}}},
+		{name: "partially covered short", seed: 25000, fills: []executions.Execution{{Side: "sell", Price: 100, Quantity: 2}, {Side: "buy", Price: 80, Quantity: 1}}},
+		{name: "closed losing short", seed: 2500, fills: []executions.Execution{{Side: "sell", Price: 1, Quantity: 1}, {Side: "buy", Price: 100, Quantity: 1}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -489,8 +490,8 @@ func TestProviderVoidCompensationUsesCommittedCollateralNotExecutionTimestamps(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(compensations) != 1 || compensations[0].cashDelta != -105 || compensations[0].reservedDelta != -200 {
-		t.Fatalf("compensations = %+v, want cash -105 and reserve -200", compensations)
+	if len(compensations) != 1 || compensations[0].cashDelta != -2625 || compensations[0].reservedDelta != -200 {
+		t.Fatalf("compensations = %+v, want cash -2625 and reserve -200", compensations)
 	}
 }
 
@@ -513,7 +514,7 @@ func TestProviderVoidRetryUsesFrozenCompensationAfterPartialOrCompleteUnwind(t *
 			}
 
 			walletSvc := wallet.NewService(wallet.NewMemoryRepository())
-			if _, err := walletSvc.AdminCredit(ctx, primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 1000}); err != nil {
+			if _, err := walletSvc.AdminCredit(ctx, primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 25000}); err != nil {
 				t.Fatal(err)
 			}
 			executionSvc := executions.NewService(executions.NewMemoryRepository())
@@ -560,7 +561,7 @@ func TestProviderVoidRetryUsesFrozenCompensationAfterPartialOrCompleteUnwind(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			if account.CashBalance != 1000 || account.ReservedBalance != 0 || account.AvailableBalance != 1000 {
+			if account.CashBalance != 25000 || account.ReservedBalance != 0 || account.AvailableBalance != 25000 {
 				t.Fatalf("wallet = %+v, want exactly restored once", account)
 			}
 			ledger, err := walletSvc.GetLedger(ctx, userID, 100)
@@ -601,7 +602,7 @@ func applyOriginalProviderFill(t *testing.T, ctx context.Context, walletSvc *wal
 				}
 			}
 		}
-		cost := round2(fill.Price * float64(fill.Quantity))
+		cost := round2(fill.Price * float64(fill.Quantity) * lotsize.Size)
 		if cost > 0 {
 			if _, err := walletSvc.SettleBuyFill(ctx, fill.UserID, cost, 0, fill.OrderID.Hex(), "original buy"); err != nil {
 				t.Fatal(err)
@@ -609,7 +610,7 @@ func applyOriginalProviderFill(t *testing.T, ctx context.Context, walletSvc *wal
 		}
 	case "sell":
 		if plan.OpenShortQty > 0 {
-			margin := round2(fill.Price * float64(plan.OpenShortQty) * ShortInitialMarginRate)
+			margin := round2(fill.Price * float64(plan.OpenShortQty) * lotsize.Size * ShortInitialMarginRate)
 			if margin > 0 {
 				if _, err := walletSvc.ReserveOrderMargin(ctx, fill.UserID, margin, fill.OrderID.Hex(), "original short margin"); err != nil {
 					t.Fatal(err)
@@ -617,7 +618,7 @@ func applyOriginalProviderFill(t *testing.T, ctx context.Context, walletSvc *wal
 			}
 		}
 		if plan.CloseLongQty > 0 {
-			proceeds := round2(fill.Price * float64(plan.CloseLongQty))
+			proceeds := round2(fill.Price * float64(plan.CloseLongQty) * lotsize.Size)
 			if proceeds > 0 {
 				if _, err := walletSvc.SettleSellFill(ctx, fill.UserID, proceeds, fill.OrderID.Hex(), "original long close"); err != nil {
 					t.Fatal(err)
@@ -625,7 +626,7 @@ func applyOriginalProviderFill(t *testing.T, ctx context.Context, walletSvc *wal
 			}
 		}
 		if plan.OpenShortQty > 0 {
-			proceeds := round2(fill.Price * float64(plan.OpenShortQty))
+			proceeds := round2(fill.Price * float64(plan.OpenShortQty) * lotsize.Size)
 			if proceeds > 0 {
 				if _, err := walletSvc.SettleShortOpenFill(ctx, fill.UserID, proceeds, fill.OrderID.Hex(), "original short proceeds"); err != nil {
 					t.Fatal(err)
@@ -684,17 +685,17 @@ func TestSettleProviderInningsHandlesInsolvencyAndCurrentShortCollateral(t *test
 		expectedCash float64
 	}{
 		{
-			name: "losing short can settle below zero", seed: 100, debit: 99,
-			fills: []executions.Execution{{Side: "sell", Price: 1, Quantity: 1}}, expectedCash: -98,
+			name: "losing short can settle below zero", seed: 2500, debit: 2475,
+			fills: []executions.Execution{{Side: "sell", Price: 1, Quantity: 1}}, expectedCash: -2450,
 		},
 		{
-			name: "long sales are excluded from short collateral", seed: 10000,
+			name: "long sales are excluded from short collateral", seed: 250000,
 			fills: []executions.Execution{
 				{Side: "buy", Price: 30, Quantity: 10},
 				{Side: "sell", Price: 100, Quantity: 5},
 				{Side: "sell", Price: 50, Quantity: 10},
 			},
-			expectedCash: 10200,
+			expectedCash: 255000,
 		},
 	}
 	for _, tt := range tests {
@@ -906,9 +907,9 @@ func TestSquareOff_MatchSettlesShortAtAsk(t *testing.T) {
 	}
 
 	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
-	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 10000, Reason: "seed"})
-	_, _ = walletSvc.ReserveOrderMargin(context.Background(), userID, 500, "short-open", "short initial margin")
-	_, _ = walletSvc.SettleShortOpenFill(context.Background(), userID, 500, "short-open", "short sale proceeds")
+	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 250000, Reason: "seed"})
+	_, _ = walletSvc.ReserveOrderMargin(context.Background(), userID, 12500, "short-open", "short initial margin")
+	_, _ = walletSvc.SettleShortOpenFill(context.Background(), userID, 12500, "short-open", "short sale proceeds")
 
 	execSvc := executions.NewService(executions.NewMemoryRepository())
 	_, _ = execSvc.Create(context.Background(), executions.Execution{
@@ -932,8 +933,8 @@ func TestSquareOff_MatchSettlesShortAtAsk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SquareOff: %v", err)
 	}
-	if result.PositionsSettled != 1 || result.TotalRealizedPnL != 50 {
-		t.Fatalf("settled/pnl = %d/%.2f, want 1/50", result.PositionsSettled, result.TotalRealizedPnL)
+	if result.PositionsSettled != 1 || result.TotalRealizedPnL != 1250 {
+		t.Fatalf("settled/pnl = %d/%.2f, want 1/1250", result.PositionsSettled, result.TotalRealizedPnL)
 	}
 	if got := execSvc.NetLots(context.Background(), userID, "1", marketID.Hex(), 160); got != 0 {
 		t.Fatalf("net lots = %d, want 0", got)
@@ -943,8 +944,8 @@ func TestSquareOff_MatchSettlesShortAtAsk(t *testing.T) {
 		t.Fatalf("settlement order = %+v, want one BUY at ask 45", orders)
 	}
 	acct, _ := walletSvc.GetWallet(context.Background(), userID)
-	if acct.CashBalance != 10050 || acct.ReservedBalance != 0 || acct.AvailableBalance != 10050 {
-		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 10050/0/10050", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
+	if acct.CashBalance != 251250 || acct.ReservedBalance != 0 || acct.AvailableBalance != 251250 {
+		t.Fatalf("wallet = cash %.2f reserved %.2f available %.2f, want 251250/0/251250", acct.CashBalance, acct.ReservedBalance, acct.AvailableBalance)
 	}
 }
 

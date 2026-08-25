@@ -54,9 +54,9 @@ func TestRealizedPnL_PartialExitKeepsOpenWithRealizedSlice(t *testing.T) {
 	if p.Lots != 10 {
 		t.Fatalf("lots = %d, want 10", p.Lots)
 	}
-	// Realized on closed slice: (49 - 34.85) * 5 = 70.75.
-	if p.RealizedPnL != 70.75 {
-		t.Fatalf("realizedPnl = %.2f, want 70.75", p.RealizedPnL)
+	// Realized on closed slice: (49 - 34.85) * 5 * 25 (lot size) = 1768.75.
+	if p.RealizedPnL != 1768.75 {
+		t.Fatalf("realizedPnl = %.2f, want 1768.75", p.RealizedPnL)
 	}
 }
 
@@ -86,8 +86,8 @@ func TestRealizedPnL_FullExitClosesPosition(t *testing.T) {
 	if c.Lots != 0 {
 		t.Fatalf("lots = %d, want 0", c.Lots)
 	}
-	// Realized: (48.78 - 34.85) * 10 = 139.30.
-	if c.RealizedPnL != 139.30 {
-		t.Fatalf("realizedPnl = %.2f, want 139.30", c.RealizedPnL)
+	// Realized: (48.78 - 34.85) * 10 * 25 (lot size) = 3482.50.
+	if c.RealizedPnL != 3482.50 {
+		t.Fatalf("realizedPnl = %.2f, want 3482.50", c.RealizedPnL)
 	}
 }

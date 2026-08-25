@@ -116,8 +116,8 @@ func TestProjectionLifecycle_PartialCloseFullCloseAndReopen(t *testing.T) {
 	if len(open) != 1 {
 		t.Fatalf("open len = %d, want 1", len(open))
 	}
-	if open[0].Lots != 60 || open[0].MatchedLots != 40 || open[0].RealizedPnL != 400 || open[0].PnL != 1200 {
-		t.Fatalf("partial position = %+v, want lots 60 matched 40 realized 400 pnl 1200", open[0])
+	if open[0].Lots != 60 || open[0].MatchedLots != 40 || open[0].RealizedPnL != 10000 || open[0].PnL != 30000 {
+		t.Fatalf("partial position = %+v, want lots 60 matched 40 realized 10000 pnl 30000", open[0])
 	}
 
 	if _, err := repo.ApplyExecution(ctx, executions.Execution{
@@ -141,8 +141,8 @@ func TestProjectionLifecycle_PartialCloseFullCloseAndReopen(t *testing.T) {
 		t.Fatalf("closed len = %d, want 1", len(closed))
 	}
 	closedID := closed[0].ID
-	if closed[0].Lots != 0 || closed[0].MatchedLots != 100 || closed[0].RealizedPnL != 1300 {
-		t.Fatalf("closed position = %+v, want matched 100 realized 1300", closed[0])
+	if closed[0].Lots != 0 || closed[0].MatchedLots != 100 || closed[0].RealizedPnL != 32500 {
+		t.Fatalf("closed position = %+v, want matched 100 realized 32500", closed[0])
 	}
 
 	if _, err := repo.ApplyExecution(ctx, executions.Execution{
@@ -182,8 +182,8 @@ func TestProjectionLifecycle_OpenShortCoverAndReopen(t *testing.T) {
 	if len(open) != 1 {
 		t.Fatalf("open len = %d, want 1", len(open))
 	}
-	if open[0].Side != "SELL" || open[0].Lots != -10 || open[0].SellPrice != 50 || open[0].PnL != 50 {
-		t.Fatalf("short position = %+v, want SELL lots -10 sellPrice 50 pnl 50", open[0])
+	if open[0].Side != "SELL" || open[0].Lots != -10 || open[0].SellPrice != 50 || open[0].PnL != 1250 {
+		t.Fatalf("short position = %+v, want SELL lots -10 sellPrice 50 pnl 1250", open[0])
 	}
 
 	if _, err := repo.ApplyExecution(ctx, executions.Execution{
@@ -207,8 +207,8 @@ func TestProjectionLifecycle_OpenShortCoverAndReopen(t *testing.T) {
 		t.Fatalf("closed len = %d, want 1", len(closed))
 	}
 	closedID := closed[0].ID
-	if closed[0].Side != "SELL" || closed[0].Lots != 0 || closed[0].MatchedLots != 10 || closed[0].RealizedPnL != 100 {
-		t.Fatalf("closed short = %+v, want SELL matched 10 realized 100", closed[0])
+	if closed[0].Side != "SELL" || closed[0].Lots != 0 || closed[0].MatchedLots != 10 || closed[0].RealizedPnL != 2500 {
+		t.Fatalf("closed short = %+v, want SELL matched 10 realized 2500", closed[0])
 	}
 
 	if _, err := repo.ApplyExecution(ctx, executions.Execution{
@@ -249,8 +249,8 @@ func TestProjectionTracksCurrentShortCollateralAcrossLongToShortFlip(t *testing.
 	if err != nil || open == nil {
 		t.Fatalf("open short = %+v, err=%v", open, err)
 	}
-	if open.Lots != -5 || open.ShortCollateral != 500 {
-		t.Fatalf("open short = %+v, want lots -5 and collateral 500", open)
+	if open.Lots != -5 || open.ShortCollateral != 12500 {
+		t.Fatalf("open short = %+v, want lots -5 and collateral 12500", open)
 	}
 	covered, err := repo.ApplyExecution(ctx, executions.Execution{
 		UserID: userID, MatchID: "1", MarketID: "m1", Strike: 100,
@@ -259,8 +259,8 @@ func TestProjectionTracksCurrentShortCollateralAcrossLongToShortFlip(t *testing.
 	if err != nil {
 		t.Fatalf("cover: %v", err)
 	}
-	if covered.ShortCollateralRelease != 500 || covered.After.ShortCollateral != 0 || covered.After.Lots != 0 {
-		t.Fatalf("cover transition = %+v, want exact 500 collateral release", covered)
+	if covered.ShortCollateralRelease != 12500 || covered.After.ShortCollateral != 0 || covered.After.Lots != 0 {
+		t.Fatalf("cover transition = %+v, want exact 12500 collateral release", covered)
 	}
 }
 

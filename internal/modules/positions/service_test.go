@@ -72,8 +72,8 @@ func TestAggregate_OpenLong(t *testing.T) {
 	if p.LTP != 160 {
 		t.Errorf("ltp = %v, want 160", p.LTP)
 	}
-	if p.PnL != 250 {
-		t.Errorf("pnl = %v, want 250", p.PnL)
+	if p.PnL != 6250 {
+		t.Errorf("pnl = %v, want 6250", p.PnL)
 	}
 }
 
@@ -102,8 +102,8 @@ func TestAggregate_OpenShort(t *testing.T) {
 	if p.SellPrice != 50 {
 		t.Errorf("sellPrice = %v, want 50", p.SellPrice)
 	}
-	if p.PnL != 100 {
-		t.Errorf("pnl = %v, want 100", p.PnL)
+	if p.PnL != 2500 {
+		t.Errorf("pnl = %v, want 2500", p.PnL)
 	}
 }
 
@@ -125,8 +125,8 @@ func TestAggregate_ClosedPosition(t *testing.T) {
 		t.Fatalf("expected 1 closed position, got %d", len(closed))
 	}
 	p := closed[0]
-	if p.PnL != 500 {
-		t.Errorf("pnl = %v, want 500", p.PnL)
+	if p.PnL != 12500 {
+		t.Errorf("pnl = %v, want 12500", p.PnL)
 	}
 }
 
@@ -151,8 +151,8 @@ func TestAggregate_ClosedShortPositionKeepsSellSide(t *testing.T) {
 	if p.Side != "SELL" {
 		t.Errorf("side = %q, want SELL", p.Side)
 	}
-	if p.RealizedPnL != 100 || p.PnL != 100 {
-		t.Errorf("realized/pnl = %.2f/%.2f, want 100/100", p.RealizedPnL, p.PnL)
+	if p.RealizedPnL != 2500 || p.PnL != 2500 {
+		t.Errorf("realized/pnl = %.2f/%.2f, want 2500/2500", p.RealizedPnL, p.PnL)
 	}
 }
 
@@ -172,8 +172,8 @@ func TestAggregate_PartiallyClosed(t *testing.T) {
 	if open[0].Lots != 60 {
 		t.Errorf("lots = %d, want 60", open[0].Lots)
 	}
-	if open[0].PnL != 1200 {
-		t.Errorf("pnl = %v, want 1200", open[0].PnL)
+	if open[0].PnL != 30000 {
+		t.Errorf("pnl = %v, want 30000", open[0].PnL)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 var (
@@ -250,10 +251,10 @@ func buildPositionPlan(side string, quantity int, effect string, netLots int, st
 	switch side {
 	case "buy":
 		plan.ReservedQuantity = plan.OpenLongQty
-		plan.ReservedAmount = round2(orderPrice * float64(plan.OpenLongQty))
+		plan.ReservedAmount = round2(orderPrice * float64(plan.OpenLongQty) * lotsize.Size)
 	case "sell":
 		plan.ReservedQuantity = plan.OpenShortQty
-		plan.ReservedAmount = round2(orderPrice * float64(plan.OpenShortQty) * ShortInitialMarginRate)
+		plan.ReservedAmount = round2(orderPrice * float64(plan.OpenShortQty) * lotsize.Size * ShortInitialMarginRate)
 	}
 	plan.Intent = planIntent(side, plan)
 	return plan, nil
@@ -306,14 +307,14 @@ func shortCollateralRelease(avgSellPrice, fillPrice float64, coverQty int) float
 	if entry <= 0 {
 		entry = fillPrice
 	}
-	return round2(entry * float64(coverQty) * (1 + ShortInitialMarginRate))
+	return round2(entry * float64(coverQty) * lotsize.Size * (1 + ShortInitialMarginRate))
 }
 
 func shortInitialMarginTopUp(order Order, fillPrice float64, openShortQty int) float64 {
 	if openShortQty <= 0 || fillPrice <= 0 {
 		return 0
 	}
-	required := round2(fillPrice * float64(openShortQty) * ShortInitialMarginRate)
+	required := round2(fillPrice * float64(openShortQty) * lotsize.Size * ShortInitialMarginRate)
 	reserved := 0.0
 	if order.ReservedAmount > 0 && order.ReservedQuantity > 0 {
 		reservedQty := minInt(openShortQty, order.ReservedQuantity)
@@ -349,7 +350,7 @@ func futureOrderReserve(side string, remainingQty, projectedLots int, orderPrice
 	if side == "sell" {
 		rate = ShortInitialMarginRate
 	}
-	return round2(orderPrice * float64(openQty) * rate)
+	return round2(orderPrice * float64(openQty) * lotsize.Size * rate)
 }
 
 func orderFundsOperationContext(ctx context.Context, userID, orderID primitive.ObjectID, action string) context.Context {
@@ -493,7 +494,7 @@ func (s *Service) PreviewOrder(ctx context.Context, userID primitive.ObjectID, r
 		return nil, err
 	}
 
-	notional := round2(orderPrice * float64(req.Quantity))
+	notional := round2(orderPrice * float64(req.Quantity) * lotsize.Size)
 	marginRequired := plan.ReservedAmount
 	sufficientBalance := req.Side != "buy" || account.AvailableBalance >= marginRequired
 	if req.Side == "sell" {
@@ -1213,7 +1214,7 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 		return order, nil
 	}
 
-	fillNotional := round2(fillPrice * float64(fillQty))
+	fillNotional := round2(fillPrice * float64(fillQty) * lotsize.Size)
 	newFilled := order.FilledQuantity + fillQty
 	newRemaining := order.RemainingQuantity - fillQty
 	avgFill := fillPrice
@@ -1336,7 +1337,7 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 					}
 				}
 				heldReserve := order.RemainingReservedAmount()
-				fillReserve := round2(fillPrice * float64(plan.OpenLongQty))
+				fillReserve := round2(fillPrice * float64(plan.OpenLongQty) * lotsize.Size)
 				targetReserve := round2(fillReserve + futureReserve)
 				if topUp := round2(targetReserve - heldReserve); topUp > 0 {
 					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "buy-margin-topup")
@@ -1363,7 +1364,7 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 				}
 			case "sell":
 				heldReserve := order.RemainingReservedAmount()
-				requiredInitialMargin := round2(fillPrice * float64(plan.OpenShortQty) * ShortInitialMarginRate)
+				requiredInitialMargin := round2(fillPrice * float64(plan.OpenShortQty) * lotsize.Size * ShortInitialMarginRate)
 				targetReserve := round2(requiredInitialMargin + futureReserve)
 				if heldReserve > targetReserve {
 					release := round2(heldReserve - targetReserve)
@@ -1379,7 +1380,7 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 					}
 				}
 				if plan.CloseLongQty > 0 {
-					proceeds := round2(fillPrice * float64(plan.CloseLongQty))
+					proceeds := round2(fillPrice * float64(plan.CloseLongQty) * lotsize.Size)
 					if proceeds > 0 {
 						fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "sell-fill")
 						if _, txErr := s.wallets.SettleSellFill(fundsCtx, userID, proceeds, order.ID.Hex(), fmt.Sprintf("Sell fill for order %s", order.ID.Hex())); txErr != nil {
@@ -1388,7 +1389,7 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 					}
 				}
 				if plan.OpenShortQty > 0 {
-					proceeds := round2(fillPrice * float64(plan.OpenShortQty))
+					proceeds := round2(fillPrice * float64(plan.OpenShortQty) * lotsize.Size)
 					fundsCtx := fillWalletOperationContext(txCtx, userID, order, execution.ID, !enforceTradingGate, "short-open-proceeds")
 					if _, txErr := s.wallets.SettleShortOpenFill(fundsCtx, userID, proceeds, order.ID.Hex(), fmt.Sprintf("Short sale proceeds for order %s", order.ID.Hex())); txErr != nil {
 						return txErr

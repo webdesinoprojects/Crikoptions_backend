@@ -6,6 +6,8 @@ import (
 	"math"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 type Service struct {
@@ -135,7 +137,7 @@ func summarizePosition(execs []Execution, strike float64) PositionSummary {
 			}
 			openShortQty := e.Quantity - closeLongQty
 			if openShortQty > 0 {
-				summary.OpenShortNotional = round2(summary.OpenShortNotional + e.Price*float64(openShortQty))
+				summary.OpenShortNotional = round2(summary.OpenShortNotional + e.Price*float64(openShortQty)*lotsize.Size)
 			}
 			lots -= e.Quantity
 		}
@@ -148,7 +150,7 @@ func summarizePosition(execs []Execution, strike float64) PositionSummary {
 		summary.AvgSellPrice = round2(summary.SellNotional / float64(summary.SellLots))
 	}
 	if summary.NetLots < 0 && summary.OpenShortNotional > 0 {
-		summary.AvgSellPrice = round2(summary.OpenShortNotional / float64(-summary.NetLots))
+		summary.AvgSellPrice = round2(summary.OpenShortNotional / (float64(-summary.NetLots) * lotsize.Size))
 	}
 	return summary
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/positions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 type PositionReader interface {
@@ -213,21 +214,21 @@ func (s *Service) adaptOpenPosition(ctx context.Context, lookup *lookupCache, po
 	if side == "SELL" && position.SellPrice > 0 {
 		entryPrice = position.SellPrice
 	}
-	notional := round2(float64(quantity) * position.LTP)
+	notional := round2(float64(quantity) * position.LTP * lotsize.Size)
 	pnl := round2(position.PnL)
 
 	return PortfolioPosition{
 		ID:                position.ID,
 		MarketID:          position.MarketID,
 		Symbol:            symbolFromMarket(market, position.MarketID),
-		MatchName:         matchName(match, position.MatchID),
+		MatchName:         matchName(match, position.MarketID),
 		Strike:            formatStrike(position.Strike),
 		Side:              side,
 		Quantity:          quantity,
 		AverageEntryPrice: round2(entryPrice),
 		CurrentPrice:      round2(position.LTP),
 		UnrealizedPnL:     pnl,
-		UnrealizedPnLPct:  pct(pnl, entryPrice*float64(quantity)),
+		UnrealizedPnLPct:  pct(pnl, entryPrice*float64(quantity)*lotsize.Size),
 		RealizedPnL:       round2(position.RealizedPnL),
 		Notional:          notional,
 		OpenedAt:          formatTime(position.CreatedAt),
@@ -269,7 +270,7 @@ func (s *Service) adaptClosedTrade(ctx context.Context, lookup *lookupCache, pos
 		EntryPrice:      round2(entryPrice),
 		ExitPrice:       round2(exitPrice),
 		RealizedPnL:     pnl,
-		RealizedPnLPct:  pct(pnl, entryPrice*float64(quantity)),
+		RealizedPnLPct:  pct(pnl, entryPrice*float64(quantity)*lotsize.Size),
 		OpenedAt:        formatTime(openedAt),
 		ClosedAt:        formatTime(closedAt),
 		HoldingPeriodMs: maxInt64(0, closedAt.Sub(openedAt).Milliseconds()),
@@ -589,7 +590,7 @@ func realizedPnL(position positions.Position) float64 {
 	// Do not fall back to open MTM PnL for a zero realized sentinel — that
 	// double-counts unrealized into closed/daily totals.
 	if position.Status == "closed" && position.BuyPrice > 0 && position.SellPrice >= 0 && position.MatchedLots > 0 {
-		return round2((position.SellPrice - position.BuyPrice) * float64(position.MatchedLots))
+		return round2((position.SellPrice - position.BuyPrice) * float64(position.MatchedLots) * lotsize.Size)
 	}
 	return 0
 }

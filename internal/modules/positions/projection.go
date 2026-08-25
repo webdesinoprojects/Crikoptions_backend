@@ -15,6 +15,7 @@ import (
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/executions"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/orders"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/shared/lotsize"
 )
 
 type ProjectionFilter struct {
@@ -81,7 +82,7 @@ type PositionProjection struct {
 func (p PositionProjection) ToPosition(ltp float64) Position {
 	sellPrice := p.SellPrice
 	if p.Lots < 0 && p.ShortCollateral > 0 {
-		sellPrice = p.ShortCollateral / ((1 + orders.ShortInitialMarginRate) * float64(-p.Lots))
+		sellPrice = p.ShortCollateral / ((1 + orders.ShortInitialMarginRate) * float64(-p.Lots) * lotsize.Size)
 	}
 	position := Position{
 		ID:              p.ID,
@@ -149,8 +150,8 @@ func (p *PositionProjection) apply(exec executions.Execution) float64 {
 		}
 		openShortQty := exec.Quantity - closeLongQty
 		if openShortQty > 0 {
-			initialMargin := round2(exec.Price * float64(openShortQty) * orders.ShortInitialMarginRate)
-			proceeds := round2(exec.Price * float64(openShortQty))
+			initialMargin := round2(exec.Price * float64(openShortQty) * lotsize.Size * orders.ShortInitialMarginRate)
+			proceeds := round2(exec.Price * float64(openShortQty) * lotsize.Size)
 			p.ShortCollateral = round2(p.ShortCollateral + initialMargin + proceeds)
 		}
 		p.SellLots += exec.Quantity
@@ -177,7 +178,7 @@ func (p *PositionProjection) apply(exec executions.Execution) float64 {
 		avgBuy := p.BuyNotional / float64(p.BuyLots)
 		avgSell := p.SellNotional / float64(p.SellLots)
 		if avgBuy > 0 && avgSell >= 0 {
-			p.RealizedPnL = round2((avgSell - avgBuy) * float64(p.MatchedLots))
+			p.RealizedPnL = round2((avgSell - avgBuy) * float64(p.MatchedLots) * lotsize.Size)
 		} else {
 			p.RealizedPnL = 0
 		}
