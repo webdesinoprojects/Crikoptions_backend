@@ -249,8 +249,8 @@ func TestProjectionTracksCurrentShortCollateralAcrossLongToShortFlip(t *testing.
 	if err != nil || open == nil {
 		t.Fatalf("open short = %+v, err=%v", open, err)
 	}
-	if open.Lots != -5 || open.ShortCollateral != 12500 {
-		t.Fatalf("open short = %+v, want lots -5 and collateral 12500", open)
+	if open.Lots != -5 || open.ShortCollateral != 18750 {
+		t.Fatalf("open short = %+v, want lots -5 and collateral 18750", open)
 	}
 	covered, err := repo.ApplyExecution(ctx, executions.Execution{
 		UserID: userID, MatchID: "1", MarketID: "m1", Strike: 100,
@@ -259,8 +259,8 @@ func TestProjectionTracksCurrentShortCollateralAcrossLongToShortFlip(t *testing.
 	if err != nil {
 		t.Fatalf("cover: %v", err)
 	}
-	if covered.ShortCollateralRelease != 12500 || covered.After.ShortCollateral != 0 || covered.After.Lots != 0 {
-		t.Fatalf("cover transition = %+v, want exact 12500 collateral release", covered)
+	if covered.ShortCollateralRelease != 18750 || covered.After.ShortCollateral != 0 || covered.After.Lots != 0 {
+		t.Fatalf("cover transition = %+v, want exact 18750 collateral release", covered)
 	}
 }
 

@@ -685,8 +685,8 @@ func TestSettleProviderInningsHandlesInsolvencyAndCurrentShortCollateral(t *test
 		expectedCash float64
 	}{
 		{
-			name: "losing short can settle below zero", seed: 2500, debit: 2475,
-			fills: []executions.Execution{{Side: "sell", Price: 1, Quantity: 1}}, expectedCash: -2450,
+			name: "losing short can settle below zero", seed: 2500, debit: 2450,
+			fills: []executions.Execution{{Side: "sell", Price: 1, Quantity: 1}}, expectedCash: -2425,
 		},
 		{
 			name: "long sales are excluded from short collateral", seed: 250000,
@@ -908,7 +908,7 @@ func TestSquareOff_MatchSettlesShortAtAsk(t *testing.T) {
 
 	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
 	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 250000, Reason: "seed"})
-	_, _ = walletSvc.ReserveOrderMargin(context.Background(), userID, 12500, "short-open", "short initial margin")
+	_, _ = walletSvc.ReserveOrderMargin(context.Background(), userID, 25000, "short-open", "short initial margin")
 	_, _ = walletSvc.SettleShortOpenFill(context.Background(), userID, 12500, "short-open", "short sale proceeds")
 
 	execSvc := executions.NewService(executions.NewMemoryRepository())

@@ -40,7 +40,11 @@ var (
 	ErrInternalOrderCancel    = newCodedAPIError(http.StatusConflict, "ORDER_NOT_CANCELLABLE", "System settlement orders cannot be cancelled")
 )
 
-const ShortInitialMarginRate = 1.0
+// ShortInitialMarginRate is a multiple of the short notional. A buy blocks 1x
+// notional, so 2.0 makes the sell margin twice the buy margin for the same
+// price and quantity. Total short collateral held is notional*(1+rate) because
+// the sale proceeds are credited to cash and locked alongside the margin.
+const ShortInitialMarginRate = 2.0
 
 const (
 	settlementClientOrderPrefix       = "settlement:"

@@ -292,8 +292,8 @@ func TestCreateOrder_FillUsesAtomicPositionTransitionForShortCollateral(t *testi
 	if err != nil {
 		t.Fatalf("GetWallet: %v", err)
 	}
-	if account.CashBalance != 106000 || account.ReservedBalance != 12000 || account.AvailableBalance != 94000 {
-		t.Fatalf("wallet = %.2f/%.2f/%.2f, want 106000/12000/94000", account.CashBalance, account.ReservedBalance, account.AvailableBalance)
+	if account.CashBalance != 106000 || account.ReservedBalance != 18000 || account.AvailableBalance != 88000 {
+		t.Fatalf("wallet = %.2f/%.2f/%.2f, want 106000/18000/88000", account.CashBalance, account.ReservedBalance, account.AvailableBalance)
 	}
 	if len(positionWriter.effects) != 1 || positionWriter.effects[0] != PositionEffectAuto {
 		t.Fatalf("projection effects = %v, want [AUTO]", positionWriter.effects)
@@ -411,7 +411,9 @@ func TestCreateOrderImmediateFillMarginFailureCancelsAndReleasesReserve(t *testi
 	userID := primitive.NewObjectID()
 	marketID := primitive.NewObjectID()
 	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
-	if _, err := walletSvc.AdminCredit(ctx, primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 2500}); err != nil {
+	// Funds exactly the limit-price reserve (100 * 25 lot * 2x short margin) so
+	// placement succeeds and only the fill-price top-up runs out of balance.
+	if _, err := walletSvc.AdminCredit(ctx, primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 5000}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -441,8 +443,8 @@ func TestCreateOrderImmediateFillMarginFailureCancelsAndReleasesReserve(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if account.CashBalance != 2500 || account.ReservedBalance != 0 || account.AvailableBalance != 2500 {
-		t.Fatalf("wallet = %+v, want 2500/0/2500", account)
+	if account.CashBalance != 5000 || account.ReservedBalance != 0 || account.AvailableBalance != 5000 {
+		t.Fatalf("wallet = %+v, want 5000/0/5000", account)
 	}
 	if fills := executionSvc.ListUserExecutions(ctx, userID, "", "", 10); len(fills) != 0 {
 		t.Fatalf("executions = %d, want none", len(fills))
@@ -545,8 +547,8 @@ func TestCreateOrder_CloseFillCancelsWhenAtomicPositionChanged(t *testing.T) {
 
 func TestShortInitialMarginTopUpCapsOriginalReservation(t *testing.T) {
 	order := Order{ReservedAmount: 240, ReservedQuantity: 5}
-	if got := shortInitialMarginTopUp(order, 48, 10); got != 11760 {
-		t.Fatalf("top-up = %.2f, want 11760", got)
+	if got := shortInitialMarginTopUp(order, 48, 10); got != 23760 {
+		t.Fatalf("top-up = %.2f, want 23760", got)
 	}
 }
 
@@ -809,11 +811,46 @@ func TestPreviewOrder_ShortSellRequiresMargin(t *testing.T) {
 	if preview.PositionIntent != "SELL_TO_OPEN_SHORT" || preview.PositionEffect != PositionEffectAuto {
 		t.Fatalf("intent/effect = %q/%q, want SELL_TO_OPEN_SHORT/AUTO", preview.PositionIntent, preview.PositionEffect)
 	}
-	if preview.Notional != 3750 || preview.MarginRequired != 3750 {
-		t.Fatalf("notional/margin = %.2f/%.2f, want 3750/3750", preview.Notional, preview.MarginRequired)
+	if preview.Notional != 3750 || preview.MarginRequired != 7500 {
+		t.Fatalf("notional/margin = %.2f/%.2f, want 3750/7500", preview.Notional, preview.MarginRequired)
 	}
 	if preview.SufficientBalance {
 		t.Fatal("preview sufficient = true, want false with only 100 available")
+	}
+}
+
+func TestPreviewOrder_SellMarginIsTwiceBuyMargin(t *testing.T) {
+	userID := primitive.NewObjectID()
+	marketID := primitive.NewObjectID()
+
+	walletSvc := wallet.NewService(wallet.NewMemoryRepository())
+	_, _ = walletSvc.AdminCredit(context.Background(), primitive.NewObjectID(), userID, wallet.FundingRequest{Amount: 100000})
+
+	svc := NewService(
+		NewMemoryRepository(),
+		&stubMarketSvc{market: &markets.Market{ID: marketID, Status: markets.MarketStatusActive}, bid: 50, ask: 51, ok: true},
+		&stubMatchSvc{match: &matches.Match{Status: "live", Innings: 1, BallsLeft: 42}},
+		walletSvc,
+		executions.NewService(executions.NewMemoryRepository()),
+		nil,
+		nil,
+	)
+
+	preview := func(side string) *OrderPreviewResponse {
+		t.Helper()
+		out, err := svc.PreviewOrder(context.Background(), userID, CreateOrderRequest{
+			MatchID: "1", MarketID: marketID.Hex(), Strike: 130,
+			Side: side, Type: OrderTypeLimit, Quantity: 4, Price: 50,
+		})
+		if err != nil {
+			t.Fatalf("PreviewOrder %s: %v", side, err)
+		}
+		return out
+	}
+
+	buy, sell := preview("buy"), preview("sell")
+	if buy.MarginRequired != 5000 || sell.MarginRequired != 2*buy.MarginRequired {
+		t.Fatalf("buy/sell margin = %.2f/%.2f, want 5000 and twice that", buy.MarginRequired, sell.MarginRequired)
 	}
 }
 
