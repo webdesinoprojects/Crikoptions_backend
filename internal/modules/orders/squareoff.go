@@ -98,7 +98,7 @@ func (s *Service) CancelProviderWorkingOrders(ctx context.Context, matchID strin
 	if err != nil || match == nil {
 		return 0, ErrMatchNotFound
 	}
-	if match.DataSource != matches.DataSourceSportmonks {
+	if match.DataSource != matches.DataSourceCricLive {
 		return 0, errors.New("working-order cancellation requires a provider match")
 	}
 	marketList, err := s.markets.ListMarketsByMatchID(ctx, match.ID.Hex())
@@ -124,7 +124,7 @@ func (s *Service) VoidProviderInningsMarket(ctx context.Context, matchID string,
 	if err != nil || match == nil {
 		return ErrMatchNotFound
 	}
-	if match.DataSource != matches.DataSourceSportmonks || innings < 1 || innings > 2 {
+	if match.DataSource != matches.DataSourceCricLive || innings < 1 || innings > 2 {
 		return errors.New("invalid provider void contract")
 	}
 	var market *markets.Market
@@ -386,7 +386,7 @@ func (s *Service) squareOff(ctx context.Context, matchID string, scope string, e
 		return nil, ErrMatchNotFound
 	}
 
-	providerMatch := match.DataSource == matches.DataSourceSportmonks
+	providerMatch := match.DataSource == matches.DataSourceCricLive
 	var marketList []markets.Market
 	if providerMatch {
 		if expected == nil {
@@ -857,7 +857,7 @@ func matchIDKeys(match *matches.Match) []string {
 		return nil
 	}
 	hex := match.ID.Hex()
-	if match.DataSource == matches.DataSourceSportmonks {
+	if match.DataSource == matches.DataSourceCricLive {
 		return []string{hex}
 	}
 	keys := []string{hex}

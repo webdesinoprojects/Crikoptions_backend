@@ -83,7 +83,7 @@ type Match struct {
 const (
 	DataSourceManual     = "manual"
 	DataSourceSimulator  = "simulator"
-	DataSourceSportmonks = "sportmonks"
+	DataSourceCricLive = "criclive"
 
 	FeedStateWarming      = "warming"
 	FeedStateHealthy      = "healthy"

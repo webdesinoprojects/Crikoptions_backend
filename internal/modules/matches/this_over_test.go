@@ -14,7 +14,7 @@ func overChips(balls []OverBall) []int {
 }
 
 // Warm-up (manual/simulator) matches previously served a null thisOver, because
-// only the Sportmonks reducer populated it. The ball strip renders that array,
+// only the CricLive reducer populated it. The ball strip renders that array,
 // so the panel came up empty for every demo game.
 func TestRecordBallPopulatesThisOverForManualMatches(t *testing.T) {
 	svc := liveSeedService(t)

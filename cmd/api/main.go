@@ -30,12 +30,12 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/routes"
-	sportmonksadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/admin"
-	sportmonksclient "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/client"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/settlement"
-	sportmonksstore "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/store"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/watchdog"
-	sportmonksworker "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/worker"
+	cricliveadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/admin"
+	cricliveclient "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/settlement"
+	criclivestore "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/watchdog"
+	cricliveworker "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/worker"
 )
 
 // deadFeedAbandonAfter is how long a live provider match may go with no
@@ -43,8 +43,8 @@ import (
 // longer than the home feed's display grace (matches.StaleLiveGrace): hiding a
 // frozen card is cheap and reversible, voiding trades is not.
 //
-// Override with SPORTMONKS_DEAD_FEED_ABANDON_AFTER (e.g. "90m").
-var deadFeedAbandonAfter = envDuration("SPORTMONKS_DEAD_FEED_ABANDON_AFTER", 2*time.Hour)
+// Override with CRICLIVE_DEAD_FEED_ABANDON_AFTER (e.g. "90m").
+var deadFeedAbandonAfter = envDuration("CRICLIVE_DEAD_FEED_ABANDON_AFTER", 2*time.Hour)
 
 func envDuration(key string, fallback time.Duration) time.Duration {
 	raw := strings.TrimSpace(os.Getenv(key))
@@ -64,9 +64,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("config load: %v", err)
 	}
-	providerConfig, err := sportmonksclient.LoadConfigFromEnv()
+	providerConfig, err := cricliveclient.LoadConfigFromEnv()
 	if err != nil {
-		log.Fatalf("Sportmonks config: %v", err)
+		log.Fatalf("CricLive config: %v", err)
 	}
 
 	mongo, err := database.ConnectMongo(context.Background(), cfg.MongoURI, cfg.MongoDB)
@@ -93,7 +93,7 @@ func main() {
 	}
 	providerCtx := context.Background()
 	var stopProvider context.CancelFunc
-	if providerConfig.Mode == sportmonksclient.ModeLive {
+	if providerConfig.Mode == cricliveclient.ModeLive {
 		providerCtx, stopProvider = context.WithCancel(context.Background())
 	}
 
@@ -111,12 +111,12 @@ func main() {
 	// Matches.
 	matchesRepo := matches.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "matches", matchesRepo.EnsureIndexes)
-	if providerConfig.Mode != sportmonksclient.ModeLive {
+	if providerConfig.Mode != cricliveclient.ModeLive {
 		seedMongoDefaults(context.Background(), "matches", matchesRepo.SeedDefaults)
 	}
 	// Demo matches (incl. CSK vs MI / RCB vs KKR) exist in every mode. In live
 	// mode they are hidden immediately below and only revealed by the fallback
-	// controller when no real Sportmonks match is in play.
+	// controller when no real CricLive match is in play.
 	if err := matchesRepo.EnsureDefaultMatches(context.Background()); err != nil {
 		log.Fatalf("MongoDB ensure default matches: %v", err)
 	}
@@ -125,7 +125,7 @@ func main() {
 	realtimeHub := realtime.NewHub()
 	var stopOutboxWatcher context.CancelFunc
 	var outboxWatcher *realtime.OutboxWatcher
-	if providerConfig.Mode == sportmonksclient.ModeLive {
+	if providerConfig.Mode == cricliveclient.ModeLive {
 		outboxCtx, cancel := context.WithCancel(providerCtx)
 		stopOutboxWatcher = cancel
 		outboxWatcher = realtime.NewOutboxWatcher(mongo.DB, realtimeHub)
@@ -142,11 +142,11 @@ func main() {
 		}
 	}
 	matchesService := matches.NewService(matchesRepo, matchEventsRepo, realtimeHub)
-	if providerConfig.Mode == sportmonksclient.ModeLive {
-		if n, err := matchesRepo.HideNonSportmonksMatches(context.Background()); err != nil {
+	if providerConfig.Mode == cricliveclient.ModeLive {
+		if n, err := matchesRepo.HideNonCricLiveMatches(context.Background()); err != nil {
 			log.Printf("hide demo matches: %v", err)
 		} else if n > 0 {
-			log.Printf("hid %d demo/simulator matches for Sportmonks live mode", n)
+			log.Printf("hid %d demo/simulator matches for CricLive live mode", n)
 		}
 	}
 	if err := matchesService.ReconcileOnStartup(context.Background()); err != nil {
@@ -157,7 +157,7 @@ func main() {
 	// Markets.
 	marketsRepo := markets.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "markets", marketsRepo.EnsureIndexes)
-	if providerConfig.Mode != sportmonksclient.ModeLive {
+	if providerConfig.Mode != cricliveclient.ModeLive {
 		seedMongoDefaults(context.Background(), "markets", marketsRepo.SeedDefaults)
 	}
 	// Demo markets back the fallback replay matches, so they are needed in live
@@ -167,45 +167,45 @@ func main() {
 	}
 	marketsService := markets.NewService(marketsRepo)
 	marketsHandler := markets.NewHandler(marketsService, matchesService)
-	feedStore := sportmonksstore.New(mongo.DB, marketsService)
+	feedStore := criclivestore.New(mongo.DB, marketsService)
 	marketsService.SetProviderManualGateController(feedStore)
-	mustEnsureIndexes(context.Background(), "Sportmonks provider", feedStore.EnsureIndexes)
-	sportmonksAdminHandler := sportmonksadmin.NewHandler(feedStore)
-	if providerConfig.Mode == sportmonksclient.ModeLive {
+	mustEnsureIndexes(context.Background(), "CricLive provider", feedStore.EnsureIndexes)
+	cricliveAdminHandler := cricliveadmin.NewHandler(feedStore)
+	if providerConfig.Mode == cricliveclient.ModeLive {
 		if n, err := feedStore.CompleteStuckTerminalMatches(context.Background(), time.Now().UTC()); err != nil {
-			log.Printf("sportmonks complete stuck terminal matches: %v", err)
+			log.Printf("criclive complete stuck terminal matches: %v", err)
 		} else if n > 0 {
-			log.Printf("sportmonks completed %d stuck terminal matches on startup", n)
+			log.Printf("criclive completed %d stuck terminal matches on startup", n)
 		}
 		if n, err := feedStore.RepairUpcomingUnsupportedMatches(context.Background(), time.Now().UTC()); err != nil {
-			log.Printf("sportmonks repair upcoming matches: %v", err)
+			log.Printf("criclive repair upcoming matches: %v", err)
 		} else if n > 0 {
-			log.Printf("sportmonks repaired %d unsupported upcoming matches on startup", n)
+			log.Printf("criclive repaired %d unsupported upcoming matches on startup", n)
 		}
 		if n, err := feedStore.HealFalselyStaleLiveMatches(context.Background(), time.Now().UTC(), 2*time.Minute); err != nil {
-			log.Printf("sportmonks heal stale live matches: %v", err)
+			log.Printf("criclive heal stale live matches: %v", err)
 		} else if n > 0 {
-			log.Printf("sportmonks healed %d falsely stale live matches on startup", n)
+			log.Printf("criclive healed %d falsely stale live matches on startup", n)
 		}
 		if n, err := feedStore.AbandonDeadLiveMatches(context.Background(), time.Now().UTC(), deadFeedAbandonAfter, matches.DeadLiveMatchAfter); err != nil {
-			log.Printf("sportmonks abandon dead live matches: %v", err)
+			log.Printf("criclive abandon dead live matches: %v", err)
 		} else if n > 0 {
-			log.Printf("sportmonks abandoned %d dead live matches on startup", n)
+			log.Printf("criclive abandoned %d dead live matches on startup", n)
 		}
 		go watchdog.Run(providerCtx, feedStore, 5*time.Second)
 		go watchdog.RunReaper(providerCtx, feedStore, 5*time.Minute, deadFeedAbandonAfter, matches.DeadLiveMatchAfter)
-		provider, providerErr := sportmonksclient.New(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
+		provider, providerErr := cricliveclient.New(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
 		if providerErr != nil {
-			log.Fatalf("Sportmonks client: %v", providerErr)
+			log.Fatalf("CricLive client: %v", providerErr)
 		}
-		feedWorker, workerErr := sportmonksworker.New(providerConfig, provider, feedStore, processInstanceID(), log.Default())
+		feedWorker, workerErr := cricliveworker.New(providerConfig, provider, feedStore, processInstanceID(), log.Default())
 		if workerErr != nil {
-			log.Fatalf("Sportmonks feed worker: %v", workerErr)
+			log.Fatalf("CricLive feed worker: %v", workerErr)
 		}
 		go func() {
-			log.Printf("Sportmonks feed worker started mode=%s fastPolling=%t", providerConfig.Mode, providerConfig.FastPollingEnabled)
+			log.Printf("CricLive feed worker started mode=%s fastPolling=%t", providerConfig.Mode, providerConfig.FastPollingEnabled)
 			if runErr := feedWorker.Run(providerCtx); runErr != nil && providerCtx.Err() == nil {
-				log.Printf("Sportmonks feed worker stopped: %v", runErr)
+				log.Printf("CricLive feed worker stopped: %v", runErr)
 			}
 		}()
 		go func() {
@@ -231,7 +231,7 @@ func main() {
 	// Orders.
 	ordersRepo := orders.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "orders", ordersRepo.EnsureIndexes)
-	if providerConfig.Mode != sportmonksclient.ModeLive {
+	if providerConfig.Mode != cricliveclient.ModeLive {
 		seedMongoDefaults(context.Background(), "orders", ordersRepo.SeedDefaults)
 	}
 
@@ -261,14 +261,14 @@ func main() {
 	ordersService := orders.NewService(ordersRepo, marketsService, matchesService, walletService, executionsService, positionsService, realtimeHub)
 	ordersHandler := orders.NewHandler(ordersService)
 	matchesService.SetSettlement(ordersService)
-	if providerConfig.Mode == sportmonksclient.ModeLive {
+	if providerConfig.Mode == cricliveclient.ModeLive {
 		processor, processorErr := settlement.NewProcessor(feedStore, ordersService, processInstanceID(), providerConfig.LeaseTTL)
 		if processorErr != nil {
-			log.Fatalf("Sportmonks settlement processor: %v", processorErr)
+			log.Fatalf("CricLive settlement processor: %v", processorErr)
 		}
 		go func() {
 			if runErr := processor.Run(providerCtx); runErr != nil && providerCtx.Err() == nil {
-				log.Printf("Sportmonks settlement processor stopped: %v", runErr)
+				log.Printf("CricLive settlement processor stopped: %v", runErr)
 			}
 		}()
 	}
@@ -281,7 +281,7 @@ func main() {
 	// Watchlist.
 	watchlistRepo := watchlist.NewMongoRepository(mongo.DB)
 	mustEnsureIndexes(context.Background(), "watchlist", watchlistRepo.EnsureIndexes)
-	if providerConfig.Mode != sportmonksclient.ModeLive {
+	if providerConfig.Mode != cricliveclient.ModeLive {
 		seedMongoDefaults(context.Background(), "watchlist", watchlistRepo.SeedDefaults)
 	}
 	watchlistService := watchlist.NewService(watchlistRepo, marketsService)
@@ -335,9 +335,9 @@ func main() {
 	simService.SetLockStore(simLocks)
 	simHandler := simulator.NewHandler(simService)
 	defer simService.Shutdown()
-	if providerConfig.Mode == sportmonksclient.ModeLive {
+	if providerConfig.Mode == cricliveclient.ModeLive {
 		// Live mode: surface the built-in replays (CSK vs MI, RCB vs KKR) as a
-		// fallback only while no real Sportmonks match is in play, and wind them
+		// fallback only while no real CricLive match is in play, and wind them
 		// down — exiting all DEMO trades — 30 minutes before a real match starts.
 		fallback := simulator.NewFallbackController(simService, matchesService, simulator.FallbackSpecs(), 20*time.Second, 30*time.Minute)
 		go fallback.Run(providerCtx)
@@ -345,7 +345,7 @@ func main() {
 		simService.AutoStartOnBoot(context.Background())
 	}
 
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, challengesHandler, sportmonksAdminHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, challengesHandler, cricliveAdminHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS(cfg.AllowedOrigins))
 
 	srv := &http.Server{

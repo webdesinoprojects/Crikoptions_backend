@@ -150,7 +150,7 @@ func outboxPayload(document outboxDocument) map[string]any {
 }
 
 // ballUpdatePace spaces catch-up balls so the UI can show one delivery at a time
-// when Sportmonks returns several new balls in a single poll.
+// when CricLive returns several new balls in a single poll.
 const ballUpdatePace = 400 * time.Millisecond
 
 func ballUpdateIdentity(doc outboxDocument) (matchID, ballID string, ok bool) {

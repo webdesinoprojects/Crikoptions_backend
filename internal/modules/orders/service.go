@@ -595,7 +595,7 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 		return nil, ErrMatchNotTradable
 	}
 	if isProviderMatch(match) && !providerRequestMatchesGate(req, match) {
-		// Sportmonks ticks bump stateVersion continuously between preview and
+		// CricLive ticks bump stateVersion continuously between preview and
 		// submit. Rebind to the live gate for buys and sells while trading is
 		// still healthy+open — pricing already uses the live match snapshot.
 		req.ExpectedMatchStateVersion = match.StateVersion
@@ -670,7 +670,7 @@ func (s *Service) CreateOrder(ctx context.Context, userID primitive.ObjectID, re
 			if waitErr := sleepCtx(ctx, gateRetryBackoff); waitErr != nil {
 				return nil, waitErr
 			}
-			// Re-load live match/market after a Sportmonks tick raced the gate.
+			// Re-load live match/market after a CricLive tick raced the gate.
 			if refreshed, refreshErr := s.markets.GetMarketByID(ctx, req.MarketID); refreshErr == nil && refreshed != nil {
 				market = refreshed
 			}
@@ -835,7 +835,7 @@ func normalizePricingSnapshot(snapshot markets.PriceCalculationInput) markets.Pr
 }
 
 func isProviderMatch(match *matches.Match) bool {
-	return match != nil && strings.EqualFold(strings.TrimSpace(match.DataSource), matches.DataSourceSportmonks)
+	return match != nil && strings.EqualFold(strings.TrimSpace(match.DataSource), matches.DataSourceCricLive)
 }
 
 // isMarketPermanentlyClosed distinguishes settled/void contracts from transient
@@ -854,7 +854,7 @@ func isMarketPermanentlyClosed(market *markets.Market) bool {
 }
 
 // gateRetryBackoff spaces the gate retry attempts so they do not all land
-// inside the same Sportmonks feed-sync window (a tick commits in a few ms;
+// inside the same CricLive feed-sync window (a tick commits in a few ms;
 // back-to-back retries observed the same in-flight state all three times).
 const gateRetryBackoff = 75 * time.Millisecond
 
@@ -1039,7 +1039,7 @@ func (s *Service) ClosePosition(ctx context.Context, userID primitive.ObjectID, 
 		return nil, err
 	}
 	order, err := s.CreateOrder(ctx, userID, request)
-	// Sportmonks can bump versions between fence attach and submit; one refresh is enough.
+	// CricLive can bump versions between fence attach and submit; one refresh is enough.
 	if errors.Is(err, ErrTradingStateChanged) {
 		if fenceErr := s.attachProviderFence(ctx, &request); fenceErr != nil {
 			return nil, fenceErr
@@ -1262,7 +1262,7 @@ func (s *Service) applyFillWithTradingGate(ctx context.Context, userID primitive
 			if match == nil || !isMatchTradable(match) {
 				return ErrTradingStateChanged
 			}
-			// Use the live match gate versions. Ball-by-ball Sportmonks polls bump
+			// Use the live match gate versions. Ball-by-ball CricLive polls bump
 			// stateVersion continuously; requiring the create-time versions here
 			// makes market sells (especially exits) fail spuriously after a buy.
 			if txErr := s.verifyTradingGates(txCtx, match, order.MarketID, match.StateVersion, match.TradingVersion); txErr != nil {

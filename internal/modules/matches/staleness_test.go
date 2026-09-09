@@ -20,7 +20,7 @@ func TestLiveFeedExpired(t *testing.T) {
 		{
 			name: "healthy live match is not expired",
 			match: Match{
-				DataSource: DataSourceSportmonks, Status: StatusLive,
+				DataSource: DataSourceCricLive, Status: StatusLive,
 				LastSuccessfulPollAt: timePtr(now.Add(-5 * time.Second)),
 			},
 			want: false,
@@ -28,7 +28,7 @@ func TestLiveFeedExpired(t *testing.T) {
 		{
 			name: "frozen live feed is expired",
 			match: Match{
-				DataSource: DataSourceSportmonks, Status: StatusLive,
+				DataSource: DataSourceCricLive, Status: StatusLive,
 				LastSuccessfulPollAt: timePtr(now.Add(-3 * time.Hour)),
 			},
 			want: true,
@@ -36,7 +36,7 @@ func TestLiveFeedExpired(t *testing.T) {
 		{
 			name: "frozen innings break is expired",
 			match: Match{
-				DataSource: DataSourceSportmonks, Status: StatusInningsBreak,
+				DataSource: DataSourceCricLive, Status: StatusInningsBreak,
 				LastSuccessfulPollAt: timePtr(now.Add(-3 * time.Hour)),
 			},
 			want: true,
@@ -44,7 +44,7 @@ func TestLiveFeedExpired(t *testing.T) {
 		{
 			name: "long innings break with live polling is not expired",
 			match: Match{
-				DataSource: DataSourceSportmonks, Status: StatusInningsBreak,
+				DataSource: DataSourceCricLive, Status: StatusInningsBreak,
 				StartTime:            now.Add(-6 * time.Hour),
 				LastSuccessfulPollAt: timePtr(now.Add(-10 * time.Second)),
 			},
@@ -61,7 +61,7 @@ func TestLiveFeedExpired(t *testing.T) {
 		{
 			name: "upcoming match is not affected",
 			match: Match{
-				DataSource: DataSourceSportmonks, Status: StatusUpcoming,
+				DataSource: DataSourceCricLive, Status: StatusUpcoming,
 				LastSuccessfulPollAt: timePtr(now.Add(-3 * time.Hour)),
 			},
 			want: false,
@@ -69,7 +69,7 @@ func TestLiveFeedExpired(t *testing.T) {
 		{
 			name: "unknown feed clock fails open",
 			match: Match{
-				DataSource: DataSourceSportmonks, Status: StatusLive,
+				DataSource: DataSourceCricLive, Status: StatusLive,
 				StartTime: now.Add(-6 * time.Hour),
 			},
 			want: false,
@@ -90,7 +90,7 @@ func TestLiveFeedExpired(t *testing.T) {
 func TestZombieMatchLeavesHomeFeedAndReleasesFallback(t *testing.T) {
 	now := time.Now().UTC()
 	zombie := Match{
-		ID: primitive.NewObjectID(), DataSource: DataSourceSportmonks,
+		ID: primitive.NewObjectID(), DataSource: DataSourceCricLive,
 		Status: StatusInningsBreak, StartTime: now.Add(-30 * time.Hour),
 		LastSuccessfulPollAt: timePtr(now.Add(-28 * time.Hour)),
 	}

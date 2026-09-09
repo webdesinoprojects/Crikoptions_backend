@@ -10,7 +10,7 @@ func TestMemoryTradingGateAllowsHealthyWhenFeedValidUntilLapses(t *testing.T) {
 	repository := NewMemoryRepository()
 	validUntil := time.Now().UTC().Add(time.Minute)
 	match, err := repository.Create(context.Background(), Match{
-		DataSource: DataSourceSportmonks, StateVersion: 4, TradingVersion: 2,
+		DataSource: DataSourceCricLive, StateVersion: 4, TradingVersion: 2,
 		FeedState: FeedStateHealthy, TradingState: "open", TradingBlockers: []string{},
 		FeedValidUntil: &validUntil,
 	})
@@ -63,7 +63,7 @@ func TestMemoryTradingGateAllowsHealthyWhenFeedValidUntilLapses(t *testing.T) {
 
 func TestIsTradableAllowsSoftSync(t *testing.T) {
 	match := &Match{
-		DataSource: DataSourceSportmonks, Status: StatusLive,
+		DataSource: DataSourceCricLive, Status: StatusLive,
 		FeedState: FeedStateReconciling, TradingState: "open",
 		TradingBlockers: []string{"reconciling"},
 	}

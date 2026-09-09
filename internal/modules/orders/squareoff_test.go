@@ -107,7 +107,7 @@ func (s *failingProviderSettlementMarkets) GetProviderSettlementMarket(context.C
 func TestCancelProviderWorkingOrdersPreservesReadFailures(t *testing.T) {
 	matchID := primitive.NewObjectID()
 	marketID := primitive.NewObjectID()
-	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks}
+	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive}
 	market := markets.Market{ID: marketID, MatchID: matchID.Hex()}
 	readErr := errors.New("read failed")
 
@@ -287,7 +287,7 @@ func TestVoidProviderInningsMarketIsIdempotent(t *testing.T) {
 	svc := NewService(
 		orderRepo, marketSvc,
 		&stubMatchSvc{match: &matches.Match{
-			ID: matchID, DataSource: matches.DataSourceSportmonks, Status: matches.StatusAbandoned,
+			ID: matchID, DataSource: matches.DataSourceCricLive, Status: matches.StatusAbandoned,
 		}},
 		wallet.NewService(wallet.NewMemoryRepository()),
 		executions.NewService(executions.NewMemoryRepository()),
@@ -355,7 +355,7 @@ func TestVoidProviderInningsReversesClosedContractPnL(t *testing.T) {
 
 	svc := NewService(
 		NewMemoryRepository(), marketSvc,
-		&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks, Status: matches.StatusAbandoned}},
+		&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive, Status: matches.StatusAbandoned}},
 		walletSvc, executionSvc,
 		&squareOffPositions{byMatch: map[string][]PositionSnapshot{}}, nil,
 	)
@@ -429,7 +429,7 @@ func TestVoidProviderInningsRestoresAllPositionHistoriesExactlyOnce(t *testing.T
 			orderRepo.orders = nil
 			svc := NewService(
 				orderRepo, marketSvc,
-				&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks, Status: matches.StatusAbandoned}},
+				&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive, Status: matches.StatusAbandoned}},
 				walletSvc, executionSvc, positions, nil,
 			)
 
@@ -547,7 +547,7 @@ func TestProviderVoidRetryUsesFrozenCompensationAfterPartialOrCompleteUnwind(t *
 			}
 			svc := NewService(
 				orderRepo, marketReader,
-				&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks, Status: matches.StatusAbandoned}},
+				&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive, Status: matches.StatusAbandoned}},
 				walletSvc, executionSvc, positions, nil,
 			)
 
@@ -658,7 +658,7 @@ func TestSettleProviderInningsRequiresExactContractRevision(t *testing.T) {
 	}
 	svc := NewService(
 		NewMemoryRepository(), marketSvc,
-		&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks}},
+		&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive}},
 		wallet.NewService(wallet.NewMemoryRepository()),
 		executions.NewService(executions.NewMemoryRepository()),
 		&squareOffPositions{byMatch: map[string][]PositionSnapshot{}}, nil,
@@ -742,7 +742,7 @@ func TestSettleProviderInningsHandlesInsolvencyAndCurrentShortCollateral(t *test
 			}
 			svc := NewService(
 				NewMemoryRepository(), marketSvc,
-				&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks, Status: matches.StatusCompleted}},
+				&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive, Status: matches.StatusCompleted}},
 				walletSvc, executionSvc, positions, nil,
 			)
 
@@ -790,7 +790,7 @@ func TestProviderSettlementAggregatesMoreThanFiveHundredExecutions(t *testing.T)
 		Innings: 1, FormulaVersion: markets.FormulaVersionInningsScoreV1,
 		FinalScore: 200, FinalRevision: 9,
 	}
-	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks, Status: matches.StatusCompleted}
+	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive, Status: matches.StatusCompleted}
 	svc := NewService(
 		NewMemoryRepository(), &stubMarketSvc{market: market}, &stubMatchSvc{match: match},
 		wallet.NewService(wallet.NewMemoryRepository()), executionSvc, &squareOffPositions{}, nil,
@@ -820,7 +820,7 @@ func TestSettleProviderInningsPropagatesMarketLookupFailure(t *testing.T) {
 	}
 	svc := NewService(
 		NewMemoryRepository(), marketSvc,
-		&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks}},
+		&stubMatchSvc{match: &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive}},
 		wallet.NewService(wallet.NewMemoryRepository()),
 		executions.NewService(executions.NewMemoryRepository()),
 		&squareOffPositions{byMatch: map[string][]PositionSnapshot{}}, nil,
@@ -833,7 +833,7 @@ func TestSettleProviderInningsPropagatesMarketLookupFailure(t *testing.T) {
 }
 
 func TestProviderMatchIDKeysExcludeLegacySuffix(t *testing.T) {
-	match := &matches.Match{ID: primitive.NewObjectID(), DataSource: matches.DataSourceSportmonks}
+	match := &matches.Match{ID: primitive.NewObjectID(), DataSource: matches.DataSourceCricLive}
 	keys := matchIDKeys(match)
 	if len(keys) != 1 || keys[0] != match.ID.Hex() {
 		t.Fatalf("provider match keys = %v, want only %q", keys, match.ID.Hex())

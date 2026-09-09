@@ -1,4 +1,4 @@
-// Command league_inspect inspects and optionally toggles Sportmonks league
+// Command league_inspect inspects and optionally toggles CricLive league
 // entitlement flags. Without arguments it is read-only.
 //
 //	go run ./cmd/league_inspect                  # dump league state
@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/config"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/client"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/store"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -57,67 +57,85 @@ func parseIDs(raw string) ([]int64, error) {
 func runSync(ctx context.Context, db *mongo.Database, days int) {
 	cfg, err := client.LoadConfigFromEnv()
 	if err != nil {
-		log.Fatalf("sportmonks config: %v", err)
+		log.Fatalf("criclive config: %v", err)
 	}
 	api, err := client.New(cfg, nil)
 	if err != nil {
-		log.Fatalf("sportmonks client: %v", err)
+		log.Fatalf("criclive client: %v", err)
 	}
 	s := store.New(db, nil)
 
 	leagueIDs, err := s.EnabledLeagueIDs(ctx)
 	if err != nil {
-		log.Fatalf("enabled leagues: %v", err)
+		log.Fatalf("enabled series: %v", err)
 	}
 	sort.Slice(leagueIDs, func(i, j int) bool { return leagueIDs[i] < leagueIDs[j] })
 
 	now := time.Now().UTC()
 	from, to := now.Add(-2*24*time.Hour), now.Add(time.Duration(days)*24*time.Hour)
-	fmt.Printf("SYNC window %s .. %s over %d leagues\n",
+	fmt.Printf("SYNC window %s .. %s over %d enabled series\n",
 		from.Format("2006-01-02"), to.Format("2006-01-02"), len(leagueIDs))
 
-	totalFixtures, totalPublished, failures := 0, 0, 0
-	for _, leagueID := range leagueIDs {
-		count := 0
-		for page := 1; ; page++ {
-			envelope, err := api.Fixtures(ctx, client.FixturesOptions{
-				From: from, To: to, LeagueID: leagueID, Page: page,
-				Sort: "starting_at", Includes: []string{"localteam", "visitorteam"},
-			})
-			if err != nil {
-				fmt.Printf("  league %-4d FETCH FAILED: %v\n", leagueID, err)
-				failures++
-				break
+	// CricLive publishes one global schedule rather than a per-series feed, so
+	// a single request covers the whole window.
+	response, _, err := api.Schedule(ctx)
+	if err != nil {
+		log.Fatalf("criclive schedule: %v", err)
+	}
+	series := make([]client.Series, 0, 64)
+	seenSeries := make(map[int64]struct{}, 64)
+	fixtures := make([]client.Fixture, 0, 128)
+	perSeries := make(map[int64]int)
+	for _, day := range response.Data {
+		for _, group := range day.Series {
+			if group.SeriesID > 0 {
+				if _, seen := seenSeries[group.SeriesID]; !seen {
+					seenSeries[group.SeriesID] = struct{}{}
+					series = append(series, client.Series{
+						ID: group.SeriesID, Name: group.SeriesName, Category: group.SeriesCategory,
+					})
+				}
 			}
-			if len(envelope.Data) == 0 {
-				break
-			}
-			count += len(envelope.Data)
-			if err := s.UpsertFixtureTargets(ctx, envelope.Data, now, true, cfg.AllowMidMatchLiveAdmission); err != nil {
-				fmt.Printf("  league %-4d UPSERT FAILED: %v\n", leagueID, err)
-				failures++
-				break
-			}
-			if err := s.PublishFixtureMatches(ctx, envelope.Data, now, cfg.AllowMidMatchLiveAdmission); err != nil {
-				fmt.Printf("  league %-4d PUBLISH FAILED: %v\n", leagueID, err)
-				failures++
-				break
-			}
-			totalPublished += len(envelope.Data)
-			if envelope.Meta.Pagination == nil {
-				break
-			}
-			if _, more := envelope.Meta.Pagination.NextPage(); !more {
-				break
+			for _, match := range group.Matches {
+				fixture := client.FixtureFromScheduleMatch(match, group)
+				if fixture.ID <= 0 || fixture.StartingAt.IsZero() {
+					continue
+				}
+				if fixture.StartingAt.Before(from) || fixture.StartingAt.After(to) {
+					continue
+				}
+				fixtures = append(fixtures, fixture)
+				perSeries[fixture.SeriesID]++
 			}
 		}
-		if count > 0 {
-			fmt.Printf("  league %-4d %d fixtures\n", leagueID, count)
-		}
-		totalFixtures += count
+	}
+
+	failures := 0
+	if err := s.SyncLeagues(ctx, series, now, true); err != nil {
+		fmt.Printf("  SERIES SYNC FAILED: %v\n", err)
+		failures++
+	}
+	if err := s.UpsertFixtureTargets(ctx, fixtures, now, true, cfg.AllowMidMatchLiveAdmission); err != nil {
+		fmt.Printf("  UPSERT FAILED: %v\n", err)
+		failures++
+	}
+	published := 0
+	if err := s.PublishFixtureMatches(ctx, fixtures, now, cfg.AllowMidMatchLiveAdmission); err != nil {
+		fmt.Printf("  PUBLISH FAILED: %v\n", err)
+		failures++
+	} else {
+		published = len(fixtures)
+	}
+	ids := make([]int64, 0, len(perSeries))
+	for id := range perSeries {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		fmt.Printf("  series %-6d %d fixtures\n", id, perSeries[id])
 	}
 	fmt.Printf("\nSYNC done: %d fixtures seen, %d published, %d failures\n\n",
-		totalFixtures, totalPublished, failures)
+		len(fixtures), published, failures)
 }
 
 func main() {

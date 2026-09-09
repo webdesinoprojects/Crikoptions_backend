@@ -41,7 +41,7 @@ func TestPaceBallUpdateOnlyBetweenDifferentBalls(t *testing.T) {
 
 	sameBallScore := outboxDocument{
 		Type: "match.state", MatchID: "m1",
-		EventID: "sportmonks:1:2:3:match.ball:ball-1",
+		EventID: "criclive:1:2:3:match.ball:ball-1",
 	}
 	start = time.Now()
 	if !paceBallUpdate(ctx, sameBallScore, &lastMatch, &lastBall, &lastAt) {

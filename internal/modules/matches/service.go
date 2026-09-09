@@ -95,7 +95,7 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	live := make([]Match, 0, len(all))
 	upcoming := make([]Match, 0, len(all))
 	// Demo/simulator replays (e.g. CSK vs MI, RCB vs KKR). The fallback controller
-	// only leaves these visible while no real Sportmonks match is in play, so they
+	// only leaves these visible while no real CricLive match is in play, so they
 	// act as a fallback that keeps the terminal populated between live fixtures.
 	fallback := make([]Match, 0)
 	now := time.Now().UTC()
@@ -112,9 +112,9 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 		if LiveFeedExpired(&all[i], now) {
 			continue
 		}
-		if all[i].DataSource != DataSourceSportmonks {
+		if all[i].DataSource != DataSourceCricLive {
 			// Non-provider matches are fallback demo games, surfaced below only
-			// when there is no live Sportmonks fixture.
+			// when there is no live CricLive fixture.
 			switch all[i].Status {
 			case StatusLive, StatusInningsBreak:
 				fallback = append(fallback, all[i])
@@ -129,7 +129,7 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 		}
 	}
 	// Prefer real live fixtures; when none are in play, surface the demo fallback
-	// games; otherwise fall back to upcoming Sportmonks matches.
+	// games; otherwise fall back to upcoming CricLive matches.
 	if len(live) > 0 {
 		return SortHomeMatches(live)
 	}
@@ -139,13 +139,13 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	return SortHomeMatches(upcoming)
 }
 
-// CountLiveProviderMatches returns how many real (Sportmonks) matches are in
+// CountLiveProviderMatches returns how many real (CricLive) matches are in
 // play (live or innings break) and visible on the home feed.
 func (s *Service) CountLiveProviderMatches(ctx context.Context) (int, error) {
 	return s.repo.CountLiveProviderMatches(ctx)
 }
 
-// ProviderMatchImminent reports whether a real (Sportmonks) match is already in
+// ProviderMatchImminent reports whether a real (CricLive) match is already in
 // play OR is scheduled to start within the given lead time. The fallback
 // controller uses this to wind down the demo games ahead of a real fixture.
 func (s *Service) ProviderMatchImminent(ctx context.Context, within time.Duration) (bool, error) {
@@ -153,7 +153,7 @@ func (s *Service) ProviderMatchImminent(ctx context.Context, within time.Duratio
 	cutoff := time.Now().UTC().Add(within)
 	for i := range all {
 		m := all[i]
-		if m.Hidden || m.DataSource != DataSourceSportmonks {
+		if m.Hidden || m.DataSource != DataSourceCricLive {
 			continue
 		}
 		// A zombie (frozen-feed) match must not count as a real fixture in play,
@@ -187,7 +187,7 @@ func (s *Service) SetDemoMatchesHidden(ctx context.Context, hidden bool, hexIDs 
 	return s.repo.SetHidden(ctx, hidden, ids...)
 }
 
-// GetUpcomingMatches returns Sportmonks fixtures that have not started yet,
+// GetUpcomingMatches returns CricLive fixtures that have not started yet,
 // soonest start first. Unlike home, this never falls back to live matches.
 func (s *Service) GetUpcomingMatches(ctx context.Context) []Match {
 	all := s.repo.GetAll(ctx)
@@ -196,7 +196,7 @@ func (s *Service) GetUpcomingMatches(ctx context.Context) []Match {
 		if all[i].Hidden {
 			continue
 		}
-		if all[i].DataSource != DataSourceSportmonks {
+		if all[i].DataSource != DataSourceCricLive {
 			continue
 		}
 		all[i].Status = NormalizeStatus(all[i].Status)
@@ -226,7 +226,7 @@ func (s *Service) GetMatchByID(ctx context.Context, id string) (*Match, error) {
 }
 
 // VerifyTradingGate writes to the match document when the caller's versions
-// still describe a healthy, open Sportmonks match. Callers should invoke this
+// still describe a healthy, open CricLive match. Callers should invoke this
 // from their Mongo transaction so concurrent feed suspension forces a retry.
 func (s *Service) VerifyTradingGate(ctx context.Context, id string, stateVersion, tradingVersion int64) (*Match, bool, error) {
 	objID, err := resolveMatchID(ctx, s.repo, id)
@@ -310,7 +310,7 @@ func (s *Service) UpdateMatchScore(ctx context.Context, id string, req UpdateSco
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
 	}
-	if existing.DataSource == DataSourceSportmonks {
+	if existing.DataSource == DataSourceCricLive {
 		return nil, errProviderOwnedMatch
 	}
 
@@ -355,7 +355,7 @@ func (s *Service) UpdateLiveContext(ctx context.Context, id string, req UpdateLi
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
 	}
-	if existing.DataSource == DataSourceSportmonks {
+	if existing.DataSource == DataSourceCricLive {
 		return nil, errProviderOwnedMatch
 	}
 
@@ -436,7 +436,7 @@ func (s *Service) recordBall(ctx context.Context, id string, req BallEventReques
 	if err != nil || existing == nil {
 		return nil, BallEvent{}, errMatchNotFound
 	}
-	if existing.DataSource == DataSourceSportmonks {
+	if existing.DataSource == DataSourceCricLive {
 		return nil, BallEvent{}, errProviderOwnedMatch
 	}
 
@@ -553,7 +553,7 @@ func (s *Service) recordBall(ctx context.Context, id string, req BallEventReques
 // currentOverBalls rebuilds the active over for the ball strip, including the
 // delivery being recorded (which is not persisted yet at call time).
 //
-// Provider matches get ThisOver from the Sportmonks reducer, but manual and
+// Provider matches get ThisOver from the CricLive reducer, but manual and
 // simulator matches had no equivalent, so warm-up games served a null thisOver
 // and the strip rendered empty. The persisted ball events are the same source
 // GetRecentEvents already uses for this widget.
@@ -742,7 +742,7 @@ func (s *Service) ClearMatchEvents(ctx context.Context, matchID string) error {
 	if err != nil {
 		return err
 	}
-	if match != nil && match.DataSource == DataSourceSportmonks {
+	if match != nil && match.DataSource == DataSourceCricLive {
 		return errProviderOwnedMatch
 	}
 	return s.events.DeleteByMatchID(ctx, objID.Hex())
@@ -948,7 +948,7 @@ func (s *Service) StartMatch(ctx context.Context, id string) (*Match, error) {
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
 	}
-	if existing.DataSource == DataSourceSportmonks {
+	if existing.DataSource == DataSourceCricLive {
 		return nil, errProviderOwnedMatch
 	}
 
@@ -986,7 +986,7 @@ func (s *Service) CompleteMatch(ctx context.Context, id string) (*Match, error) 
 	if err != nil || existing == nil {
 		return nil, errMatchNotFound
 	}
-	if existing.DataSource == DataSourceSportmonks {
+	if existing.DataSource == DataSourceCricLive {
 		return nil, errProviderOwnedMatch
 	}
 

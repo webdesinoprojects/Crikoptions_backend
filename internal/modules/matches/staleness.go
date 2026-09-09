@@ -17,12 +17,12 @@ const StaleLiveGrace = 15 * time.Minute
 // with a dead feed is an orphan the provider will never close for us.
 const DeadLiveMatchAfter = 12 * time.Hour
 
-// isProviderSourced reports whether the match is fed by Sportmonks rather than
+// isProviderSourced reports whether the match is fed by CricLive rather than
 // a simulator replay. Demo matches are driven locally and have no poll clock,
 // so staleness never applies to them.
 func isProviderSourced(match *Match) bool {
-	return strings.EqualFold(strings.TrimSpace(match.DataSource), DataSourceSportmonks) ||
-		strings.EqualFold(strings.TrimSpace(match.Provider), DataSourceSportmonks)
+	return strings.EqualFold(strings.TrimSpace(match.DataSource), DataSourceCricLive) ||
+		strings.EqualFold(strings.TrimSpace(match.Provider), DataSourceCricLive)
 }
 
 // lastFeedContact returns the best available "we last heard from the provider"
@@ -47,7 +47,7 @@ func lastFeedContact(match *Match) time.Time {
 // LiveFeedExpired reports whether a provider match still claims live/innings
 // break status but has had no successful poll inside the grace window.
 //
-// These are zombies: the feed stopped without Sportmonks ever reporting a
+// These are zombies: the feed stopped without CricLive ever reporting a
 // terminal phase, so CompleteStuckTerminalMatches (which keys off providerPhase)
 // can never clear them and the frozen scoreboard would otherwise sit on the home
 // feed forever.

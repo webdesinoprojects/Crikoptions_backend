@@ -22,7 +22,7 @@ func TestCancelProviderWorkingOrdersSkipsOrdersPlacedAfterGateClosed(t *testing.
 	matchID := primitive.NewObjectID()
 	marketID := primitive.NewObjectID()
 	userID := primitive.NewObjectID()
-	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks}
+	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive}
 	market := markets.Market{ID: marketID, MatchID: matchID.Hex()}
 
 	walletSvc := fundedWallet(t, userID, 1000)
@@ -86,7 +86,7 @@ func TestCancelProviderWorkingOrdersZeroFenceCancelsEverything(t *testing.T) {
 	matchID := primitive.NewObjectID()
 	marketID := primitive.NewObjectID()
 	userID := primitive.NewObjectID()
-	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceSportmonks}
+	match := &matches.Match{ID: matchID, DataSource: matches.DataSourceCricLive}
 	market := markets.Market{ID: marketID, MatchID: matchID.Hex()}
 
 	walletSvc := fundedWallet(t, userID, 1000)

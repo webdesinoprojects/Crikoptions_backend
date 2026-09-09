@@ -824,7 +824,7 @@ func (r *MongoRepository) VerifyProviderMarketGate(ctx context.Context, id primi
 	defer cancel()
 	now := time.Now().UTC()
 	// Match-level VerifyTradingGate already fences state/trading versions.
-	// Requiring the same versions on the market doc races with every Sportmonks
+	// Requiring the same versions on the market doc races with every CricLive
 	// score tick (Ensure updates market versions slightly out of band) and breaks sells.
 	_ = stateVersion
 	_ = tradingVersion

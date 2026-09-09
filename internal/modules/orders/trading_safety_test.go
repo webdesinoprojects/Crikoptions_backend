@@ -73,7 +73,7 @@ func newProviderTradingService(t *testing.T) (*Service, *providerMarketStub, *pr
 		bid: 50, ask: 51, ok: true,
 	}}
 	matchSvc := &providerMatchStub{gateValid: true, match: &matches.Match{
-		ID: matchID, DataSource: matches.DataSourceSportmonks, Status: matches.StatusLive,
+		ID: matchID, DataSource: matches.DataSourceCricLive, Status: matches.StatusLive,
 		Innings: 1, CurrentScore: 80, WicketsLost: 2, BallsLeft: 50,
 		FeedState: matches.FeedStateHealthy, TradingState: markets.MarketLifecycleOpen,
 		StateVersion: 12, TradingVersion: 5,
@@ -141,7 +141,7 @@ func TestProviderOrderRequiresCurrentVersionsAndTouchesGateForCreateAndFill(t *t
 func TestProviderCloseRefreshesStaleFenceAndFillSurvivesScoreTick(t *testing.T) {
 	svc, marketSvc, matchSvc, userID := newProviderTradingService(t)
 
-	// Sportmonks tick bumped versions; client still carries the old fence.
+	// CricLive tick bumped versions; client still carries the old fence.
 	matchSvc.match.StateVersion = 13
 	marketSvc.market.MatchStateVersion = 13
 	req := CreateOrderRequest{

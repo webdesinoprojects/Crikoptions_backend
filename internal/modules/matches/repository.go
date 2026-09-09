@@ -24,7 +24,7 @@ type Repository interface {
 	NormalizeLegacyStatuses(ctx context.Context) error
 	EnsureDefaultMatches(ctx context.Context) error
 	EnsureIndexes(ctx context.Context) error
-	// CountLiveProviderMatches counts visible Sportmonks matches that are in play
+	// CountLiveProviderMatches counts visible CricLive matches that are in play
 	// (live or innings break). Used to decide whether demo fallback games show.
 	CountLiveProviderMatches(ctx context.Context) (int, error)
 	// SetHidden toggles the hidden flag on the given match ids.
@@ -134,7 +134,7 @@ func (r *MemoryRepository) VerifyTradingGate(_ context.Context, id primitive.Obj
 		// Soft sync (reconciling/warming) must not reject buys — that is the SYNC badge.
 		_ = stateVersion
 		_ = tradingVersion
-		if match.DataSource != DataSourceSportmonks || match.TradingState != "open" ||
+		if match.DataSource != DataSourceCricLive || match.TradingState != "open" ||
 			!FeedAllowsTrading(match.FeedState) || HasHardTradingBlockers(match.TradingBlockers) {
 			return match, false, nil
 		}
@@ -235,7 +235,7 @@ func (r *MemoryRepository) CountLiveProviderMatches(_ context.Context) (int, err
 	n := 0
 	for i := range r.matches {
 		m := r.matches[i]
-		if m.Hidden || m.DataSource != DataSourceSportmonks {
+		if m.Hidden || m.DataSource != DataSourceCricLive {
 			continue
 		}
 		switch NormalizeStatus(m.Status) {
@@ -321,9 +321,9 @@ func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
 	return len(docs), nil
 }
 
-// HideNonSportmonksMatches marks manual, simulator, and legacy demo matches as
-// hidden so they no longer appear on the home feed when running Sportmonks live.
-func (r *MongoRepository) HideNonSportmonksMatches(ctx context.Context) (int64, error) {
+// HideNonCricLiveMatches marks manual, simulator, and legacy demo matches as
+// hidden so they no longer appear on the home feed when running CricLive live.
+func (r *MongoRepository) HideNonCricLiveMatches(ctx context.Context) (int64, error) {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -356,13 +356,13 @@ func (r *MongoRepository) HideNonSportmonksMatches(ctx context.Context) (int64, 
 	return result.ModifiedCount, nil
 }
 
-// CountLiveProviderMatches counts visible Sportmonks matches that are in play.
+// CountLiveProviderMatches counts visible CricLive matches that are in play.
 func (r *MongoRepository) CountLiveProviderMatches(ctx context.Context) (int, error) {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
 	filter := bson.M{
-		"dataSource": DataSourceSportmonks,
+		"dataSource": DataSourceCricLive,
 		"hidden":     bson.M{"$ne": true},
 		"status": bson.M{"$in": bson.A{
 			StatusLive, "LIVE", "active", "ACTIVE", StatusInningsBreak, "innings break",
@@ -569,7 +569,7 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 // When called with a mongo.SessionContext inside an order transaction, this
 // creates a document-level write conflict with concurrent feed suspension.
 //
-// stateVersion/tradingVersion are not required to match: Sportmonks score ticks
+// stateVersion/tradingVersion are not required to match: CricLive score ticks
 // bump them continuously and must not fail buys/sells while trading stays open.
 // Soft sync feed states (reconciling/warming) are allowed so SYNC does not
 // block purchase.
@@ -592,7 +592,7 @@ func (r *MongoRepository) VerifyTradingGate(ctx context.Context, id primitive.Ob
 		ctx,
 		bson.M{
 			"_id":          id,
-			"dataSource":   DataSourceSportmonks,
+			"dataSource":   DataSourceCricLive,
 			"tradingState": "open",
 			"feedState":    bson.M{"$in": feedStates},
 			// feedValidUntil intentionally omitted — poll gaps expire the timestamp

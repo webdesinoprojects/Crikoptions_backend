@@ -51,8 +51,8 @@ func IsTradable(match *Match) bool {
 		return false
 	}
 	status := strings.ToLower(strings.TrimSpace(match.Status))
-	provider := strings.EqualFold(strings.TrimSpace(match.DataSource), DataSourceSportmonks) ||
-		strings.EqualFold(strings.TrimSpace(match.Provider), DataSourceSportmonks)
+	provider := strings.EqualFold(strings.TrimSpace(match.DataSource), DataSourceCricLive) ||
+		strings.EqualFold(strings.TrimSpace(match.Provider), DataSourceCricLive)
 	if provider {
 		return status == StatusLive &&
 			FeedAllowsTrading(match.FeedState) &&

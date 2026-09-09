@@ -22,7 +22,7 @@ var dropEphemeralCollections = []string{
 	"shadow_projections",
 }
 
-// PurgeEphemeralStorage frees Atlas space used by Sportmonks debug/churn data.
+// PurgeEphemeralStorage frees Atlas space used by CricLive debug/churn data.
 // It never touches users, wallet_*, orders, matches, markets, executions, or
 // position_projections.
 func PurgeEphemeralStorage(ctx context.Context, db *mongo.Database) (int64, error) {
@@ -86,7 +86,7 @@ func PurgeEphemeralStorage(ctx context.Context, db *mongo.Database) (int64, erro
 	return deleted, nil
 }
 
-// EnsureEphemeralTTLs installs TTL indexes on high-churn Sportmonks collections
+// EnsureEphemeralTTLs installs TTL indexes on high-churn CricLive collections
 // so long ODI polls cannot permanently fill a 512MB free cluster.
 func EnsureEphemeralTTLs(ctx context.Context, db *mongo.Database) error {
 	if db == nil {

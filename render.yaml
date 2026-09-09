@@ -35,10 +35,10 @@ services:
                                # Gates CORS *and* the WebSocket CheckOrigin.
                                # No trailing slashes.
 
-      # --- Sportmonks live feed (runs in-process inside cmd/api) ---
-      - key: SPORTMONKS_MODE
+      # --- CricLive live feed (runs in-process inside cmd/api) ---
+      - key: CRICLIVE_MODE
         value: live
-      - key: SPORTMONKS_API_TOKEN
-        sync: false
-      - key: SPORTMONKS_BASE_URL
-        value: https://cricket.sportmonks.com/api/v2.0
+      - key: CRICLIVE_API_TOKEN
+        sync: false            # bearer token, set in the Render dashboard
+      - key: CRICLIVE_BASE_URL
+        value: https://cricketliveapi.com/api/v1

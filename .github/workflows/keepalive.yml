@@ -1,7 +1,7 @@
 # Pings the Render free-tier service so it does not idle out.
 #
 # Render free web services sleep after ~15 minutes without inbound traffic.
-# While asleep the in-process Sportmonks feed worker and settlement processor
+# While asleep the in-process CricLive feed worker and settlement processor
 # stop too, so live match data gaps until the next request wakes it (~50s).
 #
 # Set the repo variable RENDER_URL (Settings -> Secrets and variables ->

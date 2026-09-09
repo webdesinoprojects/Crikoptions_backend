@@ -17,7 +17,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/wallet"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
-	sportmonksadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/admin"
+	cricliveadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/admin"
 )
 
 func NewRouter(
@@ -35,7 +35,7 @@ func NewRouter(
 	simulatorHandler *simulator.Handler,
 	chatHandler *chat.Handler,
 	challengesHandler *challenges.Handler,
-	sportmonksHandlers ...*sportmonksadmin.Handler,
+	cricliveHandlers ...*cricliveadmin.Handler,
 ) http.Handler {
 	mux := http.NewServeMux()
 
@@ -94,8 +94,8 @@ func NewRouter(
 	if challengesHandler != nil && authHandler != nil {
 		challenges.RegisterRoutes(mux, challengesHandler, authHandler)
 	}
-	if len(sportmonksHandlers) > 0 {
-		sportmonksadmin.RegisterRoutes(mux, sportmonksHandlers[0], authHandler)
+	if len(cricliveHandlers) > 0 {
+		cricliveadmin.RegisterRoutes(mux, cricliveHandlers[0], authHandler)
 	}
 
 	return mux

@@ -8,14 +8,14 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-func TestGetHomeMatches_SportmonksLivePreferred(t *testing.T) {
+func TestGetHomeMatches_CricLiveLivePreferred(t *testing.T) {
 	now := time.Now().UTC()
 	repo := NewMemoryRepository()
 	svc := NewService(repo, NewMemoryEventRepository(), nil)
 
 	manualID, _ := primitive.ObjectIDFromHex("0000000000000000000000aa")
-	sportmonksLiveID := primitive.NewObjectID()
-	sportmonksUpcomingID := primitive.NewObjectID()
+	cricliveLiveID := primitive.NewObjectID()
+	cricliveUpcomingID := primitive.NewObjectID()
 
 	repo.matches = []Match{
 		{
@@ -24,12 +24,12 @@ func TestGetHomeMatches_SportmonksLivePreferred(t *testing.T) {
 			Format: "T20", BallsLeft: 42, CreatedAt: now, UpdatedAt: now,
 		},
 		{
-			ID: sportmonksLiveID, DataSource: DataSourceSportmonks,
+			ID: cricliveLiveID, DataSource: DataSourceCricLive,
 			TeamAName: "WI", TeamBName: "NZ", Status: StatusLive,
 			Format: "T20", BallsLeft: 60, CreatedAt: now, UpdatedAt: now, StartTime: now,
 		},
 		{
-			ID: sportmonksUpcomingID, DataSource: DataSourceSportmonks,
+			ID: cricliveUpcomingID, DataSource: DataSourceCricLive,
 			TeamAName: "ENG", TeamBName: "IND", Status: StatusUpcoming,
 			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
 			StartTime: now.Add(2 * time.Hour),
@@ -40,8 +40,8 @@ func TestGetHomeMatches_SportmonksLivePreferred(t *testing.T) {
 	if len(home) != 1 {
 		t.Fatalf("expected 1 home match, got %d", len(home))
 	}
-	if home[0].ID != sportmonksLiveID {
-		t.Fatalf("expected Sportmonks live match %s, got %s", sportmonksLiveID.Hex(), home[0].ID.Hex())
+	if home[0].ID != cricliveLiveID {
+		t.Fatalf("expected CricLive live match %s, got %s", cricliveLiveID.Hex(), home[0].ID.Hex())
 	}
 }
 
@@ -56,18 +56,18 @@ func TestGetHomeMatches_UpcomingWhenNoLive(t *testing.T) {
 
 	repo.matches = []Match{
 		{
-			ID: completed, DataSource: DataSourceSportmonks,
+			ID: completed, DataSource: DataSourceCricLive,
 			TeamAName: "WI", TeamBName: "NZ", Status: StatusCompleted,
 			Format: "ODI", CreatedAt: now, UpdatedAt: now, StartTime: now.Add(-24 * time.Hour),
 		},
 		{
-			ID: upcomingLater, DataSource: DataSourceSportmonks,
+			ID: upcomingLater, DataSource: DataSourceCricLive,
 			TeamAName: "AUS", TeamBName: "PAK", Status: StatusUpcoming,
 			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
 			StartTime: now.Add(48 * time.Hour),
 		},
 		{
-			ID: upcomingSoon, DataSource: DataSourceSportmonks,
+			ID: upcomingSoon, DataSource: DataSourceCricLive,
 			TeamAName: "ENG", TeamBName: "IND", Status: StatusUpcoming,
 			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
 			StartTime: now.Add(2 * time.Hour),
@@ -81,7 +81,7 @@ func TestGetHomeMatches_UpcomingWhenNoLive(t *testing.T) {
 
 	home := svc.GetHomeMatches(context.Background())
 	if len(home) != 2 {
-		t.Fatalf("expected 2 upcoming Sportmonks matches, got %d", len(home))
+		t.Fatalf("expected 2 upcoming CricLive matches, got %d", len(home))
 	}
 	if home[0].ID != upcomingSoon {
 		t.Fatalf("expected soonest upcoming first, got %s (%s)", home[0].ID.Hex(), home[0].TeamAName)
@@ -121,7 +121,7 @@ func TestGetHomeMatches_DemoFallbackWhenNoRealLive(t *testing.T) {
 		},
 		// Upcoming provider match should be outranked by the live demo fallback.
 		{
-			ID: upcomingProvider, DataSource: DataSourceSportmonks,
+			ID: upcomingProvider, DataSource: DataSourceCricLive,
 			TeamAName: "ENG", TeamBName: "IND", Status: StatusUpcoming,
 			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
 			StartTime: now.Add(2 * time.Hour),
@@ -133,7 +133,7 @@ func TestGetHomeMatches_DemoFallbackWhenNoRealLive(t *testing.T) {
 		t.Fatalf("expected 2 demo fallback matches, got %d", len(home))
 	}
 	for _, m := range home {
-		if m.DataSource == DataSourceSportmonks {
+		if m.DataSource == DataSourceCricLive {
 			t.Fatalf("provider upcoming match should not appear while demo fallback is live")
 		}
 		if !m.Tradable {
@@ -157,7 +157,7 @@ func TestGetHomeMatches_RealLiveHidesDemoFallback(t *testing.T) {
 			Format: "T20", BallsLeft: 42, CreatedAt: now, UpdatedAt: now,
 		},
 		{
-			ID: providerLive, DataSource: DataSourceSportmonks,
+			ID: providerLive, DataSource: DataSourceCricLive,
 			TeamAName: "SL", TeamBName: "PAK", Status: StatusLive,
 			Format: "ODI", BallsLeft: 120, CreatedAt: now, UpdatedAt: now, StartTime: now,
 		},
@@ -179,8 +179,8 @@ func TestCountLiveProviderMatchesAndSetHidden(t *testing.T) {
 
 	repo.matches = []Match{
 		{ID: cskID, DataSource: DataSourceManual, Status: StatusLive, UpdatedAt: now},
-		{ID: providerLive, DataSource: DataSourceSportmonks, Status: StatusLive, UpdatedAt: now},
-		{ID: providerBreak, DataSource: DataSourceSportmonks, Status: StatusInningsBreak, UpdatedAt: now},
+		{ID: providerLive, DataSource: DataSourceCricLive, Status: StatusLive, UpdatedAt: now},
+		{ID: providerBreak, DataSource: DataSourceCricLive, Status: StatusInningsBreak, UpdatedAt: now},
 	}
 
 	ctx := context.Background()
@@ -209,27 +209,27 @@ func TestProviderMatchImminent(t *testing.T) {
 	}{
 		{
 			name:  "provider live",
-			match: Match{DataSource: DataSourceSportmonks, Status: StatusLive, StartTime: now.Add(-time.Hour)},
+			match: Match{DataSource: DataSourceCricLive, Status: StatusLive, StartTime: now.Add(-time.Hour)},
 			want:  true,
 		},
 		{
 			name:  "provider innings break",
-			match: Match{DataSource: DataSourceSportmonks, Status: StatusInningsBreak, StartTime: now.Add(-time.Hour)},
+			match: Match{DataSource: DataSourceCricLive, Status: StatusInningsBreak, StartTime: now.Add(-time.Hour)},
 			want:  true,
 		},
 		{
 			name:  "provider upcoming within 30m",
-			match: Match{DataSource: DataSourceSportmonks, Status: StatusUpcoming, StartTime: now.Add(25 * time.Minute)},
+			match: Match{DataSource: DataSourceCricLive, Status: StatusUpcoming, StartTime: now.Add(25 * time.Minute)},
 			want:  true,
 		},
 		{
 			name:  "provider upcoming beyond 30m",
-			match: Match{DataSource: DataSourceSportmonks, Status: StatusUpcoming, StartTime: now.Add(90 * time.Minute)},
+			match: Match{DataSource: DataSourceCricLive, Status: StatusUpcoming, StartTime: now.Add(90 * time.Minute)},
 			want:  false,
 		},
 		{
 			name:  "hidden provider upcoming soon does not count",
-			match: Match{DataSource: DataSourceSportmonks, Status: StatusUpcoming, StartTime: now.Add(5 * time.Minute), Hidden: true},
+			match: Match{DataSource: DataSourceCricLive, Status: StatusUpcoming, StartTime: now.Add(5 * time.Minute), Hidden: true},
 			want:  false,
 		},
 		{
@@ -273,18 +273,18 @@ func TestGetUpcomingMatches_OnlyUpcomingSorted(t *testing.T) {
 
 	repo.matches = []Match{
 		{
-			ID: liveID, DataSource: DataSourceSportmonks,
+			ID: liveID, DataSource: DataSourceCricLive,
 			TeamAName: "WI", TeamBName: "NZ", Status: StatusLive,
 			Format: "T20", BallsLeft: 60, CreatedAt: now, UpdatedAt: now, StartTime: now,
 		},
 		{
-			ID: laterID, DataSource: DataSourceSportmonks,
+			ID: laterID, DataSource: DataSourceCricLive,
 			TeamAName: "AUS", TeamBName: "PAK", Status: StatusUpcoming,
 			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
 			StartTime: now.Add(48 * time.Hour),
 		},
 		{
-			ID: soonID, DataSource: DataSourceSportmonks,
+			ID: soonID, DataSource: DataSourceCricLive,
 			TeamAName: "ENG", TeamBName: "IND", Status: StatusUpcoming,
 			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
 			StartTime: now.Add(2 * time.Hour),
@@ -298,7 +298,7 @@ func TestGetUpcomingMatches_OnlyUpcomingSorted(t *testing.T) {
 
 	upcoming := svc.GetUpcomingMatches(context.Background())
 	if len(upcoming) != 2 {
-		t.Fatalf("expected 2 upcoming Sportmonks matches, got %d", len(upcoming))
+		t.Fatalf("expected 2 upcoming CricLive matches, got %d", len(upcoming))
 	}
 	if upcoming[0].ID != soonID || upcoming[1].ID != laterID {
 		t.Fatalf("order=%s then %s", upcoming[0].TeamAName, upcoming[1].TeamAName)

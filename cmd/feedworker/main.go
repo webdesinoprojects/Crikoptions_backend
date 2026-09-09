@@ -13,9 +13,9 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/config"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/client"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/store"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/sportmonks/worker"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/worker"
 )
 
 func main() {
@@ -28,10 +28,10 @@ func main() {
 	}
 	feedConfig, err := client.LoadConfigFromEnv()
 	if err != nil {
-		log.Fatalf("Sportmonks config: %v", err)
+		log.Fatalf("CricLive config: %v", err)
 	}
 	if feedConfig.Mode == client.ModeOff {
-		log.Printf("Sportmonks feedworker disabled (SPORTMONKS_MODE=off)")
+		log.Printf("CricLive feedworker disabled (CRICLIVE_MODE=off)")
 		<-ctx.Done()
 		return
 	}
@@ -60,15 +60,15 @@ func main() {
 
 	provider, err := client.New(feedConfig, &http.Client{Timeout: feedConfig.HTTPTimeout})
 	if err != nil {
-		log.Fatalf("Sportmonks client: %v", err)
+		log.Fatalf("CricLive client: %v", err)
 	}
 	feedWorker, err := worker.New(feedConfig, provider, feedStore, instanceID(), log.Default())
 	if err != nil {
-		log.Fatalf("Sportmonks worker: %v", err)
+		log.Fatalf("CricLive worker: %v", err)
 	}
-	log.Printf("Sportmonks feedworker started mode=%s fastPolling=%t corrections=%t", feedConfig.Mode, feedConfig.FastPollingEnabled, feedConfig.AllowLiveCorrections)
+	log.Printf("CricLive feedworker started mode=%s fastPolling=%t corrections=%t", feedConfig.Mode, feedConfig.FastPollingEnabled, feedConfig.AllowLiveCorrections)
 	if err := feedWorker.Run(ctx); err != nil {
-		log.Fatalf("Sportmonks feedworker stopped: %v", err)
+		log.Fatalf("CricLive feedworker stopped: %v", err)
 	}
 }
 
