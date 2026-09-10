@@ -55,7 +55,10 @@ func TestLoadConfigFromEnvDefaultsToOff(t *testing.T) {
 	if cfg.QuotaReservePercent != 20 || cfg.MinPollInterval != 2*time.Second || cfg.MaxPollInterval != 6*time.Second {
 		t.Fatalf("unexpected quota/poll defaults: %+v", cfg)
 	}
-	if cfg.HourlyRequestLimit != 2000 || cfg.FastPollingEnabled || cfg.AllowLiveCorrections || cfg.AllowMidMatchLiveAdmission {
+	// The hourly guard is deliberately small: CricLive meters a daily
+	// allowance (5,000/day on the base plan), so an hourly ceiling sized for a
+	// per-hour API would exhaust a whole day's budget in under two hours.
+	if cfg.HourlyRequestLimit != 200 || cfg.FastPollingEnabled || cfg.AllowLiveCorrections || cfg.AllowMidMatchLiveAdmission {
 		t.Fatalf("unexpected live-safety defaults: %+v", cfg)
 	}
 	if cfg.RawPayloadTTL != 2*time.Hour {

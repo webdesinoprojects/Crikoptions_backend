@@ -60,12 +60,19 @@ func LoadConfigFromEnv() (Config, error) {
 		BaseURL:                 DefaultBaseURL,
 		HTTPTimeout:             15 * time.Second,
 		QuotaReservePercent:     20,
-		HourlyRequestLimit:      2000,
+		// CricLive bills a daily allowance, not an hourly one. The hourly
+		// guard is set so a full day of steady polling stays inside a
+		// 5,000/day plan with headroom for bursts around a live match.
+		HourlyRequestLimit:      200,
 		MinPollInterval:         2 * time.Second,
 		MaxPollInterval:         6 * time.Second,
-		DiscoveryInterval:       30 * time.Second,
+		// One global call covers every match, and it is what notices a
+		// fixture going live, so it is the last thing to economise on.
+		DiscoveryInterval:       60 * time.Second,
 		FixtureSyncInterval:     6 * time.Hour,
-		PreMatchInterval:        2 * time.Minute,
+		// A fixture that has not started tells us nothing new minute to
+		// minute; /cricket/live discovery is what notices it going live.
+		PreMatchInterval:        15 * time.Minute,
 		BreakInterval:           time.Minute,
 		FinalizingInterval:      15 * time.Second,
 		MaxConcurrency:          4,

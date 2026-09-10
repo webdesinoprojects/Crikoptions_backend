@@ -32,7 +32,6 @@ type Provider interface {
 	LiveScores(context.Context) (client.LiveResponse, client.RateLimit, error)
 	Schedule(context.Context) (client.ScheduleResponse, client.RateLimit, error)
 	Commentary(context.Context, int64) (client.CommentaryResponse, client.RateLimit, error)
-	Scorecard(context.Context, int64) (client.ScorecardResponse, client.RateLimit, error)
 	Overs(context.Context, int64) (client.OversResponse, client.RateLimit, error)
 }
 
@@ -426,9 +425,9 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	stopHeartbeat := w.leaseHeartbeat(ctx, target.ID, token)
 	defer stopHeartbeat()
 	now := w.now().UTC()
-	// One poll spends three provider requests; they are reserved together so a
-	// partially funded poll never produces a half-read snapshot.
-	if !w.takeProviderQuotaN(ctx, client.EndpointCommentary, 3) {
+	// A poll costs one request for the miniscore; the ball-by-ball read is
+	// reserved separately, and only when play is actually under way.
+	if !w.takeProviderQuota(ctx, client.EndpointCommentary) {
 		if w.cfg.Mode == client.ModeLive {
 			if err := w.store.ResetFinalizationHolds(ctx, target.ID, w.owner, token, now); err != nil {
 				if errors.Is(err, store.ErrFixtureLeaseLost) {
@@ -517,10 +516,11 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	}
 }
 
-// fetchSnapshot reads the three per-match endpoints and returns the combined
-// snapshot alongside the raw payload retained for diagnostics. Commentary is
-// mandatory; the overs and scorecard add detail but cannot invalidate a score,
-// so their failures are logged and tolerated.
+// fetchSnapshot reads a match, spending as little provider quota as the match
+// state justifies. The commentary miniscore alone carries everything a fixture
+// that is not under way can tell us — state, line-up, innings totals — so the
+// ball-by-ball overs feed is only pulled once play is actually in progress.
+// That keeps an idle fixture at one request per poll instead of two.
 func (w *Worker) fetchSnapshot(ctx context.Context, target store.FixtureTarget) (client.Snapshot, []byte, error) {
 	commentary, rateLimit, err := w.provider.Commentary(ctx, target.ID)
 	w.quota.observe(client.EndpointCommentary, w.now().UTC(), rateLimit)
@@ -528,35 +528,49 @@ func (w *Worker) fetchSnapshot(ctx context.Context, target store.FixtureTarget) 
 		return client.Snapshot{}, nil, err
 	}
 
-	overs, rateLimit, oversErr := w.provider.Overs(ctx, target.ID)
-	w.quota.observe(client.EndpointOvers, w.now().UTC(), rateLimit)
-	if oversErr != nil {
-		w.logger.Printf("criclive fixture %d overs unavailable: %v", target.ID, oversErr)
-	}
-
-	scorecard, rateLimit, cardErr := w.provider.Scorecard(ctx, target.ID)
-	w.quota.observe(client.EndpointScorecard, w.now().UTC(), rateLimit)
-	if cardErr != nil {
-		w.logger.Printf("criclive fixture %d scorecard unavailable: %v", target.ID, cardErr)
-	}
-
 	snapshot := client.Snapshot{
 		MatchID:    target.ID,
 		Fixture:    fixtureFromTarget(target),
 		Commentary: commentary.Data,
-		Scorecard:  scorecard.Data,
-		Overs:      overs.Data,
 	}
+
+	var oversRaw json.RawMessage
+	if playInProgress(commentary.Data) && w.takeProviderQuota(ctx, client.EndpointOvers) {
+		overs, oversLimit, oversErr := w.provider.Overs(ctx, target.ID)
+		w.quota.observe(client.EndpointOvers, w.now().UTC(), oversLimit)
+		if oversErr != nil {
+			// The miniscore already carries the authoritative score, so a
+			// missing overs read costs detail on the ball strip, not accuracy.
+			w.logger.Printf("criclive fixture %d overs unavailable: %v", target.ID, oversErr)
+		} else {
+			snapshot.Overs = overs.Data
+			oversRaw = overs.Raw
+		}
+	}
+
 	raw, err := json.Marshal(struct {
 		Commentary json.RawMessage `json:"commentary,omitempty"`
 		Overs      json.RawMessage `json:"overs,omitempty"`
-		Scorecard  json.RawMessage `json:"scorecard,omitempty"`
-	}{Commentary: commentary.Raw, Overs: overs.Raw, Scorecard: scorecard.Raw})
+	}{Commentary: commentary.Raw, Overs: oversRaw})
 	if err != nil {
 		return snapshot, nil, err
 	}
 	snapshot.Raw = raw
 	return snapshot, raw, nil
+}
+
+// playInProgress reports whether a delivery could plausibly have been bowled
+// since the last poll, which is the only case where the recent-overs feed can
+// tell us anything new.
+func playInProgress(data client.CommentaryData) bool {
+	state := strings.TrimSpace(data.MiniScore.State)
+	if state == "" {
+		state = strings.TrimSpace(data.MatchHeader.State)
+	}
+	if reconcile.IsTerminalProviderStatus(state) || reconcile.IsNotStartedStatus(state) {
+		return false
+	}
+	return client.IsLiveState(state)
 }
 
 // fixtureFromTarget rebuilds the identity the reducer needs from the stored
