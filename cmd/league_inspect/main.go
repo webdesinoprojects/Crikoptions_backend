@@ -111,7 +111,7 @@ func runSync(ctx context.Context, db *mongo.Database, days int) {
 	}
 
 	failures := 0
-	if err := s.SyncLeagues(ctx, series, now, true); err != nil {
+	if err := s.UpsertSeries(ctx, series, now); err != nil {
 		fmt.Printf("  SERIES SYNC FAILED: %v\n", err)
 		failures++
 	}

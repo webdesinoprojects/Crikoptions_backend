@@ -64,27 +64,42 @@ type RateLimit struct {
 // /cricket/schedule normalize into this single shape so the store keeps one
 // fixture-target path instead of one per discovery endpoint.
 type Fixture struct {
-	ID              int64
-	SeriesID        int64
-	SeriesName      string
-	MatchDesc       string
-	Format          string
-	MatchType       string
-	StartingAt      time.Time
-	LocalTeamID     int64
-	VisitorTeamID   int64
-	LocalTeamName   string
-	VisitorTeamName string
-	LocalTeamShort  string
-	VisitorTeamShort string
-	LocalTeamImageID  int64
+	ID                 int64
+	SeriesID           int64
+	SeriesName         string
+	MatchDesc          string
+	Format             string
+	MatchType          string
+	StartingAt         time.Time
+	LocalTeamID        int64
+	VisitorTeamID      int64
+	LocalTeamName      string
+	VisitorTeamName    string
+	LocalTeamShort     string
+	VisitorTeamShort   string
+	LocalTeamImageID   int64
 	VisitorTeamImageID int64
-	Venue           string
-	Status          string
-	StatusDetail    string
-	State           string
-	Live            bool
-	Raw             json.RawMessage
+	Venue              string
+	Status             string
+	StatusDetail       string
+	State              string
+	Live               bool
+	// LiveInnings is the per-innings summary /cricket/live reports for every
+	// match in one shared request. Carried on the fixture target so a poll
+	// during play needs only /cricket/overs for the ball-by-ball detail.
+	LiveInnings []FixtureInnings
+	Raw         json.RawMessage
+}
+
+// FixtureInnings is one innings as summarised on /cricket/live.
+type FixtureInnings struct {
+	Number   int     `bson:"number"`
+	TeamID   int64   `bson:"teamId"`
+	Runs     int     `bson:"runs"`
+	Wickets  int     `bson:"wickets"`
+	Overs    float64 `bson:"overs"`
+	Target   int     `bson:"target,omitempty"`
+	Declared bool    `bson:"declared,omitempty"`
 }
 
 // Series is a CricLive competition. It fills the role the league directory
@@ -234,27 +249,27 @@ type CommentaryData struct {
 // carry the on-field player names the trading UI renders; they are the reason
 // this endpoint is polled every cycle rather than the scorecard.
 type MiniScore struct {
-	InningsID      int           `json:"innings_id"`
-	BatTeamID      int64         `json:"bat_team_id"`
-	BatTeamScore   FlexInt       `json:"bat_team_score"`
-	BatTeamWickets FlexInt       `json:"bat_team_wickets"`
-	Status         string        `json:"status"`
-	Overs          FlexFloat     `json:"overs"`
-	Target         *int          `json:"target,omitempty"`
-	CurrentRunRate FlexFloat     `json:"crr"`
-	RequiredRate   FlexFloat     `json:"rrr"`
-	RecentOvers    string        `json:"recent_overs"`
-	LastWicket     string        `json:"last_wicket"`
-	Last10Overs    PhaseSummary  `json:"last_10_overs"`
-	Partnership    Partnership   `json:"partnership"`
-	Striker        BattingLine   `json:"striker"`
-	NonStriker     BattingLine   `json:"non_striker"`
-	BowlerStriker  BowlingLine   `json:"bowler_striker"`
-	BowlerNonStrik BowlingLine   `json:"bowler_non_striker"`
+	InningsID      int            `json:"innings_id"`
+	BatTeamID      int64          `json:"bat_team_id"`
+	BatTeamScore   FlexInt        `json:"bat_team_score"`
+	BatTeamWickets FlexInt        `json:"bat_team_wickets"`
+	Status         string         `json:"status"`
+	Overs          FlexFloat      `json:"overs"`
+	Target         *int           `json:"target,omitempty"`
+	CurrentRunRate FlexFloat      `json:"crr"`
+	RequiredRate   FlexFloat      `json:"rrr"`
+	RecentOvers    string         `json:"recent_overs"`
+	LastWicket     string         `json:"last_wicket"`
+	Last10Overs    PhaseSummary   `json:"last_10_overs"`
+	Partnership    Partnership    `json:"partnership"`
+	Striker        BattingLine    `json:"striker"`
+	NonStriker     BattingLine    `json:"non_striker"`
+	BowlerStriker  BowlingLine    `json:"bowler_striker"`
+	BowlerNonStrik BowlingLine    `json:"bowler_non_striker"`
 	InningsScores  []InningsScore `json:"innings_scores"`
-	MatchFormat    string        `json:"match_format"`
-	CustomStatus   string        `json:"custom_status"`
-	State          string        `json:"state"`
+	MatchFormat    string         `json:"match_format"`
+	CustomStatus   string         `json:"custom_status"`
+	State          string         `json:"state"`
 }
 
 type PhaseSummary struct {
@@ -291,8 +306,13 @@ type BowlingLine struct {
 }
 
 type InningsScore struct {
-	InningsID  int       `json:"innings_id"`
-	BatTeam    string    `json:"bat_team"`
+	InningsID int    `json:"innings_id"`
+	BatTeam   string `json:"bat_team"`
+	// BatTeamID is not sent by CricLive. It is set when the miniscore is
+	// synthesised from the overs feed, where the batting side is already known
+	// by id; resolving it back through a team label lost it whenever the
+	// polling target carried no names.
+	BatTeamID  int64     `json:"-"`
 	Score      FlexInt   `json:"score"`
 	Wickets    FlexInt   `json:"wickets"`
 	Overs      FlexFloat `json:"overs"`
@@ -324,10 +344,10 @@ type HeaderTeam struct {
 }
 
 type WinProbability struct {
-	Team1            HeaderTeamOdds `json:"team1"`
-	Team2            HeaderTeamOdds `json:"team2"`
-	DrawTiePercent   FlexFloat      `json:"draw_tie_percent"`
-	LastUpdatedOver  FlexFloat      `json:"last_updated_over"`
+	Team1           HeaderTeamOdds `json:"team1"`
+	Team2           HeaderTeamOdds `json:"team2"`
+	DrawTiePercent  FlexFloat      `json:"draw_tie_percent"`
+	LastUpdatedOver FlexFloat      `json:"last_updated_over"`
 }
 
 type HeaderTeamOdds struct {
@@ -369,21 +389,21 @@ type ScorecardData struct {
 }
 
 type ScorecardInnings struct {
-	InningsID     int              `json:"innings_id"`
-	BatTeam       string           `json:"bat_team"`
-	BatTeamShort  string           `json:"bat_team_short"`
-	BowlTeam      string           `json:"bowl_team"`
-	Score         string           `json:"score"`
-	RunRate       FlexFloat        `json:"run_rate"`
+	InningsID     int                `json:"innings_id"`
+	BatTeam       string             `json:"bat_team"`
+	BatTeamShort  string             `json:"bat_team_short"`
+	BowlTeam      string             `json:"bowl_team"`
+	Score         string             `json:"score"`
+	RunRate       FlexFloat          `json:"run_rate"`
 	Batsmen       []ScorecardBatsman `json:"batsmen"`
-	YetToBat      []string         `json:"yet_to_bat"`
-	Bowlers       []ScorecardBowler `json:"bowlers"`
-	Extras        string           `json:"extras"`
-	ExtrasDetail  ExtrasDetail     `json:"extras_detail"`
-	FallOfWickets []FallOfWicket   `json:"fall_of_wickets"`
+	YetToBat      []string           `json:"yet_to_bat"`
+	Bowlers       []ScorecardBowler  `json:"bowlers"`
+	Extras        string             `json:"extras"`
+	ExtrasDetail  ExtrasDetail       `json:"extras_detail"`
+	FallOfWickets []FallOfWicket     `json:"fall_of_wickets"`
 	Partnerships  []ScorePartnership `json:"partnerships"`
-	IsDeclared    bool             `json:"is_declared"`
-	IsFollowingOn bool             `json:"is_following_on"`
+	IsDeclared    bool               `json:"is_declared"`
+	IsFollowingOn bool               `json:"is_following_on"`
 }
 
 type ScorecardBatsman struct {
@@ -450,10 +470,10 @@ type OversResponse struct {
 }
 
 type OversData struct {
-	MatchID     string      `json:"matchId"`
-	Innings     int         `json:"innings"`
+	MatchID     string       `json:"matchId"`
+	Innings     int          `json:"innings"`
 	FiltersList []OverFilter `json:"filtersList"`
-	Overs       []OverItem  `json:"overs"`
+	Overs       []OverItem   `json:"overs"`
 }
 
 type OverFilter struct {
@@ -493,9 +513,9 @@ type SquadsResponse struct {
 }
 
 type SquadTeam struct {
-	TeamID       int64        `json:"team_id"`
-	TeamName     string       `json:"team_name"`
-	TeamShort    string       `json:"team_short"`
+	TeamID       int64         `json:"team_id"`
+	TeamName     string        `json:"team_name"`
+	TeamShort    string        `json:"team_short"`
 	PlayingXI    []SquadPlayer `json:"playing_xi"`
 	Bench        []SquadPlayer `json:"bench"`
 	SupportStaff []SquadPlayer `json:"support_staff"`

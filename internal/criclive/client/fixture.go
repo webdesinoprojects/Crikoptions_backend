@@ -1,6 +1,7 @@
 package client
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -85,8 +86,34 @@ func FixtureFromMatchItem(item MatchItem, now time.Time) Fixture {
 		StatusDetail:       strings.TrimSpace(item.StatusDetail),
 		State:              strings.TrimSpace(item.State),
 		Live:               IsLiveState(item.State),
+		LiveInnings:        liveInningsFromTeams(item.FirstTeam, item.SecondTeam),
 		Raw:                item.Raw,
 	}
+}
+
+// liveInningsFromTeams flattens the per-side innings lists into one ordered
+// summary. The batting side of each innings is the team it was listed under,
+// which is the only place /cricket/live states it.
+func liveInningsFromTeams(teams ...TeamItem) []FixtureInnings {
+	var out []FixtureInnings
+	for _, team := range teams {
+		for _, in := range team.Innings {
+			if in.InningsID <= 0 {
+				continue
+			}
+			entry := FixtureInnings{
+				Number: in.InningsID, TeamID: team.ID,
+				Runs: in.Runs.Int(), Wickets: in.Wickets.Int(), Overs: in.Overs.Float64(),
+				Declared: in.IsDeclared,
+			}
+			if in.Target != nil {
+				entry.Target = *in.Target
+			}
+			out = append(out, entry)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	return out
 }
 
 // FixtureFromScheduleMatch normalizes a /cricket/schedule entry. The schedule
@@ -142,36 +169,24 @@ const (
 	StateRain       = "Rain"
 )
 
+// LiveStates are the states in which play is under way or paused mid-match:
+// the only states in which /cricket/overs has anything to say and so the only
+// ones worth a per-fixture request. "Toss" and "Delay" precede the first ball;
+// they are not-started states that discovery reports for free, and treating
+// them as live once spent one request a minute on every fixture at the toss.
+// The store matches these exact spellings against stored provider statuses.
+var LiveStates = []string{StateInProgress, StateInnings, StateStumps, StateRain, "Drinks", "Tea", "Lunch"}
+
 // IsLiveState reports whether play is under way or paused mid-match, which is
 // what makes a fixture worth polling on the fast cycle.
 func IsLiveState(state string) bool {
-	switch normalizeState(state) {
-	case "in progress", "innings break", "toss", "rain", "delay", "drinks", "tea", "lunch", "stumps":
-		return true
-	default:
-		return false
+	clean := normalizeState(state)
+	for _, live := range LiveStates {
+		if clean == normalizeState(live) {
+			return true
+		}
 	}
-}
-
-// IsTerminalState reports whether CricLive considers the match finished, which
-// gates settlement.
-func IsTerminalState(state string) bool {
-	switch normalizeState(state) {
-	case "complete", "abandon", "abandoned", "cancelled", "canceled", "no result":
-		return true
-	default:
-		return false
-	}
-}
-
-// IsNotStartedState reports a fixture that has not begun play.
-func IsNotStartedState(state string) bool {
-	switch normalizeState(state) {
-	case "preview", "upcoming", "scheduled", "":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func normalizeState(state string) string {

@@ -76,28 +76,32 @@ type Innings struct {
 }
 
 type Projection struct {
-	FixtureID         int64
-	LeagueID          int64
-	SeasonID          int64
-	LocalTeamID       int64
-	VisitorTeamID     int64
-	LocalTeamName     string
-	VisitorTeamName   string
-	StartTime         time.Time
-	Format            string
-	ScheduledBalls    int
-	ScheduledOvers    int
-	ReducedOvers      bool
-	ProviderStatus    string
-	Status            string
-	CurrentInnings    int
-	BattingTeamID     int64
-	CurrentScore      int
-	Wickets           int
-	LegalBalls        int
-	Target            int
-	Innings           []Innings
-	Deliveries        []Delivery
+	FixtureID       int64
+	LeagueID        int64
+	SeasonID        int64
+	LocalTeamID     int64
+	VisitorTeamID   int64
+	LocalTeamName   string
+	VisitorTeamName string
+	StartTime       time.Time
+	Format          string
+	ScheduledBalls  int
+	ScheduledOvers  int
+	ReducedOvers    bool
+	// ProviderStatus is the provider's display phrase ("RSA need 45 runs...");
+	// ProviderState is its canonical state ("In Progress"), which is what the
+	// scheduler and endpoint choice classify.
+	ProviderStatus string
+	ProviderState  string
+	Status         string
+	CurrentInnings int
+	BattingTeamID  int64
+	CurrentScore   int
+	Wickets        int
+	LegalBalls     int
+	Target         int
+	Innings        []Innings
+	Deliveries     []Delivery
 	// DeliveryWindow marks the oldest delivery CricLive still exposes.
 	// /cricket/overs only returns the most recent overs, so deliveries older
 	// than this were not observed in this poll and must not be mistaken for
@@ -126,9 +130,11 @@ type FormatInfo struct {
 }
 
 // ReduceSnapshot normalizes one polled CricLive match into the projection the
-// store applies. The commentary miniscore is authoritative for live state: it
-// is the only endpoint that reports the score, the over count, and who is at
-// the crease in a single consistent read.
+// store applies. It accepts either source a poll may have used: the commentary
+// miniscore (the one-shot state read outside play) or, during play, the
+// ball-by-ball overs feed plus the innings summary discovery placed on the
+// fixture. The overs case is folded into the miniscore shape up front so the
+// reduction has a single path.
 func ReduceSnapshot(snapshot client.Snapshot) (Projection, error) {
 	fixture := snapshot.Fixture
 	fixtureID := snapshot.MatchID
@@ -140,6 +146,10 @@ func ReduceSnapshot(snapshot client.Snapshot) (Projection, error) {
 	}
 	mini := snapshot.Commentary.MiniScore
 	header := snapshot.Commentary.MatchHeader
+	if mini.State == "" && len(mini.InningsScores) == 0 &&
+		(len(snapshot.Overs.Overs) > 0 || len(snapshot.Fixture.LiveInnings) > 0) {
+		mini = miniScoreFromOvers(snapshot)
+	}
 
 	localID, visitorID := fixture.LocalTeamID, fixture.VisitorTeamID
 	localName, visitorName := fixture.LocalTeamName, fixture.VisitorTeamName
@@ -174,7 +184,7 @@ func ReduceSnapshot(snapshot client.Snapshot) (Projection, error) {
 		return Projection{}, fmt.Errorf("%w: %w", ErrUnsupportedFormat, ErrSuperOver)
 	}
 
-	innings, err := inningsFromSnapshot(snapshot, localID, visitorID, scheduledBalls, currentInnings, localStatus)
+	innings, err := inningsFromSnapshot(snapshot, mini, localID, visitorID, scheduledBalls, currentInnings, localStatus)
 	if err != nil {
 		return Projection{}, err
 	}
@@ -224,16 +234,20 @@ func ReduceSnapshot(snapshot client.Snapshot) (Projection, error) {
 		return Projection{}, fmt.Errorf("%w: current innings batting team is missing", ErrIncompleteSnapshot)
 	}
 
-	deliveries, windowInnings, windowSequence := deliveriesFromOvers(snapshot.Overs, battingTeamID)
+	deliveries, windowInnings, windowSequence := deliveriesFromOvers(snapshot.Overs, battingTeamID, innings)
 	providerUpdated := latestCommentaryTime(snapshot.Commentary.Commentary)
 
 	projection := Projection{
-		FixtureID: fixtureID, LeagueID: fixture.SeriesID,
+		// CricLive has no season concept. The store persists the series id as
+		// providerSeasonId and the identity check compares against it, so the
+		// projection must carry the same value — leaving it zero made every
+		// re-poll of an existing match fail as "identity changed".
+		FixtureID: fixtureID, LeagueID: fixture.SeriesID, SeasonID: fixture.SeriesID,
 		LocalTeamID: localID, VisitorTeamID: visitorID,
 		LocalTeamName: localName, VisitorTeamName: visitorName,
 		StartTime: fixture.StartingAt, Format: formatInfo.Format, ScheduledBalls: scheduledBalls,
 		ScheduledOvers: formatInfo.ScheduledOvers, ReducedOvers: formatInfo.Reduced,
-		ProviderStatus: providerStatus, Status: localStatus,
+		ProviderStatus: providerStatus, ProviderState: state, Status: localStatus,
 		CurrentInnings: currentInnings, BattingTeamID: battingTeamID,
 		CurrentScore: current.Runs, Wickets: current.Wickets,
 		LegalBalls: current.LegalBalls, Target: target,
@@ -261,8 +275,10 @@ func ReduceSnapshot(snapshot client.Snapshot) (Projection, error) {
 // inningsFromSnapshot builds the per-innings aggregates from the miniscore,
 // which is authoritative, and falls back to the scorecard when the miniscore
 // has not yet been populated (typically right at the toss).
-func inningsFromSnapshot(snapshot client.Snapshot, localID, visitorID int64, scheduledBalls, currentInnings int, localStatus string) ([]Innings, error) {
-	mini := snapshot.Commentary.MiniScore
+// inningsFromSnapshot takes the miniscore explicitly rather than re-reading it
+// from the snapshot: during play it is synthesised from the overs feed, and a
+// second read of the raw (empty) commentary would silently zero every innings.
+func inningsFromSnapshot(snapshot client.Snapshot, mini client.MiniScore, localID, visitorID int64, scheduledBalls, currentInnings int, localStatus string) ([]Innings, error) {
 	byNumber := make(map[int]Innings)
 	order := make([]int, 0, 2)
 
@@ -272,9 +288,13 @@ func inningsFromSnapshot(snapshot client.Snapshot, localID, visitorID int64, sch
 			continue
 		}
 		legalBalls := OversToBalls(score.Overs.Float64())
+		battingTeamID := score.BatTeamID
+		if battingTeamID == 0 {
+			battingTeamID = teamIDForName(snapshot, score.BatTeam, localID, visitorID)
+		}
 		in := Innings{
 			Number:         number,
-			BattingTeamID:  teamIDForName(snapshot, score.BatTeam, localID, visitorID),
+			BattingTeamID:  battingTeamID,
 			Runs:           score.Score.Int(),
 			Wickets:        score.Wickets.Int(),
 			LegalBalls:     legalBalls,
@@ -369,7 +389,19 @@ func teamIDForName(snapshot client.Snapshot, name string, localID, visitorID int
 // deliveriesFromOvers converts the recent-overs window into deliveries. It
 // returns the window floor so the store can tell "not sent this poll" apart
 // from "deleted by the provider".
-func deliveriesFromOvers(data client.OversData, battingTeamID int64) ([]Delivery, int, int64) {
+func deliveriesFromOvers(data client.OversData, battingTeamID int64, summary []Innings) ([]Delivery, int, int64) {
+	// A delivery belongs to the side that batted in ITS innings. The overs feed
+	// can still show the previous innings for a moment after discovery has
+	// moved the fixture on, and stamping those balls with the new batting side
+	// would re-hash stored deliveries into "corrections".
+	teamForInnings := func(number int) int64 {
+		for _, in := range summary {
+			if in.Number == number && in.BattingTeamID != 0 {
+				return in.BattingTeamID
+			}
+		}
+		return battingTeamID
+	}
 	overs := make([]client.OverItem, 0, len(data.Overs))
 	for _, over := range data.Overs {
 		if len(over.Balls) == 0 {
@@ -416,7 +448,7 @@ func deliveriesFromOvers(data client.OversData, battingTeamID int64) ([]Delivery
 				ProviderBall:    fmt.Sprintf("%d.%d", overNumber-1, legalIndex+boolToInt(outcome.LegalBall)),
 				Innings:         innings,
 				Sequence:        sequence,
-				TeamID:          battingTeamID,
+				TeamID:          teamForInnings(innings),
 				BatterName:      strikerName,
 				BowlerName:      bowlerName,
 				TeamRuns:        outcome.TotalRuns,
@@ -718,4 +750,319 @@ func displayBall(value string) (int, int) {
 		return 0, 0
 	}
 	return over, ball
+}
+
+// miniScoreFromOvers folds a play-time poll -- the overs feed plus the innings
+// summary discovery wrote on the fixture -- into the miniscore shape so the
+// rest of the reduction is unchanged. The latest over is the fresher source
+// for the running score and the players at the crease; the summary supplies
+// the innings that are already complete and the chase target.
+func miniScoreFromOvers(snapshot client.Snapshot) client.MiniScore {
+	fixture := snapshot.Fixture
+	mini := client.MiniScore{
+		State: fixture.State, CustomStatus: fixture.StatusDetail, MatchFormat: fixture.Format,
+	}
+	shortName := func(teamID int64) string {
+		switch teamID {
+		case fixture.LocalTeamID:
+			return fixture.LocalTeamShort
+		case fixture.VisitorTeamID:
+			return fixture.VisitorTeamShort
+		}
+		return ""
+	}
+	for _, in := range fixture.LiveInnings {
+		mini.InningsScores = append(mini.InningsScores, client.InningsScore{
+			InningsID: in.Number, BatTeam: shortName(in.TeamID), BatTeamID: in.TeamID,
+			Score: client.FlexInt(in.Runs), Wickets: client.FlexInt(in.Wickets),
+			Overs: client.FlexFloat(in.Overs), IsDeclared: in.Declared,
+		})
+		if in.Number >= mini.InningsID {
+			mini.InningsID = in.Number
+			mini.BatTeamID = in.TeamID
+			mini.BatTeamScore = client.FlexInt(in.Runs)
+			mini.BatTeamWickets = client.FlexInt(in.Wickets)
+			mini.Overs = client.FlexFloat(in.Overs)
+			if in.Target > 0 {
+				target := in.Target
+				mini.Target = &target
+			}
+		}
+	}
+
+	latest := latestOverItem(snapshot.Overs)
+	if latest == nil {
+		return mini
+	}
+	if latest.InningsID > mini.InningsID {
+		// The ball feed is ahead of discovery: a new innings has begun. In a
+		// two-innings match the side now batting is whichever did not bat first.
+		mini.InningsID = latest.InningsID
+		mini.BatTeamID = 0
+		for _, in := range fixture.LiveInnings {
+			if in.Number < latest.InningsID && in.TeamID != 0 {
+				if in.TeamID == fixture.LocalTeamID {
+					mini.BatTeamID = fixture.VisitorTeamID
+				} else {
+					mini.BatTeamID = fixture.LocalTeamID
+				}
+			}
+		}
+		if mini.BatTeamID == 0 {
+			// The first ball of the match landed before discovery listed any
+			// innings: the over itself names the side batting.
+			mini.BatTeamID = teamIDForName(snapshot, latest.BatTeamName, fixture.LocalTeamID, fixture.VisitorTeamID)
+		}
+	}
+	if latest.InningsID != mini.InningsID {
+		// The ball feed lags discovery: the new innings has no over yet, and the
+		// batters, bowler and score of the previous one do not belong to it.
+		return mini
+	}
+	legal := 0
+	wicketThisOver := false
+	for _, token := range latest.Balls {
+		outcome, err := ParseBallToken(token)
+		if err != nil {
+			continue
+		}
+		if outcome.LegalBall {
+			legal++
+		}
+		if outcome.IsWicket {
+			wicketThisOver = true
+		}
+	}
+	mini.BatTeamScore = latest.Score
+	mini.BatTeamWickets = latest.Wickets
+	mini.Overs = client.FlexFloat(oversNotation(int(math.Round(latest.OverNumber.Float64())), legal))
+	mini.RecentOvers = latest.OverSummary
+	if wicketThisOver {
+		mini.LastWicket = "Wicket this over"
+	}
+	inningsOvers := oversOfInnings(snapshot.Overs, mini.InningsID)
+	strikerName, nonStrikerName := battersAtCrease(inningsOvers)
+	mini.Striker = client.BattingLine{Name: strikerName, Runs: latest.BatStrikerRuns, Balls: latest.BatStrikerBalls}
+	mini.NonStriker = client.BattingLine{Name: nonStrikerName, Runs: latest.BatNonStrikerRuns, Balls: latest.BatNonStrikerBalls}
+	mini.BowlerStriker = client.BowlingLine{
+		Name: firstName(latest.BowlNames), Overs: latest.BowlOvers,
+		Maidens: latest.BowlMaidens, Runs: latest.BowlRuns, Wickets: latest.BowlWickets,
+	}
+	mini.Partnership = partnershipFromOvers(inningsOvers)
+	return mini
+}
+
+// oversOfInnings is the innings' visible overs with balls in them, oldest first.
+func oversOfInnings(data client.OversData, innings int) []client.OverItem {
+	overs := make([]client.OverItem, 0, len(data.Overs))
+	for _, over := range data.Overs {
+		if over.InningsID == innings && len(over.Balls) > 0 {
+			overs = append(overs, over)
+		}
+	}
+	sort.SliceStable(overs, func(i, j int) bool {
+		return overs[i].OverNumber.Float64() < overs[j].OverNumber.Float64()
+	})
+	return overs
+}
+
+// batterTrack follows one batter's running figures through the overs window.
+type batterTrack struct {
+	name  string
+	runs  int
+	balls int
+	live  bool
+}
+
+// continues reports whether figures could be this batter's later figures: a
+// batter's runs and balls only ever grow.
+func (t batterTrack) continues(runs, balls int) bool {
+	return t.live && runs >= t.runs && balls >= t.balls
+}
+
+// battersAtCrease names the striker and non-striker of an innings' latest
+// over. In most overs CricLive prints both batters under batStrikerNames and
+// leaves batNonStrikerNames empty, so the names carry no role — the striker
+// figures belong to the first name in one over and the second in the next.
+// The figures do carry the role, and a batter's runs and balls only grow, so
+// walking the window forward keeps track of who is who: an over that names
+// both roles binds a name to each set of figures, a batter whose figures
+// reset was dismissed, and a name new to the list is the one who replaced
+// them. A window that never disambiguates falls back to list order.
+func battersAtCrease(overs []client.OverItem) (striker, nonStriker string) {
+	var on, off batterTrack
+	seen := map[string]bool{}
+	var listed []string
+	for _, over := range overs {
+		listed = cleanNames(over.BatStrikerNames)
+		nonNames := cleanNames(over.BatNonStrikerNames)
+		sRuns, sBalls := over.BatStrikerRuns.Int(), over.BatStrikerBalls.Int()
+		nRuns, nBalls := over.BatNonStrikerRuns.Int(), over.BatNonStrikerBalls.Int()
+		if len(nonNames) > 0 && len(listed) == 1 {
+			on = batterTrack{name: listed[0], runs: sRuns, balls: sBalls, live: true}
+			off = batterTrack{name: nonNames[0], runs: nRuns, balls: nBalls, live: true}
+			listed = append(listed, nonNames[0])
+			seen[on.name], seen[off.name] = true, true
+			continue
+		}
+		prev := [2]batterTrack{on, off}
+		sFrom, nFrom := resolveBatterTracks(prev, sRuns, sBalls, nRuns, nBalls)
+		next := [2]batterTrack{
+			{runs: sRuns, balls: sBalls, live: true},
+			{runs: nRuns, balls: nBalls, live: true},
+		}
+		if sFrom >= 0 {
+			next[0].name = prev[sFrom].name
+		}
+		if nFrom >= 0 {
+			next[1].name = prev[nFrom].name
+		}
+		fresh := make([]string, 0, 1)
+		for _, name := range listed {
+			if !seen[name] {
+				fresh = append(fresh, name)
+			}
+		}
+		// Figures that continue nobody belong to a batter who has just come
+		// in; a name new to the window is that batter.
+		if sFrom < 0 && next[0].name == "" && len(fresh) == 1 {
+			next[0].name = fresh[0]
+		}
+		if nFrom < 0 && next[1].name == "" && len(fresh) == 1 {
+			next[1].name = fresh[0]
+		}
+		// With two names listed, whichever the other batter is not is this one.
+		if len(listed) == 2 {
+			for i := range next {
+				if next[i].name == "" && next[1-i].name != "" {
+					next[i].name = otherName(listed, next[1-i].name)
+				}
+			}
+		}
+		on, off = next[0], next[1]
+		for _, name := range listed {
+			seen[name] = true
+		}
+	}
+	if on.name == "" && off.name == "" && len(listed) > 0 {
+		on.name = listed[0]
+	}
+	if on.name == "" {
+		on.name = otherName(listed, off.name)
+	}
+	if off.name == "" {
+		off.name = otherName(listed, on.name)
+	}
+	return on.name, off.name
+}
+
+// resolveBatterTracks matches the striker and non-striker figures of an over
+// to the two batters of the previous over by continuity. It returns the index
+// of the batter each set of figures continues, or -1 when nobody does (a new
+// batter) or when the figures fit both.
+func resolveBatterTracks(prev [2]batterTrack, sRuns, sBalls, nRuns, nBalls int) (int, int) {
+	var sMask, nMask int
+	for i, track := range prev {
+		if track.continues(sRuns, sBalls) {
+			sMask |= 1 << i
+		}
+		if track.continues(nRuns, nBalls) {
+			nMask |= 1 << i
+		}
+	}
+	single := func(mask int) int {
+		switch mask {
+		case 1:
+			return 0
+		case 2:
+			return 1
+		}
+		return -1
+	}
+	sFrom, nFrom := single(sMask), single(nMask)
+	// When one role is settled the other takes whoever is left.
+	if sFrom >= 0 && nFrom < 0 {
+		nFrom = single(nMask &^ (1 << sFrom))
+	}
+	if nFrom >= 0 && sFrom < 0 {
+		sFrom = single(sMask &^ (1 << nFrom))
+	}
+	if sFrom >= 0 && sFrom == nFrom {
+		return -1, -1
+	}
+	return sFrom, nFrom
+}
+
+func otherName(listed []string, taken string) string {
+	for _, name := range listed {
+		if name != taken {
+			return name
+		}
+	}
+	return ""
+}
+
+func cleanNames(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// latestOverItem is the most recent over with any balls in it.
+func latestOverItem(data client.OversData) *client.OverItem {
+	var latest *client.OverItem
+	for i := range data.Overs {
+		over := &data.Overs[i]
+		if len(over.Balls) == 0 {
+			continue
+		}
+		if latest == nil || over.InningsID > latest.InningsID ||
+			(over.InningsID == latest.InningsID && over.OverNumber.Float64() > latest.OverNumber.Float64()) {
+			latest = over
+		}
+	}
+	return latest
+}
+
+// oversNotation renders "legal balls into over N" in CricLive's dotted form,
+// where a completed over is written ".6" rather than rolling to the next whole
+// number (12.6 is twelve overs and six balls; 13.0 is never emitted).
+func oversNotation(overNumber, legalBalls int) float64 {
+	if overNumber <= 0 {
+		return 0
+	}
+	if legalBalls > 6 {
+		legalBalls = 6
+	}
+	return float64(overNumber-1) + float64(legalBalls)/10
+}
+
+// partnershipFromOvers replays the innings' visible overs (oldest first) and
+// counts runs and balls since the last wicket. /cricket/overs returns only
+// recent overs, so a stand that began before the window is under-counted from
+// the window's edge; the miniscore had the exact figure, but not at twice the
+// request cost.
+func partnershipFromOvers(overs []client.OverItem) client.Partnership {
+	runs, balls := 0, 0
+	for _, over := range overs {
+		for _, token := range over.Balls {
+			outcome, err := ParseBallToken(token)
+			if err != nil {
+				continue
+			}
+			if outcome.IsWicket {
+				runs, balls = 0, 0
+				continue
+			}
+			runs += outcome.TotalRuns
+			if outcome.LegalBall {
+				balls++
+			}
+		}
+	}
+	return client.Partnership{Runs: client.FlexInt(runs), Balls: client.FlexInt(balls)}
 }

@@ -15,15 +15,15 @@ import (
 // runs off the bat on top of the one-run penalty ("N4" is five).
 func TestParseBallToken(t *testing.T) {
 	cases := []struct {
-		token      string
-		total      int
-		batter     int
-		legal      bool
-		wicket     bool
-		wides      int
-		noBalls    int
-		byes       int
-		legByes    int
+		token   string
+		total   int
+		batter  int
+		legal   bool
+		wicket  bool
+		wides   int
+		noBalls int
+		byes    int
+		legByes int
 	}{
 		{token: "0", total: 0, batter: 0, legal: true},
 		{token: "1", total: 1, batter: 1, legal: true},
@@ -338,5 +338,285 @@ func TestReduceSnapshotHashIsStable(t *testing.T) {
 	}
 	if third.SnapshotHash == first.SnapshotHash {
 		t.Fatal("score change did not alter the snapshot hash")
+	}
+}
+
+// The store persists the series id as providerSeasonId and rejects any later
+// projection whose SeasonID differs. Leaving it zero made every re-poll of an
+// existing match fail as "identity changed" — silently, for days.
+func TestReduceSnapshotCarriesSeriesAsSeasonForIdentityCheck(t *testing.T) {
+	projection, err := ReduceSnapshot(liveSnapshot(t))
+	if err != nil {
+		t.Fatalf("ReduceSnapshot: %v", err)
+	}
+	if projection.SeasonID != 12870 || projection.LeagueID != 12870 {
+		t.Fatalf("season/league = %d/%d, want both 12870", projection.SeasonID, projection.LeagueID)
+	}
+}
+
+// During play only /cricket/overs is polled. The reducer must produce the same
+// projection from the overs feed plus discovery's innings summary that it would
+// from a commentary read — score from the latest over, players at the crease,
+// the chase target, and the ball strip — through the one shared path.
+func TestReduceSnapshotFromOversOnlyDuringPlay(t *testing.T) {
+	base := liveSnapshot(t)
+	snapshot := client.Snapshot{
+		MatchID: 169350,
+		Fixture: client.Fixture{
+			ID: 169350, SeriesID: 12870, Format: "T20",
+			StartingAt:  time.Date(2026, 9, 9, 13, 15, 0, 0, time.UTC),
+			LocalTeamID: 3, VisitorTeamID: 11,
+			LocalTeamName: "Pakistan", VisitorTeamName: "South Africa",
+			LocalTeamShort: "PAK", VisitorTeamShort: "RSA",
+			State: client.StateInProgress,
+			LiveInnings: []client.FixtureInnings{
+				{Number: 1, TeamID: 3, Runs: 140, Wickets: 7, Overs: 19.6},
+				// Discovery is a minute stale: the ball feed is ahead of it.
+				{Number: 2, TeamID: 11, Runs: 90, Wickets: 2, Overs: 12, Target: 141},
+			},
+		},
+		Overs: base.Overs, // no Commentary at all
+	}
+	projection, err := ReduceSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("ReduceSnapshot(overs only): %v", err)
+	}
+	if projection.Status != matches.StatusLive || projection.ProviderState != client.StateInProgress {
+		t.Fatalf("status=%q state=%q", projection.Status, projection.ProviderState)
+	}
+	// The latest over (13: score 96/3, six balls) is fresher than discovery's 90/2.
+	if projection.CurrentInnings != 2 || projection.BattingTeamID != 11 {
+		t.Fatalf("innings=%d batting=%d", projection.CurrentInnings, projection.BattingTeamID)
+	}
+	if projection.CurrentScore != 96 || projection.Wickets != 3 || projection.LegalBalls != 78 {
+		t.Fatalf("score=%d/%d balls=%d, want 96/3 and 78", projection.CurrentScore, projection.Wickets, projection.LegalBalls)
+	}
+	if projection.Target != 141 {
+		t.Fatalf("target=%d want 141 (from discovery summary)", projection.Target)
+	}
+	if len(projection.Innings) != 2 || projection.Innings[0].Runs != 140 || projection.Innings[0].BattingTeamID != 3 || !projection.Innings[0].Complete {
+		t.Fatalf("first innings = %+v", projection.Innings[0])
+	}
+	live := projection.LiveContext
+	if live == nil || live.Striker.Name != "Dan Lawrence" || live.NonStriker.Name != "Harry Brook" || live.Bowler.Name != "Razaullah" {
+		t.Fatalf("players from latest over = %+v", live)
+	}
+	if len(projection.ThisOver) != 6 || !projection.ThisOver[3].IsWicket {
+		t.Fatalf("ball strip = %+v", projection.ThisOver)
+	}
+	if projection.MatchPulse == nil || projection.MatchPulse.LastWicket != "Wicket this over" {
+		t.Fatalf("pulse = %+v", projection.MatchPulse)
+	}
+	// Partnership since the wicket in over 13: balls 5-6 were 0, 0.
+	if live.Partnership.Runs != 0 || live.Partnership.Balls != 2 {
+		t.Fatalf("partnership = %+v, want 0 off 2", live.Partnership)
+	}
+	if projection.SeasonID != 12870 {
+		t.Fatalf("season=%d", projection.SeasonID)
+	}
+}
+
+func TestOversNotationUsesDottedSix(t *testing.T) {
+	cases := []struct {
+		over, legal int
+		want        float64
+	}{{13, 3, 12.3}, {13, 6, 12.6}, {1, 0, 0}, {1, 1, 0.1}, {0, 4, 0}}
+	for _, tc := range cases {
+		if got := oversNotation(tc.over, tc.legal); got != tc.want {
+			t.Fatalf("oversNotation(%d,%d)=%v want %v", tc.over, tc.legal, got, tc.want)
+		}
+	}
+	if OversToBalls(oversNotation(13, 6)) != 78 {
+		t.Fatal("dotted-six notation must round-trip to 78 legal balls")
+	}
+}
+
+// The polling target carries team ids but no names. Innings discovery reported
+// must keep their batting side by id rather than lose it in a label round trip
+// with nothing to match against: the UI picks the batting side from it.
+func TestOversOnlyKeepsBattingSideWithoutTeamNames(t *testing.T) {
+	base := liveSnapshot(t)
+	snapshot := client.Snapshot{
+		MatchID: 169350,
+		Fixture: client.Fixture{
+			ID: 169350, SeriesID: 12870, Format: "T20", LocalTeamID: 3, VisitorTeamID: 11,
+			State: client.StateInProgress,
+			LiveInnings: []client.FixtureInnings{
+				{Number: 1, TeamID: 3, Runs: 140, Wickets: 7, Overs: 19.6},
+				{Number: 2, TeamID: 11, Runs: 90, Wickets: 2, Overs: 12, Target: 141},
+			},
+		},
+		Overs: base.Overs,
+	}
+	projection, err := ReduceSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("ReduceSnapshot: %v", err)
+	}
+	if len(projection.Innings) != 2 || projection.Innings[0].BattingTeamID != 3 || projection.Innings[1].BattingTeamID != 11 {
+		t.Fatalf("innings batting sides = %+v", projection.Innings)
+	}
+	for _, delivery := range projection.Deliveries {
+		if delivery.TeamID != 11 {
+			t.Fatalf("delivery %s stamped with team %d", delivery.ProviderEventID, delivery.TeamID)
+		}
+	}
+}
+
+// The first ball of the match can land before discovery has listed an innings
+// at all. The over names the batting side; that must be enough to price it.
+func TestOversOnlyResolvesFirstInningsBattingSideFromTheOver(t *testing.T) {
+	snapshot := client.Snapshot{
+		MatchID: 169350,
+		Fixture: client.Fixture{
+			ID: 169350, SeriesID: 12870, Format: "T20", LocalTeamID: 3, VisitorTeamID: 11,
+			LocalTeamShort: "PAK", VisitorTeamShort: "RSA", State: client.StateInProgress,
+		},
+		Overs: client.OversData{Innings: 1, Overs: []client.OverItem{{
+			InningsID: 1, OverNumber: 1, Runs: 4, Score: 4, Balls: []string{"0", "4"}, BatTeamName: "PAK",
+			BatStrikerNames: []string{"Saim Ayub"}, BatStrikerRuns: 4, BatStrikerBalls: 2,
+			BatNonStrikerNames: []string{"Fakhar Zaman"}, BowlNames: []string{"Kagiso Rabada"}, BowlOvers: 0.2, BowlRuns: 4,
+		}}},
+	}
+	projection, err := ReduceSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("ReduceSnapshot(first over, no summary): %v", err)
+	}
+	if projection.CurrentInnings != 1 || projection.BattingTeamID != 3 {
+		t.Fatalf("innings=%d batting=%d, want innings 1 batted by PAK (3)", projection.CurrentInnings, projection.BattingTeamID)
+	}
+	if projection.CurrentScore != 4 || projection.LegalBalls != 2 || len(projection.Deliveries) != 2 {
+		t.Fatalf("score=%d balls=%d deliveries=%d", projection.CurrentScore, projection.LegalBalls, len(projection.Deliveries))
+	}
+	if projection.LiveContext == nil || projection.LiveContext.Striker.Name != "Saim Ayub" {
+		t.Fatalf("live context = %+v", projection.LiveContext)
+	}
+}
+
+// Right after an innings change discovery already reports the new innings
+// while the overs feed still shows the last over of the previous one. Those
+// batters, that bowler and that score do not belong to the new innings.
+func TestOversOnlyIgnoresPreviousInningsOversAfterInningsChange(t *testing.T) {
+	snapshot := client.Snapshot{
+		MatchID: 169350,
+		Fixture: client.Fixture{
+			ID: 169350, SeriesID: 12870, Format: "T20", LocalTeamID: 3, VisitorTeamID: 11,
+			LocalTeamShort: "PAK", VisitorTeamShort: "RSA", State: client.StateInProgress,
+			LiveInnings: []client.FixtureInnings{
+				{Number: 1, TeamID: 3, Runs: 140, Wickets: 7, Overs: 19.6},
+				{Number: 2, TeamID: 11, Target: 141},
+			},
+		},
+		Overs: client.OversData{Innings: 1, Overs: []client.OverItem{{
+			InningsID: 1, OverNumber: 20, Runs: 8, Score: 140, Wickets: 7, Balls: []string{"1", "4", "W", "1", "2", "0"},
+			BatTeamName: "PAK", BatStrikerNames: []string{"Shaheen Afridi"}, BowlNames: []string{"Kagiso Rabada"},
+		}}},
+	}
+	projection, err := ReduceSnapshot(snapshot)
+	if err != nil {
+		t.Fatalf("ReduceSnapshot(lagging overs): %v", err)
+	}
+	if projection.CurrentInnings != 2 || projection.BattingTeamID != 11 || projection.Target != 141 {
+		t.Fatalf("innings=%d batting=%d target=%d", projection.CurrentInnings, projection.BattingTeamID, projection.Target)
+	}
+	if projection.CurrentScore != 0 || projection.Wickets != 0 || projection.LegalBalls != 0 {
+		t.Fatalf("new innings scored from the old one: %d/%d off %d balls", projection.CurrentScore, projection.Wickets, projection.LegalBalls)
+	}
+	if projection.LiveContext != nil {
+		t.Fatalf("previous innings players carried into the new innings: %+v", projection.LiveContext)
+	}
+	if len(projection.Innings) != 2 || !projection.Innings[0].Complete || projection.Innings[0].BattingTeamID != 3 {
+		t.Fatalf("first innings = %+v", projection.Innings[0])
+	}
+	for _, delivery := range projection.Deliveries {
+		if delivery.Innings != 1 || delivery.TeamID != 3 {
+			t.Fatalf("delivery %s innings=%d team=%d, want innings 1 by PAK", delivery.ProviderEventID, delivery.Innings, delivery.TeamID)
+		}
+	}
+}
+
+func lumpedOver(number int, names []string, sRuns, sBalls, nRuns, nBalls int) client.OverItem {
+	return client.OverItem{
+		InningsID: 2, OverNumber: client.FlexFloat(number), Balls: []string{"0"},
+		BatStrikerNames: names, BatStrikerRuns: client.FlexInt(sRuns), BatStrikerBalls: client.FlexInt(sBalls),
+		BatNonStrikerRuns: client.FlexInt(nRuns), BatNonStrikerBalls: client.FlexInt(nBalls),
+	}
+}
+
+func splitOver(number int, striker string, sRuns, sBalls int, nonStriker string, nRuns, nBalls int) client.OverItem {
+	over := lumpedOver(number, []string{striker}, sRuns, sBalls, nRuns, nBalls)
+	over.BatNonStrikerNames = []string{nonStriker}
+	return over
+}
+
+// /cricket/overs/129596 innings 2, overs 30-39 as captured on 9 Sep 2026.
+// CricLive lumps both batters under batStrikerNames in most overs; the striker
+// figures belong to the second name in over 32 and the first in over 33.
+func TestBattersAtCreaseFollowsFiguresThroughLumpedOvers(t *testing.T) {
+	overs := []client.OverItem{
+		splitOver(30, "Emilio Gay", 51, 98, "Harry Brook", 40, 47),
+		splitOver(31, "Emilio Gay", 52, 104, "Harry Brook", 40, 47),
+		lumpedOver(32, []string{"Harry Brook", "Emilio Gay"}, 53, 107, 43, 50),
+		lumpedOver(33, []string{"Harry Brook", "Emilio Gay"}, 45, 53, 56, 110),
+		lumpedOver(34, []string{"Harry Brook", "Emilio Gay", "Dan Lawrence"}, 45, 54, 1, 1),
+		lumpedOver(35, []string{"Harry Brook", "Dan Lawrence"}, 48, 59, 2, 2),
+		lumpedOver(36, []string{"Harry Brook", "Dan Lawrence"}, 2, 5, 49, 62),
+		splitOver(37, "Harry Brook", 49, 69, "Dan Lawrence", 2, 5),
+		lumpedOver(38, []string{"Harry Brook", "Dan Lawrence"}, 5, 10, 50, 70),
+		splitOver(39, "Harry Brook", 52, 76, "Dan Lawrence", 5, 10),
+	}
+	for _, tc := range []struct {
+		upTo                int
+		striker, nonStriker string
+	}{
+		{32, "Emilio Gay", "Harry Brook"},
+		{33, "Harry Brook", "Emilio Gay"},
+		{34, "Harry Brook", "Dan Lawrence"}, // Gay dismissed; the new name is the new batter
+		{36, "Dan Lawrence", "Harry Brook"},
+		{38, "Dan Lawrence", "Harry Brook"}, // agrees with the explicit over 39 that follows
+		{39, "Harry Brook", "Dan Lawrence"},
+	} {
+		window := overs[:tc.upTo-29]
+		// Newest first, as the provider sends them.
+		reversed := make([]client.OverItem, 0, len(window))
+		for i := len(window) - 1; i >= 0; i-- {
+			reversed = append(reversed, window[i])
+		}
+		striker, nonStriker := battersAtCrease(oversOfInnings(client.OversData{Overs: reversed}, 2))
+		if striker != tc.striker || nonStriker != tc.nonStriker {
+			t.Fatalf("through over %d: striker=%q nonStriker=%q, want %q/%q", tc.upTo, striker, nonStriker, tc.striker, tc.nonStriker)
+		}
+	}
+}
+
+// /cricket/overs/171240 innings 2, overs 7-17 as captured on 12 Sep 2026: not
+// one over in the window names the roles. The wicket in over 10 (a name new to
+// the list, figures that continue nobody) is what binds the names; from there
+// the figures say Rahul Kumar is on strike at the end, not the first-listed
+// Abhay Choudhary.
+func TestBattersAtCreaseBindsNamesAtAWicket(t *testing.T) {
+	both := []string{"Abhay Choudhary", "Rahul Kumar"}
+	openers := []string{"Naman Dhir", "Abhay Choudhary"}
+	overs := []client.OverItem{
+		lumpedOver(7, openers, 68, 27, 5, 7),
+		lumpedOver(8, openers, 78, 31, 7, 9),
+		lumpedOver(9, openers, 15, 14, 79, 32),
+		lumpedOver(10, openers, 91, 37, 16, 15),
+		lumpedOver(11, both, 22, 19, 1, 2),
+		lumpedOver(12, both, 3, 5, 25, 22),
+		lumpedOver(13, both, 32, 26, 4, 7),
+		lumpedOver(14, both, 39, 30, 6, 9),
+		lumpedOver(15, both, 20, 13, 41, 32),
+		lumpedOver(16, both, 47, 36, 22, 15),
+		lumpedOver(17, both, 26, 16, 48, 38),
+	}
+	striker, nonStriker := battersAtCrease(overs)
+	if striker != "Rahul Kumar" || nonStriker != "Abhay Choudhary" {
+		t.Fatalf("striker=%q nonStriker=%q, want Rahul Kumar on strike", striker, nonStriker)
+	}
+	// A window with neither an explicit over nor a wicket cannot be resolved;
+	// both names are still reported, in list order.
+	striker, nonStriker = battersAtCrease(overs[5:])
+	if striker != "Abhay Choudhary" || nonStriker != "Rahul Kumar" {
+		t.Fatalf("unresolved window: striker=%q nonStriker=%q, want list order", striker, nonStriker)
 	}
 }

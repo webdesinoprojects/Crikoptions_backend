@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -46,7 +46,7 @@ func New(db *mongo.Database, marketProjector MarketProjector) *Store {
 		db: db, matches: db.Collection("matches"), events: db.Collection("match_events"),
 		revisions: db.Collection("match_event_revisions"), outbox: db.Collection("realtime_outbox"),
 		leagues: db.Collection("provider_leagues"), fixtures: db.Collection("provider_fixtures"),
-		payloads: db.Collection("provider_payloads"),
+		payloads:    db.Collection("provider_payloads"),
 		settlements: db.Collection("settlement_jobs"),
 		gateJobs:    db.Collection("trading_gate_jobs"),
 		controls:    db.Collection("provider_controls"),
@@ -125,28 +125,72 @@ func (s *Store) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) ConsumeRequestQuota(ctx context.Context, endpoint string, now time.Time, hourlyLimit, reservePercent int) (bool, error) {
-	if strings.TrimSpace(endpoint) == "" || hourlyLimit <= 0 || reservePercent < 0 || reservePercent >= 100 {
+// ConsumeRequestQuota reserves one provider request, or reports that the budget
+// is spent.
+//
+// The ceiling that matters is the DAILY one, because that is how CricLive
+// meters: a fixed number of calls per calendar day, after which every endpoint
+// returns 429. The hourly figure is only a burst limiter on top of it.
+//
+// Both buckets are global rather than per-endpoint. Keying the bucket by
+// endpoint gave each endpoint its own allowance, so an "hourly limit" of 200
+// actually permitted 200 per endpoint per hour — several times the daily plan —
+// and the guard could never do the job it existed for.
+func (s *Store) ConsumeRequestQuota(ctx context.Context, endpoint string, now time.Time, hourlyLimit, dailyLimit, reservePercent int) (bool, error) {
+	if strings.TrimSpace(endpoint) == "" || hourlyLimit <= 0 || dailyLimit <= 0 ||
+		reservePercent < 0 || reservePercent >= 100 {
 		return false, errors.New("invalid provider quota request")
 	}
-	usable := hourlyLimit * (100 - reservePercent) / 100
-	if usable < 1 {
-		usable = 1
+	usable := func(limit int) int {
+		value := limit * (100 - reservePercent) / 100
+		if value < 1 {
+			value = 1
+		}
+		return value
 	}
-	bucket := now.UTC().Truncate(time.Hour)
-	id := endpoint + ":" + bucket.Format("2006010215")
+
+	// The tighter, shorter-lived hour bucket is checked first so a request
+	// it refuses never consumes a slot in the daily bucket — the one that
+	// actually mirrors the provider's allowance.
+	hour := now.UTC().Truncate(time.Hour)
+	allowed, err := s.takeQuotaBucket(ctx, "hour:"+hour.Format("2006010215"), hour, 2*time.Hour, usable(hourlyLimit))
+	if err != nil || !allowed {
+		return false, err
+	}
+	day := now.UTC().Truncate(24 * time.Hour)
+	allowed, err = s.takeQuotaBucket(ctx, "day:"+day.Format("20060102"), day, 48*time.Hour, usable(dailyLimit))
+	if err != nil || !allowed {
+		// The hour slot was taken for a request that will not be made; give
+		// it back so a refusal consumes nothing.
+		_, _ = s.quota.UpdateOne(ctx, bson.M{"_id": "hour:" + hour.Format("2006010215")}, bson.M{"$inc": bson.M{"count": -1}})
+		return false, err
+	}
+
+	// Per-endpoint counters are kept purely so an operator can see where the
+	// budget went. They never gate a request.
+	_, _ = s.quota.UpdateOne(ctx, bson.M{"_id": endpoint + ":" + hour.Format("2006010215")}, bson.M{
+		"$inc": bson.M{"count": 1},
+		"$setOnInsert": bson.M{
+			"endpoint": endpoint, "bucketStart": hour, "expiresAt": hour.Add(48 * time.Hour),
+		},
+	}, options.Update().SetUpsert(true))
+	return true, nil
+}
+
+func (s *Store) takeQuotaBucket(ctx context.Context, id string, bucketStart time.Time, ttl time.Duration, usable int) (bool, error) {
 	result := s.quota.FindOneAndUpdate(ctx, bson.M{
 		"_id": id, "count": bson.M{"$lt": usable},
 	}, bson.M{
 		"$inc": bson.M{"count": 1},
 		"$setOnInsert": bson.M{
-			"endpoint": endpoint, "bucketStart": bucket,
-			"expiresAt": bucket.Add(2 * time.Hour),
+			"endpoint": "*", "bucketStart": bucketStart,
+			"expiresAt": bucketStart.Add(ttl),
 		},
 	}, options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After))
 	var row struct{ Count int }
 	if err := result.Decode(&row); err != nil {
-		if mongo.IsDuplicateKeyError(err) {
+		if mongo.IsDuplicateKeyError(err) || errors.Is(err, mongo.ErrNoDocuments) {
+			// The conditional upsert matched nothing: the bucket is full.
 			return false, nil
 		}
 		return false, err
@@ -199,80 +243,30 @@ func (s *Store) RequireLiveCapabilities(ctx context.Context) error {
 	return nil
 }
 
-// SyncLeagues records the CricLive series directory. A "league" row is one
-// CricLive series; new series are enabled on sight because CricLive grants the
-// whole catalogue to every token, and an operator can still disable one through
-// the admin endpoint.
-func (s *Store) SyncLeagues(ctx context.Context, leagues []client.Series, now time.Time, gatePublicMatches bool) error {
-	now = now.UTC()
-	writes := make([]mongo.WriteModel, 0, len(leagues))
-	seen := make([]int64, 0, len(leagues))
-	for _, league := range leagues {
-		if league.ID <= 0 {
-			continue
-		}
-		seen = append(seen, league.ID)
-		writes = append(writes, mongo.NewUpdateOneModel().SetFilter(bson.M{"_id": league.ID}).SetUpsert(true).SetUpdate(bson.M{
-			"$set": bson.M{
-				"name": league.Name, "code": league.Category, "entitled": true,
-				"lastSeenAt": now, "updatedAt": now,
-			},
-			"$setOnInsert": bson.M{"enabled": true},
-		}))
-	}
-	session, err := s.db.Client().StartSession()
-	if err != nil {
-		return err
-	}
-	defer session.EndSession(ctx)
-	_, err = session.WithTransaction(ctx, func(sessionContext mongo.SessionContext) (any, error) {
-		if len(writes) > 0 {
-			if _, err := s.leagues.BulkWrite(sessionContext, writes, options.BulkWrite().SetOrdered(false)); err != nil {
-				return nil, err
-			}
-		}
-		missing := bson.M{}
-		if len(seen) > 0 {
-			missing = bson.M{"_id": bson.M{"$nin": seen}}
-		}
-		cursor, err := s.leagues.Find(sessionContext, missing, options.Find().SetProjection(bson.M{"_id": 1}))
-		if err != nil {
-			return nil, err
-		}
-		var revoked []struct {
-			ID int64 `bson:"_id"`
-		}
-		if err := cursor.All(sessionContext, &revoked); err != nil {
-			cursor.Close(sessionContext)
-			return nil, err
-		}
-		cursor.Close(sessionContext)
-		if _, err := s.leagues.UpdateMany(sessionContext, missing, bson.M{"$set": bson.M{
-			"entitled": false, "enabled": false, "updatedAt": now,
-		}}); err != nil {
-			return nil, err
-		}
-		for _, league := range revoked {
-			if err := s.disableLeague(sessionContext, league.ID, now, gatePublicMatches); err != nil {
-				return nil, err
-			}
-		}
-		return nil, nil
-	}, options.Transaction().SetReadConcern(readconcern.Snapshot()).SetWriteConcern(writeconcern.Majority()))
-	return err
-}
+// leagueDisabledByOperator marks a series an operator switched off through the
+// admin endpoint, as opposed to one the old catalogue sweep revoked.
+const leagueDisabledByOperator = "operator"
 
-// UpsertSeries records series seen on the live feed without the revocation
-// sweep SyncLeagues performs. /cricket/live reports only the handful of series
-// playing right now, so treating it as the full directory would disable every
-// other competition.
+// UpsertSeries records the series seen on a provider response. A "league" row
+// is one CricLive series, enabled on sight because CricLive grants its whole
+// catalogue to every token.
+//
+// Neither endpoint lists the whole catalogue: /cricket/live shows only what is
+// being played, and /cricket/schedule omits competitions that /cricket/live
+// carries. A series missing from one response has therefore NOT been
+// withdrawn. A revocation sweep that assumed otherwise disabled every series
+// absent from the schedule (CPL, the Women's Asia Cup, the ACC Premier Cup),
+// which is how a tradable match in progress on the live feed became
+// ineligible. Only an operator disables a series now, and that choice is kept.
 func (s *Store) UpsertSeries(ctx context.Context, series []client.Series, now time.Time) error {
 	now = now.UTC()
 	writes := make([]mongo.WriteModel, 0, len(series))
+	ids := make([]int64, 0, len(series))
 	for _, entry := range series {
 		if entry.ID <= 0 {
 			continue
 		}
+		ids = append(ids, entry.ID)
 		writes = append(writes, mongo.NewUpdateOneModel().SetFilter(bson.M{"_id": entry.ID}).SetUpsert(true).SetUpdate(bson.M{
 			"$set": bson.M{
 				"name": entry.Name, "code": entry.Category, "entitled": true,
@@ -284,7 +278,14 @@ func (s *Store) UpsertSeries(ctx context.Context, series []client.Series, now ti
 	if len(writes) == 0 {
 		return nil
 	}
-	_, err := s.leagues.BulkWrite(ctx, writes, options.BulkWrite().SetOrdered(false))
+	if _, err := s.leagues.BulkWrite(ctx, writes, options.BulkWrite().SetOrdered(false)); err != nil {
+		return err
+	}
+	// Recover series the sweep switched off; an operator decision carries the
+	// marker and is left alone.
+	_, err := s.leagues.UpdateMany(ctx, bson.M{
+		"_id": bson.M{"$in": ids}, "enabled": false, "disabledBy": bson.M{"$ne": leagueDisabledByOperator},
+	}, bson.M{"$set": bson.M{"enabled": true, "updatedAt": now}})
 	return err
 }
 
@@ -303,7 +304,11 @@ func (s *Store) SetLeagueEnabled(ctx context.Context, leagueID int64, enabled bo
 		if enabled {
 			filter["entitled"] = true
 		}
-		result, err := s.leagues.UpdateOne(sessionContext, filter, bson.M{"$set": bson.M{"enabled": enabled, "updatedAt": now}})
+		update := bson.M{"$set": bson.M{"enabled": true, "updatedAt": now}, "$unset": bson.M{"disabledBy": ""}}
+		if !enabled {
+			update = bson.M{"$set": bson.M{"enabled": false, "disabledBy": leagueDisabledByOperator, "updatedAt": now}}
+		}
+		result, err := s.leagues.UpdateOne(sessionContext, filter, update)
 		if err != nil || result.MatchedCount == 0 {
 			return false, err
 		}
@@ -838,12 +843,28 @@ func (s *Store) UpsertFixtureTargets(ctx context.Context, fixtures []client.Fixt
 		set := bson.M{
 			"leagueId": fixture.SeriesID, "seasonId": fixture.SeriesID,
 			"localTeamId": fixture.LocalTeamID, "visitorTeamId": fixture.VisitorTeamID,
-			"format": format, "scheduledBalls": scheduled, "providerStatus": fixture.State,
+			"localTeamShort": fixture.LocalTeamShort, "visitorTeamShort": fixture.VisitorTeamShort,
+			"format": format, "scheduledBalls": scheduled,
 			"startTime": start, "supported": eligible, "eligible": eligible, "updatedAt": now,
 		}
-		update := bson.M{
-			"$set":         set,
-			"$setOnInsert": bson.M{"createdAt": now},
+		// Only the live feed carries innings; a schedule sync must not wipe a
+		// summary that discovery wrote moments earlier.
+		if len(fixture.LiveInnings) > 0 {
+			set["liveInnings"] = fixture.LiveInnings
+		}
+		insertOnly := bson.M{"createdAt": now}
+		update := bson.M{"$set": set, "$setOnInsert": insertOnly}
+		// The schedule knows nothing of state and reports every match as
+		// Preview. A not-started state may only seed a new target; it never
+		// overwrites a stored one. The database decides, not the snapshot
+		// read a few seconds earlier: a poll in between can move the fixture
+		// to "In Progress", and a sync that then wrote "Preview" over it sent
+		// the next poll to the wrong endpoint (and, over a finished match,
+		// resurrected it as "upcoming").
+		if reconcile.IsNotStartedStatus(fixture.State) {
+			insertOnly["providerStatus"] = fixture.State
+		} else {
+			set["providerStatus"] = fixture.State
 		}
 		if nextPoll, apply, replace := fixtureTargetNextPoll(existing[fixture.ID], fixture, start, now); apply {
 			if replace {
@@ -893,19 +914,62 @@ func (s *Store) fixtureTargetsByID(ctx context.Context, fixtures []client.Fixtur
 	return result, nil
 }
 
+// idleFixtureRecheck parks a fixture that is listed but not under way. Its
+// state is already reported by /cricket/live on every discovery pass, which is
+// one shared request for every match at once, so spending a per-fixture request
+// on it buys nothing.
+const idleFixtureRecheck = 6 * time.Hour
+
+// TerminalFixtureRecheck parks a finished fixture. Its result cannot change,
+// so it is never re-read on a timer; at the old 24h every finished fixture in
+// the catalogue kept costing one request a day for good. An operator can still
+// force a read through the admin resync endpoint.
+const TerminalFixtureRecheck = 365 * 24 * time.Hour
+
+// fixtureTargetNextPoll decides when a fixture should next cost a request.
+//
+// Per-fixture polling exists only to read ball-by-ball detail while play is
+// under way. Everything else — a fixture still in Preview, or one that has
+// finished — is tracked for free by discovery, so those are parked rather than
+// polled. This is the difference between roughly 4,400 requests a day and a few
+// hundred on a provider that meters 5,000 a day.
 func fixtureTargetNextPoll(existing *FixtureTarget, fixture client.Fixture, start, now time.Time) (time.Time, bool, bool) {
-	next := start.Add(-30 * time.Minute)
+	switch {
+	case reconcile.IsTerminalProviderStatus(fixture.State):
+		// Finished. The result cannot change; stop paying to re-read it.
+		return now.Add(TerminalFixtureRecheck), true, true
+	case client.IsLiveState(fixture.State):
+		// Under way: this is the only state worth spending requests on. A
+		// target the poller has backed off after a failure keeps that schedule:
+		// the poller chose it knowing the error, and re-arming it on every
+		// discovery pass turned a parked identity mismatch into a request a
+		// minute for the rest of the match.
+		if existing != nil && existing.ConsecutiveFailures > 0 && existing.NextPollAt.After(now) {
+			return time.Time{}, false, false
+		}
+		return now, true, true
+	}
+
+	// Not started. Wake shortly before the scheduled start so trading can open
+	// on time; if the start has already passed and it is still not live, leave
+	// it to discovery rather than polling it on a timer.
+	next := start.Add(-5 * time.Minute)
 	if next.Before(now) {
-		next = now
+		next = now.Add(idleFixtureRecheck)
 	}
 	if existing == nil {
 		return next, true, true
 	}
-	if !reconcile.IsNotStartedStatus(fixture.State) ||
-		(!reconcile.IsNotStartedStatus(existing.ProviderStatus) && existing.LastSuccessAt != nil) {
+	// Never drag a fixture that has already produced a successful read back to
+	// a pre-match schedule.
+	if !reconcile.IsNotStartedStatus(existing.ProviderStatus) && existing.LastSuccessAt != nil {
 		return time.Time{}, false, false
 	}
-	return next, true, start.After(existing.StartTime)
+	// A not-started source may only bring the poll forward ($min), never push
+	// it out. The target it was judged against can be seconds stale: a poll in
+	// between may have moved the fixture to "In Progress" on a six-second
+	// cadence, and a replace parked that live match for six hours.
+	return next, true, false
 }
 
 func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fixture, now time.Time, allowMidMatchAdmission bool) error {
@@ -993,27 +1057,9 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 			"teamBId":      fmt.Sprintf("%s:%d", ProviderName, fixture.VisitorTeamID),
 			"hidden":       false, "updatedAt": now.UTC(),
 		}
-		// Keep upcoming publications in sync so previously unsupported ODI fixtures
-		// become visible once classification succeeds.
-		if reconcile.IsNotStartedStatus(fixture.State) {
-			setFields["providerPhase"] = fixture.State
-			setFields["format"] = format
-			setFields["scheduledBalls"] = scheduledBalls
-			setFields["ballsLeft"] = scheduledBalls
-			setFields["scheduledOvers"] = scheduledOvers
-			setFields["reducedOvers"] = formatInfo.Reduced
-			setFields["oversText"] = "0.0"
-			setFields["feedState"] = feedState
-			setFields["tradingState"] = "blocked"
-			setFields["tradingBlockers"] = blockers
-			if supported {
-				setFields["status"] = matches.StatusUpcoming
-			}
-		}
 		// Mongo rejects an update that touches the same path in both $set and
-		// $setOnInsert. Fields the not-started branch refreshes on every sync
-		// are owned by $set; drop them from the insert-only defaults. $set also
-		// applies on an upsert insert, so the inserted document is unchanged.
+		// $setOnInsert; $set also applies on an upsert insert, so the inserted
+		// document is unchanged.
 		for key := range setFields {
 			delete(setOnInsert, key)
 		}
@@ -1024,6 +1070,30 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 			"$set":         setFields,
 		}, options.Update().SetUpsert(true))
 		if err != nil {
+			return err
+		}
+		if !reconcile.IsNotStartedStatus(fixture.State) {
+			continue
+		}
+		// Keep upcoming publications in sync so previously unsupported ODI fixtures
+		// become visible once classification succeeds. The schedule reports every
+		// match as not started, so the refresh is confined to matches that still
+		// are — decided by the database at write time, because a poll can move
+		// the match to live between a status read and this write. Applied to a
+		// live or finished match it knocked the match back to "upcoming".
+		refresh := bson.M{
+			"providerPhase": fixture.State, "format": format,
+			"scheduledBalls": scheduledBalls, "ballsLeft": scheduledBalls,
+			"scheduledOvers": scheduledOvers, "reducedOvers": formatInfo.Reduced,
+			"oversText": "0.0", "feedState": feedState,
+			"tradingState": "blocked", "tradingBlockers": blockers, "updatedAt": now.UTC(),
+		}
+		if supported {
+			refresh["status"] = matches.StatusUpcoming
+		}
+		if _, err = s.matches.UpdateOne(ctx, bson.M{
+			"provider": ProviderName, "providerFixtureId": fixture.ID, "status": matches.StatusUpcoming,
+		}, bson.M{"$set": refresh}); err != nil {
 			return err
 		}
 	}
@@ -1080,19 +1150,7 @@ func liveAdmissionAllowed(fixture client.Fixture, enabled bool, target *FixtureT
 	if recentlyShadowValidated(target, now) {
 		return true
 	}
-	return providerLiveOrBreakStatus(fixture.State)
-}
-
-// providerLiveOrBreakStatus reports a match that is under way — including the
-// scheduled pauses — as opposed to one that has not started or has ended.
-func providerLiveOrBreakStatus(state string) bool {
-	if strings.TrimSpace(state) == "" {
-		return false
-	}
-	if reconcile.IsTerminalProviderStatus(state) || reconcile.IsNotStartedStatus(state) {
-		return false
-	}
-	return client.IsLiveState(state)
+	return client.IsLiveState(fixture.State)
 }
 
 func recentlyShadowValidated(target *FixtureTarget, now time.Time) bool {
@@ -1128,27 +1186,28 @@ func (s *Store) DueTargets(ctx context.Context, now time.Time, limit int64) ([]F
 	return targets, nil
 }
 
+// PollableTargetCount counts the fixtures polled at live cadence, which sets
+// the poll interval. Only a fixture under way is polled at that cadence; a
+// finished one is parked and a not-started one waits for its start.
 func (s *Store) PollableTargetCount(ctx context.Context, now time.Time) (int64, error) {
 	return s.fixtures.CountDocuments(ctx, bson.M{
 		"eligible":       true,
-		"startTime":      bson.M{"$lte": now.UTC().Add(30 * time.Minute)},
-		"providerStatus": bson.M{"$nin": []string{"Finished", "Aban.", "Cancl."}},
+		"providerStatus": bson.M{"$in": client.LiveStates},
 	})
 }
 
+// OpenTargetCount counts the fixtures in play that this process is already
+// spending requests on, which is what the new-fixture budget is measured
+// against. It used to exclude only the previous provider's spellings of
+// "finished", so six completed CricLive matches filled the budget and every
+// new live fixture was deferred as "quota_limited" hour after hour.
 func (s *Store) OpenTargetCount(ctx context.Context, now time.Time, mode string) (int64, error) {
 	return s.fixtures.CountDocuments(ctx, bson.M{
-		"eligible":  true,
-		"startTime": bson.M{"$lte": now.UTC().Add(30 * time.Minute)},
-		"$and": bson.A{
-			bson.M{"$or": bson.A{
-				bson.M{"lastSuccessAt": bson.M{"$exists": true}, "lastSuccessMode": mode},
-				bson.M{"leaseUntil": bson.M{"$gt": now.UTC()}},
-			}},
-			bson.M{"$or": bson.A{
-				bson.M{"providerStatus": bson.M{"$nin": []string{"Finished", "Aban.", "Cancl."}}},
-				bson.M{"providerStatus": "Finished", "nextPollAt": bson.M{"$lte": now.UTC().Add(2 * time.Minute)}},
-			}},
+		"eligible":       true,
+		"providerStatus": bson.M{"$in": client.LiveStates},
+		"$or": bson.A{
+			bson.M{"lastSuccessAt": bson.M{"$exists": true}, "lastSuccessMode": mode},
+			bson.M{"leaseUntil": bson.M{"$gt": now.UTC()}},
 		},
 	})
 }

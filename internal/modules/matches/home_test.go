@@ -242,6 +242,21 @@ func TestProviderMatchImminent(t *testing.T) {
 			match: Match{DataSource: DataSourceSimulator, Status: StatusLive, StartTime: now.Add(-time.Hour)},
 			want:  false,
 		},
+		{
+			// A fixture whose start slipped by a few minutes is genuinely about
+			// to begin, so the warm-up games should still stand down.
+			name:  "provider upcoming that just slipped past its start still counts",
+			match: Match{DataSource: DataSourceCricLive, Status: StatusUpcoming, StartTime: now.Add(-5 * time.Minute)},
+			want:  true,
+		},
+		{
+			// But one still marked upcoming two days after its start never went
+			// live. Treating it as imminent suppressed the warm-up matches
+			// indefinitely.
+			name:  "stale provider upcoming from days ago does not count",
+			match: Match{DataSource: DataSourceCricLive, Status: StatusUpcoming, StartTime: now.Add(-48 * time.Hour)},
+			want:  false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -307,5 +322,36 @@ func TestGetUpcomingMatches_OnlyUpcomingSorted(t *testing.T) {
 		if match.Status != StatusUpcoming {
 			t.Fatalf("unexpected status %q", match.Status)
 		}
+	}
+}
+
+// A fixture still "upcoming" well after its scheduled start was never moved on
+// by the feed. /matches/upcoming must apply the same grace as the home feed,
+// otherwise the strip keeps advertising a match that has already been played.
+func TestGetUpcomingMatches_DropsFixturesPastStartGrace(t *testing.T) {
+	now := time.Now().UTC()
+	repo := NewMemoryRepository()
+	svc := NewService(repo, NewMemoryEventRepository(), nil)
+
+	slippedID := primitive.NewObjectID()
+	staleID := primitive.NewObjectID()
+	repo.matches = []Match{
+		{
+			ID: staleID, DataSource: DataSourceCricLive,
+			TeamAName: "Uganda", TeamBName: "Botswana", Status: StatusUpcoming,
+			Format: "T20", BallsLeft: BallsT20, CreatedAt: now, UpdatedAt: now,
+			StartTime: now.Add(-2 * 24 * time.Hour),
+		},
+		{
+			ID: slippedID, DataSource: DataSourceCricLive,
+			TeamAName: "ENG", TeamBName: "IND", Status: StatusUpcoming,
+			Format: "ODI", BallsLeft: BallsODI, CreatedAt: now, UpdatedAt: now,
+			StartTime: now.Add(-5 * time.Minute),
+		},
+	}
+
+	upcoming := svc.GetUpcomingMatches(context.Background())
+	if len(upcoming) != 1 || upcoming[0].ID != slippedID {
+		t.Fatalf("upcoming = %+v, want only the fixture whose start slipped by minutes", upcoming)
 	}
 }

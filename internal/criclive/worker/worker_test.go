@@ -1,13 +1,15 @@
 package worker
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 )
 
 func TestAdaptivePollingIsOptInAndBounded(t *testing.T) {
@@ -95,7 +97,7 @@ func TestProjectionIntervals(t *testing.T) {
 		{matches.StatusLive, matches.FeedStateHealthy, active},
 		{matches.StatusInningsBreak, matches.FeedStateHealthy, time.Minute},
 		{matches.StatusCompleted, matches.FeedStateFinalizing, 15 * time.Second},
-		{matches.StatusCompleted, matches.FeedStateTerminal, 24 * time.Hour},
+		{matches.StatusCompleted, matches.FeedStateTerminal, store.TerminalFixtureRecheck},
 		{matches.StatusUpcoming, matches.FeedStateWarming, 2 * time.Minute},
 	}
 	for _, test := range tests {
@@ -116,13 +118,55 @@ func TestProjectionIntervals(t *testing.T) {
 func TestClampPreMatchPollSleepsUntilCoverageWindow(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
 	projection := reconcile.Projection{Status: matches.StatusUpcoming, StartTime: now.Add(4 * time.Hour)}
-	if got, want := clampPreMatchPoll(projection, now.Add(2*time.Minute)), now.Add(210*time.Minute); !got.Equal(want) {
+	if got, want := clampPreMatchPoll(projection, now, now.Add(2*time.Minute)), now.Add(210*time.Minute); !got.Equal(want) {
 		t.Fatalf("next poll = %s want %s", got, want)
 	}
 	projection.Status = matches.StatusLive
 	candidate := now.Add(10 * time.Second)
-	if got := clampPreMatchPoll(projection, candidate); !got.Equal(candidate) {
+	if got := clampPreMatchPoll(projection, now, candidate); !got.Equal(candidate) {
 		t.Fatalf("live poll was delayed to %s", got)
+	}
+}
+
+// A fixture polled successfully but still "upcoming" long after its start is
+// stale, not imminent. It must park rather than resume the 15-minute cadence —
+// forty such fixtures at 15m cost ~160 requests an hour for nothing.
+func TestClampPreMatchPollParksOverdueUpcoming(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	overdue := reconcile.Projection{Status: matches.StatusUpcoming, StartTime: now.Add(-2 * time.Hour)}
+	if got, want := clampPreMatchPoll(overdue, now, now.Add(15*time.Minute)), now.Add(overdueUpcomingRecheck); !got.Equal(want) {
+		t.Fatalf("overdue upcoming next poll = %s want %s", got, want)
+	}
+	// A start that slipped by a few minutes is still about to begin.
+	slipped := reconcile.Projection{Status: matches.StatusUpcoming, StartTime: now.Add(-5 * time.Minute)}
+	candidate := now.Add(15 * time.Minute)
+	if got := clampPreMatchPoll(slipped, now, candidate); !got.Equal(candidate) {
+		t.Fatalf("slipped-start fixture was parked: %s", got)
+	}
+}
+
+// A deterministic rejection cannot be fixed by retrying; none of them may sit
+// on the transient clock spending a request per attempt.
+func TestFailureBackoffParksDeterministicFailures(t *testing.T) {
+	w := &Worker{logger: discardLogger{}, now: time.Now}
+	target := store.FixtureTarget{ConsecutiveFailures: 3000}
+	for _, cause := range []error{
+		store.ErrFixtureIdentity, store.ErrMidMatchPromotion, store.ErrSettledCorrection, reconcile.ErrUnsupportedFormat,
+		fmt.Errorf("%w: %w", reconcile.ErrUnsupportedFormat, reconcile.ErrSuperOver),
+	} {
+		if got := w.failureBackoff(target, cause); got != deterministicFailureBackoff {
+			t.Fatalf("%v: backoff = %s, want %s", cause, got, deterministicFailureBackoff)
+		}
+	}
+	// Ordinary failures wait at least two minutes and grow to a bounded cap.
+	if got := w.failureBackoff(store.FixtureTarget{}, context.DeadlineExceeded); got != minFailureBackoff {
+		t.Fatalf("first transient backoff = %s, want %s", got, minFailureBackoff)
+	}
+	if got := w.failureBackoff(store.FixtureTarget{ConsecutiveFailures: 1}, context.DeadlineExceeded); got != 2*minFailureBackoff {
+		t.Fatalf("second transient backoff = %s, want %s", got, 2*minFailureBackoff)
+	}
+	if got := w.failureBackoff(target, context.DeadlineExceeded); got != maxFailureBackoff {
+		t.Fatalf("repeated transient backoff = %s, want cap %s", got, maxFailureBackoff)
 	}
 }
 
@@ -133,14 +177,36 @@ func TestProviderStatusFailureIntervals(t *testing.T) {
 	}
 	active := 10 * time.Second
 	for status, want := range map[string]time.Duration{
-		"NS":            2 * time.Minute,
-		"1st Innings":   active,
+		"Preview":       2 * time.Minute,
+		"Toss":          2 * time.Minute,
+		"In Progress":   active,
 		"Innings Break": time.Minute,
-		"Int.":          time.Minute,
-		"Finished":      15 * time.Second,
+		"Stumps":        time.Minute,
+		"Rain":          time.Minute,
+		// A finished match is parked: re-reading it cannot change the result
+		// and every read is billed against a daily allowance.
+		"Complete": store.TerminalFixtureRecheck,
+		"Abandon":  store.TerminalFixtureRecheck,
+		// An unknown phase must not be treated as live.
+		"some-new-phase": 2 * time.Minute,
 	} {
 		if got := intervalForProviderStatus(status, active, cfg); got != want {
 			t.Fatalf("status=%q interval=%s want=%s", status, got, want)
 		}
+	}
+}
+
+// The guard counts per clock hour, so a refused poll must wait for the bucket
+// to roll over. Retrying sooner spins the scheduler and, once the hour turns,
+// drains the whole new allowance instantly.
+func TestQuotaExhaustedBackoffWaitsForTheHourToTurn(t *testing.T) {
+	now := time.Date(2026, 9, 12, 14, 5, 0, 0, time.UTC)
+	if got := quotaExhaustedBackoff(now); got != 55*time.Minute {
+		t.Fatalf("backoff = %s, want 55m", got)
+	}
+	// Never return an effectively-zero wait right on the hour boundary.
+	edge := time.Date(2026, 9, 12, 14, 59, 40, 0, time.UTC)
+	if got := quotaExhaustedBackoff(edge); got < minFailureBackoff {
+		t.Fatalf("backoff at hour edge = %s, want at least %s", got, minFailureBackoff)
 	}
 }

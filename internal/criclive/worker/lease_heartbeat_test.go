@@ -12,8 +12,8 @@ import (
 )
 
 type renewRecorder struct {
-	Storage // nil: only the lease methods are exercised here
-	mu      sync.Mutex
+	Storage  // nil: only the lease methods are exercised here
+	mu       sync.Mutex
 	renewals []time.Time
 	fail     error
 }

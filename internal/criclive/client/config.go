@@ -32,6 +32,7 @@ type Config struct {
 
 	QuotaReservePercent        int
 	HourlyRequestLimit         int
+	DailyRequestLimit          int
 	FastPollingEnabled         bool
 	AllowLiveCorrections       bool
 	AllowMidMatchLiveAdmission bool
@@ -56,20 +57,25 @@ type Config struct {
 // handling. A token is mandatory only when provider operation is enabled.
 func LoadConfigFromEnv() (Config, error) {
 	cfg := Config{
-		Mode:                    ModeOff,
-		BaseURL:                 DefaultBaseURL,
-		HTTPTimeout:             15 * time.Second,
-		QuotaReservePercent:     20,
-		// CricLive bills a daily allowance, not an hourly one. The hourly
-		// guard is set so a full day of steady polling stays inside a
-		// 5,000/day plan with headroom for bursts around a live match.
-		HourlyRequestLimit:      200,
-		MinPollInterval:         2 * time.Second,
-		MaxPollInterval:         6 * time.Second,
+		Mode:                ModeOff,
+		BaseURL:             DefaultBaseURL,
+		HTTPTimeout:         15 * time.Second,
+		QuotaReservePercent: 20,
+		// CricLive meters a fixed number of calls per calendar day, so the
+		// daily figure is the real ceiling and the hourly one is only a burst
+		// limiter. The hourly value must stay high enough to poll a match in
+		// progress; the daily value is what keeps the plan from being spent.
+		HourlyRequestLimit: 900,
+		DailyRequestLimit:  5000,
+		// A live poll is one /cricket/overs request. At 6s a T20 costs ~2,100
+		// requests, which a 5,000/day plan can carry alongside discovery; the
+		// previous 2s cadence needed ~6,300 for the same match.
+		MinPollInterval: 6 * time.Second,
+		MaxPollInterval: 10 * time.Second,
 		// One global call covers every match, and it is what notices a
 		// fixture going live, so it is the last thing to economise on.
-		DiscoveryInterval:       60 * time.Second,
-		FixtureSyncInterval:     6 * time.Hour,
+		DiscoveryInterval:   60 * time.Second,
+		FixtureSyncInterval: 6 * time.Hour,
 		// A fixture that has not started tells us nothing new minute to
 		// minute; /cricket/live discovery is what notices it going live.
 		PreMatchInterval:        15 * time.Minute,
@@ -126,6 +132,9 @@ func LoadConfigFromEnv() (Config, error) {
 	if err := parseIntEnv("CRICLIVE_HOURLY_REQUEST_LIMIT", &cfg.HourlyRequestLimit); err != nil {
 		return Config{}, err
 	}
+	if err := parseIntEnv("CRICLIVE_DAILY_REQUEST_LIMIT", &cfg.DailyRequestLimit); err != nil {
+		return Config{}, err
+	}
 	cfg.AllowLiveCorrections = parseBoolEnv("CRICLIVE_ALLOW_LIVE_CORRECTIONS")
 	cfg.AllowMidMatchLiveAdmission = parseBoolEnv("CRICLIVE_ALLOW_MID_MATCH_LIVE_ADMISSION")
 	// Live mode always uses fast polling for ball-by-ball trading UX. The env flag
@@ -171,6 +180,9 @@ func (c Config) Validate() error {
 	}
 	if c.HourlyRequestLimit <= 0 {
 		return errors.New("CRICLIVE_HOURLY_REQUEST_LIMIT must be positive")
+	}
+	if c.DailyRequestLimit <= 0 {
+		return errors.New("CRICLIVE_DAILY_REQUEST_LIMIT must be positive")
 	}
 	if c.MinPollInterval <= 0 || c.MaxPollInterval <= 0 || c.MinPollInterval > c.MaxPollInterval {
 		return errors.New("CricLive poll intervals must be positive and minimum must not exceed maximum")

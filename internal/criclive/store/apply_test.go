@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -563,27 +563,114 @@ func TestLiveAdmissionAllowsOnlyProviderLiveOrBreakStates(t *testing.T) {
 
 func TestFixtureTargetNextPollHandlesReschedulesWithoutRevivingActiveTargets(t *testing.T) {
 	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
-	fixture := client.Fixture{Status: "NS"}
+	fixture := client.Fixture{State: client.StatePreview}
 
+	// Not started: wake just before the scheduled start so trading opens on time.
 	next, apply, replace := fixtureTargetNextPoll(nil, fixture, now.Add(2*time.Hour), now)
-	if !apply || !replace || !next.Equal(now.Add(90*time.Minute)) {
+	if !apply || !replace || !next.Equal(now.Add(115*time.Minute)) {
 		t.Fatalf("new target schedule = %s/%t/%t", next, apply, replace)
 	}
 
-	existing := &FixtureTarget{StartTime: now.Add(time.Hour), ProviderStatus: "NS"}
+	// An existing target is only ever brought forward by a not-started
+	// source: the target it was judged against may be seconds stale, and a
+	// replace parked a fixture that had just gone live in between.
+	existing := &FixtureTarget{StartTime: now.Add(time.Hour), ProviderStatus: client.StatePreview}
 	next, apply, replace = fixtureTargetNextPoll(existing, fixture, now.Add(3*time.Hour), now)
-	if !apply || !replace || !next.Equal(now.Add(150*time.Minute)) {
-		t.Fatalf("postponed target schedule = %s/%t/%t", next, apply, replace)
+	if !apply || replace || !next.Equal(now.Add(175*time.Minute)) {
+		t.Fatalf("postponed target schedule = %s/%t/%t, want $min to start-5m", next, apply, replace)
 	}
 
-	next, apply, replace = fixtureTargetNextPoll(existing, fixture, now.Add(45*time.Minute), now)
-	if !apply || replace || !next.Equal(now.Add(15*time.Minute)) {
-		t.Fatalf("advanced target schedule = %s/%t/%t", next, apply, replace)
+	// A fixture whose start has passed but which is still not live must NOT be
+	// polled on a tight loop — discovery reports its state for free.
+	next, apply, _ = fixtureTargetNextPoll(existing, fixture, now.Add(-time.Hour), now)
+	if !apply || !next.Equal(now.Add(idleFixtureRecheck)) {
+		t.Fatalf("overdue not-started schedule = %s/%t", next, apply)
+	}
+
+	// Under way: poll immediately, this is the only state worth paying for.
+	live := client.Fixture{State: client.StateInProgress}
+	next, apply, _ = fixtureTargetNextPoll(existing, live, now.Add(-time.Hour), now)
+	if !apply || !next.Equal(now) {
+		t.Fatalf("live schedule = %s/%t", next, apply)
+	}
+
+	// Finished: parked, so it never costs another request.
+	done := client.Fixture{State: client.StateComplete}
+	next, apply, _ = fixtureTargetNextPoll(existing, done, now.Add(-time.Hour), now)
+	if !apply || !next.Equal(now.Add(TerminalFixtureRecheck)) {
+		t.Fatalf("terminal schedule = %s/%t", next, apply)
 	}
 
 	lastSuccess := now.Add(-time.Minute)
-	existing = &FixtureTarget{StartTime: now.Add(time.Hour), ProviderStatus: "1st Innings", LastSuccessAt: &lastSuccess}
+	existing = &FixtureTarget{StartTime: now.Add(time.Hour), ProviderStatus: client.StateInProgress, LastSuccessAt: &lastSuccess}
 	if _, apply, _ = fixtureTargetNextPoll(existing, fixture, now.Add(3*time.Hour), now); apply {
 		t.Fatal("fixture sync rescheduled an active target")
+	}
+}
+
+// The same fixture is listed as A v B on /cricket/live and B v A on
+// /cricket/schedule; whichever endpoint last wrote the target, the match must
+// still be recognised, and its published team positions must not flip.
+func TestFixtureIdentityAcceptsSwappedTeamOrder(t *testing.T) {
+	current := matches.Match{ProviderFixtureID: 99, ProviderLeagueID: 7, ProviderSeasonID: 7, ProviderTeamAID: 10, ProviderTeamBID: 11}
+	swapped := reconcile.Projection{FixtureID: 99, LeagueID: 7, SeasonID: 7, LocalTeamID: 11, VisitorTeamID: 10, Status: matches.StatusUpcoming}
+	if fixtureIdentityChanged(current, swapped) {
+		t.Fatal("swapped team order was rejected as an identity change")
+	}
+	other := reconcile.Projection{FixtureID: 99, LeagueID: 7, SeasonID: 7, LocalTeamID: 11, VisitorTeamID: 12}
+	if !fixtureIdentityChanged(current, other) {
+		t.Fatal("a different opponent was accepted")
+	}
+	next := projectMatch(current, swapped, time.Now(), time.Minute, time.Minute, time.Minute, 2)
+	if next.ProviderTeamAID != 10 || next.ProviderTeamBID != 11 {
+		t.Fatalf("team positions were flipped to %d/%d", next.ProviderTeamAID, next.ProviderTeamBID)
+	}
+}
+
+// Only a ball inside the span the provider still publishes can be missing;
+// older balls are simply out of view.
+func TestFirstMissingDeliveryOnlyCountsBallsInsideTheWindow(t *testing.T) {
+	projection := reconcile.Projection{
+		Deliveries:             []reconcile.Delivery{{ProviderEventID: "2-31-1", Innings: 2, Sequence: 3101}},
+		DeliveryWindowInnings:  2,
+		DeliveryWindowSequence: 3101,
+	}
+	candidates := map[string]reconcile.Delivery{"2-31-1": projection.Deliveries[0]}
+	existing := map[string]matches.BallEvent{
+		"2-24-5": {Innings: 2, Sequence: 2405, Active: true},
+	}
+	if firstMissingDelivery(projection, existing, candidates) {
+		t.Fatal("a ball older than the published window was counted as missing")
+	}
+	existing["2-31-2"] = matches.BallEvent{Innings: 2, Sequence: 3102, Active: true}
+	if !firstMissingDelivery(projection, existing, candidates) {
+		t.Fatal("a dropped ball inside the window was not reported")
+	}
+	existing["2-31-2"] = matches.BallEvent{Innings: 2, Sequence: 3102, Active: true, MissingPolls: 1}
+	if firstMissingDelivery(projection, existing, candidates) {
+		t.Fatal("an already-confirmed miss was reported again")
+	}
+	if firstMissingDelivery(reconcile.Projection{}, existing, map[string]reconcile.Delivery{}) {
+		t.Fatal("a poll without deliveries observed nothing and must report nothing missing")
+	}
+}
+
+// A live fixture the poller has backed off after a failure keeps that
+// schedule; discovery re-arming it every pass made a parked fixture cost a
+// request a minute.
+func TestFixtureTargetNextPollKeepsFailureBackoffOnLiveFixtures(t *testing.T) {
+	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	live := client.Fixture{State: client.StateInProgress}
+	parked := &FixtureTarget{ProviderStatus: client.StateInProgress, ConsecutiveFailures: 1, NextPollAt: now.Add(5 * time.Hour)}
+	if _, apply, _ := fixtureTargetNextPoll(parked, live, now.Add(-time.Hour), now); apply {
+		t.Fatal("discovery re-armed a fixture the poller had backed off")
+	}
+	elapsed := &FixtureTarget{ProviderStatus: client.StateInProgress, ConsecutiveFailures: 1, NextPollAt: now.Add(-time.Second)}
+	if next, apply, _ := fixtureTargetNextPoll(elapsed, live, now.Add(-time.Hour), now); !apply || !next.Equal(now) {
+		t.Fatalf("elapsed backoff was not re-armed: %s/%t", next, apply)
+	}
+	healthy := &FixtureTarget{ProviderStatus: client.StateInProgress, NextPollAt: now.Add(time.Hour)}
+	if next, apply, _ := fixtureTargetNextPoll(healthy, live, now.Add(-time.Hour), now); !apply || !next.Equal(now) {
+		t.Fatalf("healthy live fixture was not pulled forward: %s/%t", next, apply)
 	}
 }

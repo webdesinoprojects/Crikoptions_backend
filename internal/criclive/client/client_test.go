@@ -358,22 +358,16 @@ func TestParseLiveDateInfersYearAcrossBoundary(t *testing.T) {
 }
 
 func TestStateClassification(t *testing.T) {
-	for _, state := range []string{"In Progress", "Innings Break", "Stumps", "Rain"} {
+	for _, state := range []string{"In Progress", "innings break", "Stumps", "Rain", "Drinks", "Lunch", "Tea"} {
 		if !IsLiveState(state) {
 			t.Fatalf("state %q should be live", state)
 		}
 	}
-	for _, state := range []string{"Complete", "Abandon", "No Result"} {
-		if !IsTerminalState(state) {
-			t.Fatalf("state %q should be terminal", state)
-		}
+	// Before the first ball there is nothing on the overs feed: the toss and a
+	// pre-match delay must not put a fixture on the per-request poll cycle.
+	for _, state := range []string{"Complete", "Abandon", "No Result", "", "Preview", "Scheduled", "Toss", "Delay"} {
 		if IsLiveState(state) {
 			t.Fatalf("state %q should not be live", state)
-		}
-	}
-	for _, state := range []string{"", "Preview", "Scheduled"} {
-		if !IsNotStartedState(state) {
-			t.Fatalf("state %q should be not-started", state)
 		}
 	}
 }

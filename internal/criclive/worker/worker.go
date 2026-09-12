@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 )
 
 var ErrQuotaReserved = errors.New("CricLive quota reserve reached")
@@ -26,6 +26,22 @@ var ErrQuotaReserved = errors.New("CricLive quota reserve reached")
 const (
 	scheduleLookback = 2 * 24 * time.Hour
 	scheduleHorizon  = 14 * 24 * time.Hour
+	// deterministicFailureBackoff parks a fixture the provider or the store
+	// will reject the same way on every attempt: an identity mismatch, an
+	// unpriceable format, a match that may not be admitted mid-way. Retrying
+	// resolves none of them; only an operator or a state change can.
+	deterministicFailureBackoff = 6 * time.Hour
+	// minFailureBackoff is the shortest wait after any other failed poll and
+	// maxFailureBackoff caps its growth on repeated failures. Retrying a live
+	// fixture five seconds after an error made a failing fixture cost as much
+	// as a healthy one.
+	minFailureBackoff = 2 * time.Minute
+	maxFailureBackoff = 10 * time.Minute
+	// overdueUpcomingGrace is how far past its scheduled start a fixture may run
+	// before "still upcoming" is treated as stale rather than imminent; after
+	// that it is rechecked only every overdueUpcomingRecheck.
+	overdueUpcomingGrace   = 20 * time.Minute
+	overdueUpcomingRecheck = 6 * time.Hour
 )
 
 type Provider interface {
@@ -36,12 +52,11 @@ type Provider interface {
 }
 
 type Storage interface {
-	SyncLeagues(context.Context, []client.Series, time.Time, bool) error
 	UpsertSeries(context.Context, []client.Series, time.Time) error
 	EnabledLeagueIDs(context.Context) ([]int64, error)
 	UpsertFixtureTargets(context.Context, []client.Fixture, time.Time, bool, bool) error
 	PublishFixtureMatches(context.Context, []client.Fixture, time.Time, bool) error
-	ConsumeRequestQuota(context.Context, string, time.Time, int, int) (bool, error)
+	ConsumeRequestQuota(context.Context, string, time.Time, int, int, int) (bool, error)
 	ClaimSchedule(context.Context, string, string, time.Time, time.Duration) (bool, error)
 	DueTargets(context.Context, time.Time, int64) ([]store.FixtureTarget, error)
 	PollableTargetCount(context.Context, time.Time) (int64, error)
@@ -72,11 +87,13 @@ type Worker struct {
 	owner    string
 	logger   Logger
 	quota    *quotaWindow
+	breaker  providerBreaker
 
 	fixtureSyncMu       sync.Mutex
 	fixturesMu          sync.RWMutex
 	fixtureLeagueKey    string
 	fixtureLeaguesKnown bool
+	discoveryActive     bool
 	randomMu            sync.Mutex
 	random              *rand.Rand
 	wg                  sync.WaitGroup
@@ -111,7 +128,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		return err
 	}
 	w.startPeriodic(ctx, "fixture catalog", w.cfg.FixtureSyncInterval, w.syncFixtures)
-	w.startPeriodic(ctx, "live discovery", w.cfg.DiscoveryInterval, w.discoverLive)
+	w.startAdaptiveDiscovery(ctx)
 	dispatchTicker := time.NewTicker(time.Second)
 	defer dispatchTicker.Stop()
 
@@ -124,6 +141,89 @@ func (w *Worker) Run(ctx context.Context) error {
 			if err := w.dispatch(ctx); err != nil {
 				w.logger.Printf("criclive dispatch: %v", err)
 			}
+		}
+	}
+}
+
+// idleDiscoveryInterval is how often /cricket/live is checked when no match is
+// under way and none is due shortly. Cricket is not being played most of the
+// day, and at the configured 60s a wholly idle day still cost 1,440 of a 5,000
+// request allowance — 29% of it — to learn nothing.
+const (
+	idleDiscoveryInterval = 10 * time.Minute
+	discoveryWarmUpWindow = 30 * time.Minute
+)
+
+// startAdaptiveDiscovery polls /cricket/live quickly while there is cricket to
+// watch and slowly when there is not. The decision is made from the response we
+// just received, so choosing the interval costs nothing extra.
+func (w *Worker) startAdaptiveDiscovery(ctx context.Context) {
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		for {
+			timer := time.NewTimer(w.nextDiscoveryDelay())
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if err := w.discoverLive(ctx); err != nil && ctx.Err() == nil {
+				w.logger.Printf("criclive live discovery sync: %v", err)
+			}
+		}
+	}()
+}
+
+func (w *Worker) nextDiscoveryDelay() time.Duration {
+	w.fixturesMu.RLock()
+	active := w.discoveryActive
+	w.fixturesMu.RUnlock()
+	if active {
+		return w.cfg.DiscoveryInterval
+	}
+	if idleDiscoveryInterval < w.cfg.DiscoveryInterval {
+		return w.cfg.DiscoveryInterval
+	}
+	return idleDiscoveryInterval
+}
+
+// setDiscoveryActive records whether the last discovery pass saw cricket worth
+// watching: a match in progress, or one due to start within the warm-up window.
+func (w *Worker) setDiscoveryActive(fixtures []client.Fixture, now time.Time) {
+	active := false
+	for _, fixture := range fixtures {
+		// Only fixtures we could actually trade justify fast polling. A Test
+		// sits at "Stumps" for days and is never tradable, so counting it would
+		// pin discovery to its fast interval around the clock.
+		if _, _, err := reconcile.ClassifyFormat(fixture.Format); err != nil {
+			continue
+		}
+		// "Stumps" is an overnight break, not play about to resume.
+		if strings.Contains(strings.ToLower(fixture.State), "stumps") {
+			continue
+		}
+		if client.IsLiveState(fixture.State) {
+			active = true
+			break
+		}
+		if reconcile.IsNotStartedStatus(fixture.State) && !fixture.StartingAt.IsZero() {
+			if wait := fixture.StartingAt.Sub(now); wait > 0 && wait <= discoveryWarmUpWindow {
+				active = true
+				break
+			}
+		}
+	}
+	w.fixturesMu.Lock()
+	changed := w.discoveryActive != active
+	w.discoveryActive = active
+	w.fixturesMu.Unlock()
+	if changed {
+		if active {
+			w.logger.Printf("criclive discovery: cricket in window — polling every %s", w.cfg.DiscoveryInterval)
+		} else {
+			w.logger.Printf("criclive discovery: nothing live — backing off to %s", idleDiscoveryInterval)
 		}
 	}
 }
@@ -180,6 +280,7 @@ func (w *Worker) syncFixtures(ctx context.Context) error {
 	response, rateLimit, err := w.provider.Schedule(ctx)
 	w.quota.observe(client.EndpointSchedule, w.now().UTC(), rateLimit)
 	if err != nil {
+		w.tripBreakerIfOutage(err)
 		return err
 	}
 
@@ -212,9 +313,9 @@ func (w *Worker) syncFixtures(ctx context.Context) error {
 	}
 
 	// The series directory is refreshed from the full schedule, not from the
-	// windowed fixture list, so a series with no fixture in the window is not
-	// mistaken for one that has been withdrawn.
-	if err := w.store.SyncLeagues(ctx, series, now, w.cfg.Mode == client.ModeLive); err != nil {
+	// windowed fixture list. It is never used to revoke anything: the schedule
+	// omits competitions the live feed carries.
+	if err := w.store.UpsertSeries(ctx, series, now); err != nil {
 		return err
 	}
 	if err := w.store.UpsertFixtureTargets(ctx, fixtures, now, w.cfg.Mode == client.ModeLive, w.cfg.AllowMidMatchLiveAdmission); err != nil {
@@ -248,6 +349,7 @@ func (w *Worker) discoverLive(ctx context.Context) error {
 	response, rateLimit, err := w.provider.LiveScores(ctx)
 	w.quota.observe(client.EndpointLive, w.now().UTC(), rateLimit)
 	if err != nil {
+		w.tripBreakerIfOutage(err)
 		return err
 	}
 	now := w.now().UTC()
@@ -274,11 +376,32 @@ func (w *Worker) discoverLive(ctx context.Context) error {
 			}
 		}
 	}
+	w.setDiscoveryActive(fixtures, now)
 	// Live series are upserted without the revocation sweep the schedule
 	// performs: /cricket/live only ever shows a handful of series, so treating
 	// it as the full directory would disable everything else.
 	if err := w.store.UpsertSeries(ctx, series, now); err != nil {
 		return err
+	}
+	// /cricket/live already told us which fixtures have finished, so close them
+	// out here instead of spending a per-fixture request to rediscover it. This
+	// is what stops a completed match from sitting in the UI as "upcoming".
+	if w.cfg.Mode == client.ModeLive {
+		for _, fixture := range fixtures {
+			if !reconcile.IsTerminalProviderStatus(fixture.State) {
+				continue
+			}
+			closed, err := w.store.ApplyProviderTerminalClosure(ctx, fixture.ID, fixture.State, now, store.ApplyOptions{
+				Mode: string(w.cfg.Mode),
+			})
+			if err != nil {
+				w.logger.Printf("criclive fixture %d terminal closure from discovery: %v", fixture.ID, err)
+				continue
+			}
+			if closed {
+				w.logger.Printf("criclive fixture %d closed from discovery (state=%q)", fixture.ID, fixture.State)
+			}
+		}
 	}
 	if err := w.store.UpsertFixtureTargets(ctx, fixtures, now, w.cfg.Mode == client.ModeLive, w.cfg.AllowMidMatchLiveAdmission); err != nil {
 		return err
@@ -324,7 +447,12 @@ func (w *Worker) dispatch(ctx context.Context) error {
 		target := targets[index]
 		alreadyOpen := targetOpenInMode(target, w.cfg.Mode)
 		if !alreadyOpen && newAdmitted >= newBudget {
-			_ = w.store.DeferTarget(ctx, target.ID, now.Add(w.cfg.MaxPollInterval), "quota_limited")
+			// Deferred for budget, not for a transient error: wait for the quota
+			// window to turn rather than re-offering the same fixture in 6s.
+			retryAt := now.Add(quotaExhaustedBackoff(now))
+			w.logger.Printf("criclive fixture %d deferred: new-fixture budget spent (%d open), retry at %s",
+				target.ID, openCount, retryAt.Format(time.RFC3339))
+			_ = w.store.DeferTarget(ctx, target.ID, retryAt, "quota_limited")
 			if w.cfg.Mode == client.ModeLive {
 				_ = w.store.MarkFeedUnavailable(ctx, target.ID, matches.FeedStateQuotaLimited, "quota_limited", now, nil)
 			}
@@ -354,7 +482,8 @@ func (w *Worker) dispatch(ctx context.Context) error {
 			defer w.wg.Done()
 			defer func() { <-w.semaphore }()
 			if ctx.Err() != nil {
-				_ = w.store.FailTargetPoll(context.Background(), target.ID, w.owner, token, ctx.Err(), w.now().UTC(), w.now().UTC().Add(time.Second))
+				stamp := w.now().UTC()
+				_ = w.store.FailTargetPoll(context.Background(), target.ID, w.owner, token, ctx.Err(), stamp, stamp.Add(w.failureBackoff(target, ctx.Err())))
 				return
 			}
 			w.pollTarget(ctx, target, token, pollInterval)
@@ -427,7 +556,7 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	now := w.now().UTC()
 	// A poll costs one request for the miniscore; the ball-by-ball read is
 	// reserved separately, and only when play is actually under way.
-	if !w.takeProviderQuota(ctx, client.EndpointCommentary) {
+	if !w.takeProviderQuota(ctx, pollEndpointFor(target)) {
 		if w.cfg.Mode == client.ModeLive {
 			if err := w.store.ResetFinalizationHolds(ctx, target.ID, w.owner, token, now); err != nil {
 				if errors.Is(err, store.ErrFixtureLeaseLost) {
@@ -438,7 +567,14 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 			}
 			_ = w.store.MarkFeedUnavailable(ctx, target.ID, matches.FeedStateQuotaLimited, "quota_limited", now, nil)
 		}
-		if err := w.store.FailTargetPoll(ctx, target.ID, w.owner, token, ErrQuotaReserved, now, now.Add(w.cfg.MaxPollInterval)); err != nil {
+		retryAt := now.Add(quotaExhaustedBackoff(now))
+		if open, reason, until := w.breaker.open(now); open && until.After(retryAt) {
+			retryAt = until
+			w.logger.Printf("criclive fixture %d poll held: provider suspended (%s), retry at %s", target.ID, reason, retryAt.Format(time.RFC3339))
+		} else {
+			w.logger.Printf("criclive fixture %d poll held: quota reserve reached, retry at %s", target.ID, retryAt.Format(time.RFC3339))
+		}
+		if err := w.store.FailTargetPoll(ctx, target.ID, w.owner, token, ErrQuotaReserved, now, retryAt); err != nil {
 			w.logger.Printf("criclive fixture %d record quota hold: %v", target.ID, err)
 		}
 		return
@@ -454,6 +590,11 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 
 	projection, err := reconcile.ReduceSnapshot(snapshot)
 	if err != nil {
+		// Surface the rejection. This branch used to record the error only in
+		// the fixture document, where it was overwritten by the next attempt,
+		// so a snapshot the reducer would never accept retried invisibly.
+		w.logger.Printf("criclive fixture %d snapshot rejected (consecutive=%d, retry in %s): %v",
+			target.ID, target.ConsecutiveFailures+1, w.failureBackoff(target, err).Truncate(time.Second), err)
 		_ = w.store.SavePayload(ctx, target.ID, string(w.cfg.Mode), raw, receivedAt, w.cfg.RawPayloadTTL, false, err)
 		if w.cfg.Mode == client.ModeLive {
 			providerStatus := snapshotState(snapshot)
@@ -510,48 +651,45 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	// handlePollFailure when LastSuccessfulPollAt goes stale.
 	nextInterval := intervalForProjection(projection, result, activeInterval, w.cfg)
 	next := receivedAt.Add(w.jitter(nextInterval))
-	next = clampPreMatchPoll(projection, next)
-	if err := w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), projection.SnapshotHash, projection.ProviderStatus, receivedAt, next); err != nil {
+	next = clampPreMatchPoll(projection, receivedAt, next)
+	if err := w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), projection.SnapshotHash, projection.ProviderState, receivedAt, next); err != nil {
 		w.logger.Printf("criclive fixture %d complete poll: %v", target.ID, err)
 	}
 }
 
-// fetchSnapshot reads a match, spending as little provider quota as the match
-// state justifies. The commentary miniscore alone carries everything a fixture
-// that is not under way can tell us — state, line-up, innings totals — so the
-// ball-by-ball overs feed is only pulled once play is actually in progress.
-// That keeps an idle fixture at one request per poll instead of two.
+// fetchSnapshot reads a match with exactly one provider request.
+//
+// During play that request is /cricket/overs: it carries the running score,
+// both batters, the bowler and their figures, and the ball-by-ball detail —
+// everything the terminal renders — while /cricket/live (already fetched by
+// discovery for every match at once) supplies the innings summary and state.
+// Outside play the ball feed can say nothing new, so a single /cricket/commentary
+// read confirms the fixture's state instead. Polling both endpoints on every
+// tick doubled the cost of a live match for three fields nobody traded on.
 func (w *Worker) fetchSnapshot(ctx context.Context, target store.FixtureTarget) (client.Snapshot, []byte, error) {
-	commentary, rateLimit, err := w.provider.Commentary(ctx, target.ID)
-	w.quota.observe(client.EndpointCommentary, w.now().UTC(), rateLimit)
-	if err != nil {
-		return client.Snapshot{}, nil, err
-	}
-
-	snapshot := client.Snapshot{
-		MatchID:    target.ID,
-		Fixture:    fixtureFromTarget(target),
-		Commentary: commentary.Data,
-	}
-
-	var oversRaw json.RawMessage
-	if playInProgress(commentary.Data) && w.takeProviderQuota(ctx, client.EndpointOvers) {
-		overs, oversLimit, oversErr := w.provider.Overs(ctx, target.ID)
-		w.quota.observe(client.EndpointOvers, w.now().UTC(), oversLimit)
-		if oversErr != nil {
-			// The miniscore already carries the authoritative score, so a
-			// missing overs read costs detail on the ball strip, not accuracy.
-			w.logger.Printf("criclive fixture %d overs unavailable: %v", target.ID, oversErr)
-		} else {
-			snapshot.Overs = overs.Data
-			oversRaw = overs.Raw
-		}
-	}
-
-	raw, err := json.Marshal(struct {
+	snapshot := client.Snapshot{MatchID: target.ID, Fixture: fixtureFromTarget(target)}
+	var payload struct {
 		Commentary json.RawMessage `json:"commentary,omitempty"`
 		Overs      json.RawMessage `json:"overs,omitempty"`
-	}{Commentary: commentary.Raw, Overs: oversRaw})
+	}
+	if pollEndpointFor(target) == client.EndpointOvers {
+		overs, rateLimit, err := w.provider.Overs(ctx, target.ID)
+		w.quota.observe(client.EndpointOvers, w.now().UTC(), rateLimit)
+		if err != nil {
+			return client.Snapshot{}, nil, err
+		}
+		snapshot.Overs = overs.Data
+		payload.Overs = overs.Raw
+	} else {
+		commentary, rateLimit, err := w.provider.Commentary(ctx, target.ID)
+		w.quota.observe(client.EndpointCommentary, w.now().UTC(), rateLimit)
+		if err != nil {
+			return client.Snapshot{}, nil, err
+		}
+		snapshot.Commentary = commentary.Data
+		payload.Commentary = commentary.Raw
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return snapshot, nil, err
 	}
@@ -559,18 +697,13 @@ func (w *Worker) fetchSnapshot(ctx context.Context, target store.FixtureTarget) 
 	return snapshot, raw, nil
 }
 
-// playInProgress reports whether a delivery could plausibly have been bowled
-// since the last poll, which is the only case where the recent-overs feed can
-// tell us anything new.
-func playInProgress(data client.CommentaryData) bool {
-	state := strings.TrimSpace(data.MiniScore.State)
-	if state == "" {
-		state = strings.TrimSpace(data.MatchHeader.State)
+// pollEndpointFor picks the one endpoint a poll of this fixture will spend.
+// The target's providerStatus is the canonical state discovery last saw.
+func pollEndpointFor(target store.FixtureTarget) string {
+	if client.IsLiveState(target.ProviderStatus) {
+		return client.EndpointOvers
 	}
-	if reconcile.IsTerminalProviderStatus(state) || reconcile.IsNotStartedStatus(state) {
-		return false
-	}
-	return client.IsLiveState(state)
+	return client.EndpointCommentary
 }
 
 // fixtureFromTarget rebuilds the identity the reducer needs from the stored
@@ -583,8 +716,15 @@ func fixtureFromTarget(target store.FixtureTarget) client.Fixture {
 		StartingAt:    target.StartTime,
 		LocalTeamID:   target.LocalTeamID,
 		VisitorTeamID: target.VisitorTeamID,
-		Status:        target.ProviderStatus,
-		State:         target.ProviderStatus,
+		// The target keeps only the short labels; they double as display
+		// names so the pulse reads "NEP attacking" rather than "Batting side".
+		LocalTeamName:    target.LocalTeamShort,
+		VisitorTeamName:  target.VisitorTeamShort,
+		LocalTeamShort:   target.LocalTeamShort,
+		VisitorTeamShort: target.VisitorTeamShort,
+		Status:           target.ProviderStatus,
+		State:            target.ProviderStatus,
+		LiveInnings:      target.LiveInnings,
 	}
 }
 
@@ -604,9 +744,15 @@ func targetOpenInMode(target store.FixtureTarget, mode client.Mode) bool {
 	return target.LastSuccessAt != nil && target.LastSuccessMode == string(mode)
 }
 
-func clampPreMatchPoll(projection reconcile.Projection, candidate time.Time) time.Time {
+func clampPreMatchPoll(projection reconcile.Projection, now, candidate time.Time) time.Time {
 	if projection.Status != matches.StatusUpcoming || projection.StartTime.IsZero() {
 		return candidate
+	}
+	// Still "upcoming" well after its start: it never went live and discovery
+	// reports its state for free. Re-reading it on the pre-match cadence spent
+	// four requests an hour per fixture on matches that were not being played.
+	if now.Sub(projection.StartTime) > overdueUpcomingGrace {
+		return now.Add(overdueUpcomingRecheck)
 	}
 	resumeAt := projection.StartTime.Add(-30 * time.Minute)
 	if resumeAt.After(candidate) {
@@ -627,6 +773,9 @@ func (w *Worker) takeProviderQuotaN(ctx context.Context, endpoint string, count 
 		count = 1
 	}
 	now := w.now().UTC()
+	if open, _, _ := w.breaker.open(now); open {
+		return false
+	}
 	for i := 0; i < count; i++ {
 		if !w.quota.take(endpoint, now) {
 			return false
@@ -634,7 +783,7 @@ func (w *Worker) takeProviderQuotaN(ctx context.Context, endpoint string, count 
 	}
 	for i := 0; i < count; i++ {
 		allowed, err := w.store.ConsumeRequestQuota(
-			ctx, endpoint, now, w.cfg.HourlyRequestLimit, w.cfg.QuotaReservePercent,
+			ctx, endpoint, now, w.cfg.HourlyRequestLimit, w.cfg.DailyRequestLimit, w.cfg.QuotaReservePercent,
 		)
 		if err != nil {
 			w.logger.Printf("criclive quota %s: %v", endpoint, err)
@@ -657,6 +806,11 @@ func (w *Worker) handlePollFailure(ctx context.Context, target store.FixtureTarg
 		w.logger.Printf("criclive fixture %d poll abandoned: lease lost", target.ID)
 		return
 	}
+	// Log why the poll failed. Previously the cause was only surfaced when the
+	// database write ALSO failed, so three days of provider 429s and 401s left
+	// no trace at all while every fixture quietly went stale.
+	w.logger.Printf("criclive fixture %d poll failed (consecutive=%d, retry in %s): %v",
+		target.ID, target.ConsecutiveFailures+1, next.Sub(now).Truncate(time.Second), cause)
 	if w.cfg.Mode == client.ModeLive {
 		if err := w.store.ResetFinalizationHolds(ctx, target.ID, w.owner, token, now); err != nil {
 			w.logger.Printf("criclive fixture %d reset finalization hold: %v", target.ID, err)
@@ -686,28 +840,77 @@ func feedValidityForInterval(cfg client.Config, scheduled time.Duration) time.Du
 	return maxDuration(cfg.StaleMinimum, 4*scheduled+httpBudget+10*time.Second)
 }
 
+// intervalForProviderStatus schedules the next poll from the provider's own
+// state vocabulary. CricLive reports "Preview", "In Progress", "Innings Break",
+// "Stumps", "Complete" and "Abandon" — a finished match must stop being polled
+// entirely, because re-reading it can never change the result and every read is
+// billed against a daily allowance.
 func intervalForProviderStatus(status string, active time.Duration, cfg client.Config) time.Duration {
+	if reconcile.IsTerminalProviderStatus(status) {
+		return store.TerminalFixtureRecheck
+	}
+	if reconcile.IsNotStartedStatus(status) {
+		return cfg.PreMatchInterval
+	}
 	lower := strings.ToLower(strings.TrimSpace(status))
 	switch {
-	case strings.Contains(lower, "finished"):
-		return cfg.FinalizingInterval
-	case strings.Contains(lower, "break"), strings.Contains(lower, "lunch"), strings.Contains(lower, "tea"),
-		strings.Contains(lower, "dinner"), strings.Contains(lower, "int."):
-		return cfg.BreakInterval
-	case strings.Contains(lower, "innings"):
+	case strings.Contains(lower, "in progress"), strings.Contains(lower, "live"):
 		return active
+	case strings.Contains(lower, "break"), strings.Contains(lower, "lunch"), strings.Contains(lower, "tea"),
+		strings.Contains(lower, "dinner"), strings.Contains(lower, "drinks"), strings.Contains(lower, "stumps"),
+		strings.Contains(lower, "rain"), strings.Contains(lower, "delay"):
+		return cfg.BreakInterval
 	default:
+		// An unrecognised phase is treated as not-yet-started rather than live,
+		// so an unknown label cannot start a fast-poll loop.
 		return cfg.PreMatchInterval
 	}
 }
 
+// quotaExhaustedBackoff is how long to wait after the internal guard refuses a
+// poll. The guard counts per clock hour, so retrying before the bucket rolls
+// over cannot possibly succeed — it only spins the scheduler. Previously this
+// was MaxPollInterval (6s), which made every eligible fixture retry ten times a
+// minute and drain each new hour's allowance the instant it refilled.
+func quotaExhaustedBackoff(now time.Time) time.Duration {
+	next := now.UTC().Truncate(time.Hour).Add(time.Hour)
+	wait := next.Sub(now.UTC())
+	if wait < minFailureBackoff {
+		wait = minFailureBackoff
+	}
+	return wait
+}
+
+// tripBreakerIfOutage suspends all provider traffic when an error means the
+// provider is refusing us as a whole, and returns how long the caller should
+// wait. Ordinary failures report ok=false and keep per-fixture backoff.
+func (w *Worker) tripBreakerIfOutage(cause error) (time.Duration, bool) {
+	now := w.now().UTC()
+	until, reason, ok := providerOutage(cause, now)
+	if !ok {
+		return 0, false
+	}
+	if w.breaker.trip(until, reason) {
+		w.logger.Printf("criclive PROVIDER SUSPENDED until %s: %s — no further requests will be made",
+			until.Format(time.RFC3339), reason)
+	}
+	return until.Sub(now), true
+}
+
 func (w *Worker) failureBackoff(target store.FixtureTarget, cause error) time.Duration {
-	var limited *client.RateLimitError
-	if errors.As(cause, &limited) && limited.RetryAfter > 0 {
-		return minDuration(limited.RetryAfter, 10*time.Minute)
+	// A provider-wide refusal must not be retried on a per-fixture clock.
+	if wait, outage := w.tripBreakerIfOutage(cause); outage {
+		return wait
+	}
+	// A deterministic rejection will repeat until someone changes the stored
+	// match or the provider changes its mind, so retrying every few minutes
+	// only spends requests. Park it and let the log say why.
+	if errors.Is(cause, store.ErrFixtureIdentity) || errors.Is(cause, store.ErrMidMatchPromotion) ||
+		errors.Is(cause, store.ErrSettledCorrection) || errors.Is(cause, reconcile.ErrUnsupportedFormat) {
+		return deterministicFailureBackoff
 	}
 	shift := min(target.ConsecutiveFailures, 5)
-	return minDuration(time.Duration(1<<shift)*5*time.Second, 2*time.Minute)
+	return minDuration(time.Duration(1<<shift)*minFailureBackoff, maxFailureBackoff)
 }
 
 func adaptivePollInterval(active int, cfg client.Config) time.Duration {
@@ -752,14 +955,14 @@ func intervalForProjection(projection reconcile.Projection, result store.ApplyRe
 		return cfg.BreakInterval
 	case matches.StatusCompleted:
 		if result.FeedState == matches.FeedStateTerminal {
-			return 24 * time.Hour
+			return store.TerminalFixtureRecheck
 		}
 		return cfg.FinalizingInterval
 	case matches.StatusAbandoned:
 		if result.FeedState == matches.FeedStateFinalizing {
 			return cfg.FinalizingInterval
 		}
-		return 24 * time.Hour
+		return store.TerminalFixtureRecheck
 	default:
 		return cfg.PreMatchInterval
 	}

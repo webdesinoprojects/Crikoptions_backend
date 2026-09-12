@@ -13,6 +13,7 @@ var configEnvironment = []string{
 	"CRICLIVE_HTTP_TIMEOUT",
 	"CRICLIVE_QUOTA_RESERVE_PERCENT",
 	"CRICLIVE_HOURLY_REQUEST_LIMIT",
+	"CRICLIVE_DAILY_REQUEST_LIMIT",
 	"CRICLIVE_FAST_POLLING_ENABLED",
 	"CRICLIVE_ALLOW_LIVE_CORRECTIONS",
 	"CRICLIVE_ALLOW_MID_MATCH_LIVE_ADMISSION",
@@ -52,13 +53,14 @@ func TestLoadConfigFromEnvDefaultsToOff(t *testing.T) {
 	if cfg.BaseURL != DefaultBaseURL {
 		t.Fatalf("BaseURL = %q, want %q", cfg.BaseURL, DefaultBaseURL)
 	}
-	if cfg.QuotaReservePercent != 20 || cfg.MinPollInterval != 2*time.Second || cfg.MaxPollInterval != 6*time.Second {
+	if cfg.QuotaReservePercent != 20 || cfg.MinPollInterval != 6*time.Second || cfg.MaxPollInterval != 10*time.Second {
 		t.Fatalf("unexpected quota/poll defaults: %+v", cfg)
 	}
-	// The hourly guard is deliberately small: CricLive meters a daily
-	// allowance (5,000/day on the base plan), so an hourly ceiling sized for a
-	// per-hour API would exhaust a whole day's budget in under two hours.
-	if cfg.HourlyRequestLimit != 200 || cfg.FastPollingEnabled || cfg.AllowLiveCorrections || cfg.AllowMidMatchLiveAdmission {
+	// CricLive meters per calendar day, so the daily figure is the real
+	// ceiling; the hourly one only limits bursts and must stay large enough to
+	// poll a match that is actually in progress.
+	if cfg.DailyRequestLimit != 5000 || cfg.HourlyRequestLimit != 900 ||
+		cfg.FastPollingEnabled || cfg.AllowLiveCorrections || cfg.AllowMidMatchLiveAdmission {
 		t.Fatalf("unexpected live-safety defaults: %+v", cfg)
 	}
 	if cfg.RawPayloadTTL != 2*time.Hour {

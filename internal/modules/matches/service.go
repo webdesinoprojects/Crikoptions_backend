@@ -125,6 +125,9 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 		case StatusLive, StatusInningsBreak:
 			live = append(live, all[i])
 		case StatusUpcoming:
+			if staleUpcoming(&all[i], now) {
+				continue
+			}
 			upcoming = append(upcoming, all[i])
 		}
 	}
@@ -150,7 +153,8 @@ func (s *Service) CountLiveProviderMatches(ctx context.Context) (int, error) {
 // controller uses this to wind down the demo games ahead of a real fixture.
 func (s *Service) ProviderMatchImminent(ctx context.Context, within time.Duration) (bool, error) {
 	all := s.repo.GetAll(ctx)
-	cutoff := time.Now().UTC().Add(within)
+	now := time.Now().UTC()
+	cutoff := now.Add(within)
 	for i := range all {
 		m := all[i]
 		if m.Hidden || m.DataSource != DataSourceCricLive {
@@ -158,19 +162,36 @@ func (s *Service) ProviderMatchImminent(ctx context.Context, within time.Duratio
 		}
 		// A zombie (frozen-feed) match must not count as a real fixture in play,
 		// otherwise it keeps the demo replays hidden indefinitely.
-		if LiveFeedExpired(&m, time.Now()) {
+		if LiveFeedExpired(&m, now) {
 			continue
 		}
 		switch NormalizeStatus(m.Status) {
 		case StatusLive, StatusInningsBreak:
 			return true, nil
 		case StatusUpcoming:
-			if !m.StartTime.IsZero() && !m.StartTime.After(cutoff) {
+			if m.StartTime.IsZero() || staleUpcoming(&m, now) {
+				continue
+			}
+			if !m.StartTime.After(cutoff) {
 				return true, nil
 			}
 		}
 	}
 	return false, nil
+}
+
+// upcomingImminentGrace is how long after its scheduled start a fixture may
+// still be counted as "about to begin". Real starts slip by a few minutes; a
+// fixture still marked upcoming long after that is stale data.
+const upcomingImminentGrace = 20 * time.Minute
+
+// staleUpcoming reports a fixture still marked upcoming well past its scheduled
+// start. It never went live and the feed never moved it on, so it is neither
+// imminent (it must not keep the warm-up games hidden) nor worth advertising
+// on the home or upcoming lists: that would offer a match already played.
+func staleUpcoming(m *Match, now time.Time) bool {
+	return NormalizeStatus(m.Status) == StatusUpcoming && !m.StartTime.IsZero() &&
+		now.Sub(m.StartTime) > upcomingImminentGrace
 }
 
 // SetDemoMatchesHidden toggles the hidden flag on the given demo/simulator match
@@ -192,6 +213,7 @@ func (s *Service) SetDemoMatchesHidden(ctx context.Context, hidden bool, hexIDs 
 func (s *Service) GetUpcomingMatches(ctx context.Context) []Match {
 	all := s.repo.GetAll(ctx)
 	upcoming := make([]Match, 0, len(all))
+	now := time.Now().UTC()
 	for i := range all {
 		if all[i].Hidden {
 			continue
@@ -200,7 +222,7 @@ func (s *Service) GetUpcomingMatches(ctx context.Context) []Match {
 			continue
 		}
 		all[i].Status = NormalizeStatus(all[i].Status)
-		if all[i].Status != StatusUpcoming {
+		if all[i].Status != StatusUpcoming || staleUpcoming(&all[i], now) {
 			continue
 		}
 		all[i].OversText = calculateOvers(all[i].BallsLeft, all[i].Format)

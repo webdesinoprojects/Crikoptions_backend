@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -387,16 +387,7 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 		return ApplyResult{}, err
 	}
 
-	firstMissing := false
-	for providerID, event := range existingEvents {
-		if event.Tombstoned || !event.Active {
-			continue
-		}
-		if _, present := candidateByID[providerID]; !present && event.MissingPolls < 1 {
-			firstMissing = true
-			break
-		}
-	}
+	firstMissing := firstMissingDelivery(projection, existingEvents, candidateByID)
 	correctionBlocked := false
 	if !cfg.AllowCorrections {
 		for providerID, delivery := range candidateByID {
@@ -542,11 +533,28 @@ func (s *Store) applyProjectionTransaction(ctx mongo.SessionContext, projection 
 }
 
 func fixtureIdentityChanged(current matches.Match, projection reconcile.Projection) bool {
-	return current.ProviderFixtureID > 0 && current.ProviderFixtureID != projection.FixtureID ||
+	if current.ProviderFixtureID > 0 && current.ProviderFixtureID != projection.FixtureID ||
 		current.ProviderLeagueID > 0 && current.ProviderLeagueID != projection.LeagueID ||
-		current.ProviderSeasonID > 0 && current.ProviderSeasonID != projection.SeasonID ||
-		current.ProviderTeamAID > 0 && current.ProviderTeamAID != projection.LocalTeamID ||
-		current.ProviderTeamBID > 0 && current.ProviderTeamBID != projection.VisitorTeamID
+		current.ProviderSeasonID > 0 && current.ProviderSeasonID != projection.SeasonID {
+		return true
+	}
+	// CricLive lists the same two teams in opposite order on /cricket/live and
+	// /cricket/schedule, so the pair is compared as a set: a swap is the same
+	// fixture. Comparing positions rejected a live match as "identity changed"
+	// whenever the target and the match were last written by different
+	// endpoints, and parked it for hours.
+	return !sameTeamPair(current.ProviderTeamAID, current.ProviderTeamBID, projection.LocalTeamID, projection.VisitorTeamID)
+}
+
+// sameTeamPair reports whether the stored pair (a, b) names the same two teams
+// as (local, visitor) in either order. A stored id of zero is unknown and
+// matches anything.
+func sameTeamPair(a, b, local, visitor int64) bool {
+	known := func(stored, x, y int64) bool { return stored <= 0 || stored == x || stored == y }
+	if !known(a, local, visitor) || !known(b, local, visitor) {
+		return false
+	}
+	return a <= 0 || b <= 0 || a != b
 }
 
 func (s *Store) touchFixtureLease(ctx context.Context, fixtureID int64, now time.Time, cfg ApplyOptions) error {
@@ -609,11 +617,38 @@ func (s *Store) bulkEventWrites(ctx context.Context, ops []mongo.WriteModel, exp
 	return nil
 }
 
-// incrementMissingPolls marks every active event the provider stopped sending.
+// firstMissingDelivery reports a stored ball the provider stopped sending that
+// no earlier poll has yet confirmed missing. Only balls inside the span the
+// provider still republishes count: /cricket/overs returns the recent overs
+// only, and counting every older ball as "missing" turned four of every five
+// live polls into soft reconciling passes that persisted no deliveries.
+func firstMissingDelivery(projection reconcile.Projection, existing map[string]matches.BallEvent, candidateByID map[string]reconcile.Delivery) bool {
+	for providerID, event := range existing {
+		if event.Tombstoned || !event.Active || event.MissingPolls >= 1 {
+			continue
+		}
+		if _, present := candidateByID[providerID]; present {
+			continue
+		}
+		if withinDeliveryWindow(projection, event) {
+			return true
+		}
+	}
+	return false
+}
+
 // withinDeliveryWindow reports whether a stored ball falls inside the span of
 // play the provider still republishes. Outside that span, absence carries no
 // information.
 func withinDeliveryWindow(projection reconcile.Projection, event matches.BallEvent) bool {
+	// A poll that carried no ball-by-ball data at all (the one-shot commentary
+	// read outside play) observed nothing, so nothing is "in window" and no
+	// stored ball may be judged missing from it. Reading an empty list as "the
+	// innings was fully observed with zero balls" tombstoned every event and
+	// then failed the poll on a two-minute retry loop.
+	if len(projection.Deliveries) == 0 {
+		return false
+	}
 	if projection.DeliveryWindowInnings <= 0 {
 		return true
 	}
@@ -638,6 +673,13 @@ func (s *Store) incrementMissingPolls(ctx context.Context, projection reconcile.
 		ops = append(ops, mongo.NewUpdateOneModel().
 			SetFilter(bson.M{"_id": event.ID, "revision": event.Revision}).
 			SetUpdate(bson.M{"$inc": bson.M{"missingPolls": 1}}))
+		// Keep the caller in step with the write. When a poll is forced to
+		// resolve on the same pass (a finished match, or the reconcile budget
+		// spent), applyEvents reads this map; with the count still at zero
+		// there it refused the tombstone, the transaction rolled the increment
+		// back, and the fixture failed the same way every two minutes for days.
+		event.MissingPolls++
+		existing[providerID] = event
 	}
 	return s.bulkEventWrites(ctx, ops, len(ops), 0)
 }
@@ -796,8 +838,14 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 	next.ProviderFixtureID = projection.FixtureID
 	next.ProviderLeagueID = projection.LeagueID
 	next.ProviderSeasonID = projection.SeasonID
-	next.ProviderTeamAID = projection.LocalTeamID
-	next.ProviderTeamBID = projection.VisitorTeamID
+	// Team positions stay as published (names and logos are positional) when
+	// the projection lists the same pair the other way round.
+	swapped := current.ProviderTeamAID == projection.VisitorTeamID && current.ProviderTeamBID == projection.LocalTeamID &&
+		projection.LocalTeamID != projection.VisitorTeamID
+	if !swapped {
+		next.ProviderTeamAID = projection.LocalTeamID
+		next.ProviderTeamBID = projection.VisitorTeamID
+	}
 	next.Format = projection.Format
 	next.StartTime = projection.StartTime
 	next.ProviderPhase = projection.ProviderStatus
@@ -1568,7 +1616,7 @@ func (s *Store) insertMatchOutbox(ctx context.Context, match matches.Match, even
 		return nil
 	}
 	event := OutboxEvent{
-		EventID: fmt.Sprintf(ProviderName + ":%d:%d:%d:%s", match.ProviderFixtureID, match.StateVersion, match.TradingVersion, eventType),
+		EventID: fmt.Sprintf(ProviderName+":%d:%d:%d:%s", match.ProviderFixtureID, match.StateVersion, match.TradingVersion, eventType),
 		Topic:   realtime.MatchScoreTopic(match.ID.Hex()), Type: eventType,
 		MatchID: match.ID.Hex(), StateVersion: match.StateVersion, TradingVersion: match.TradingVersion,
 		Sequence: match.StateVersion, OccurredAt: now, Payload: scorePayload(match), CreatedAt: now,
@@ -1611,7 +1659,7 @@ func progressiveScoreOutboxEvent(match matches.Match, event matches.BallEvent, n
 		return OutboxEvent{}, false
 	}
 	outbox := OutboxEvent{
-		EventID: fmt.Sprintf(ProviderName + ":%d:%d:%d:match.ball:%s", match.ProviderFixtureID, match.StateVersion, match.TradingVersion, event.ProviderEventID),
+		EventID: fmt.Sprintf(ProviderName+":%d:%d:%d:match.ball:%s", match.ProviderFixtureID, match.StateVersion, match.TradingVersion, event.ProviderEventID),
 		Topic:   realtime.MatchScoreTopic(match.ID.Hex()), Type: "match.state",
 		MatchID: match.ID.Hex(), StateVersion: match.StateVersion, TradingVersion: match.TradingVersion,
 		Sequence: event.Sequence, OccurredAt: now, Payload: scorePayload(match), CreatedAt: now,
@@ -1643,7 +1691,7 @@ func deliveryOutboxEvent(match matches.Match, event matches.BallEvent, now time.
 		payload["thisOver"] = match.ThisOver
 	}
 	outbox := OutboxEvent{
-		EventID: fmt.Sprintf(ProviderName + ":%d:%s:%d", match.ProviderFixtureID, event.ProviderEventID, event.Revision),
+		EventID: fmt.Sprintf(ProviderName+":%d:%s:%d", match.ProviderFixtureID, event.ProviderEventID, event.Revision),
 		Topic:   realtime.MatchCommentaryTopic(match.ID.Hex()), Type: "match.delivery",
 		MatchID: match.ID.Hex(), StateVersion: match.StateVersion, TradingVersion: match.TradingVersion,
 		Sequence: event.Sequence, OccurredAt: now, Payload: payload, CreatedAt: now,
@@ -1660,7 +1708,7 @@ func scorePayload(match matches.Match) map[string]any {
 		"oversText": match.OversText, "status": match.Status,
 		"providerPhase": match.ProviderPhase, "feedState": match.FeedState,
 		"tradingState": match.TradingState, "tradingBlockers": match.TradingBlockers,
-		"tradable": match.Tradable,
+		"tradable":     match.Tradable,
 		"stateVersion": match.StateVersion, "tradingVersion": match.TradingVersion,
 		"inningsSummaries":     match.InningsSummaries,
 		"lastSuccessfulPollAt": match.LastSuccessfulPollAt, "feedValidUntil": match.FeedValidUntil,

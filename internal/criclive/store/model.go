@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -56,29 +57,37 @@ type TradingControl struct {
 }
 
 type FixtureTarget struct {
-	ID                  int64      `bson:"_id"`
-	LeagueID            int64      `bson:"leagueId"`
-	SeasonID            int64      `bson:"seasonId"`
-	LocalTeamID         int64      `bson:"localTeamId"`
-	VisitorTeamID       int64      `bson:"visitorTeamId"`
-	Format              string     `bson:"format"`
-	ScheduledBalls      int        `bson:"scheduledBalls"`
-	ProviderStatus      string     `bson:"providerStatus"`
-	StartTime           time.Time  `bson:"startTime"`
-	Eligible            bool       `bson:"eligible"`
-	Supported           bool       `bson:"supported"`
-	NextPollAt          time.Time  `bson:"nextPollAt"`
-	LastPollAt          *time.Time `bson:"lastPollAt,omitempty"`
-	LastSuccessAt       *time.Time `bson:"lastSuccessAt,omitempty"`
-	LastSuccessMode     string     `bson:"lastSuccessMode,omitempty"`
-	LastSnapshotHash    string     `bson:"lastSnapshotHash,omitempty"`
-	LastError           string     `bson:"lastError,omitempty"`
-	ConsecutiveFailures int        `bson:"consecutiveFailures,omitempty"`
-	LeaseOwner          string     `bson:"leaseOwner,omitempty"`
-	LeaseToken          string     `bson:"leaseToken,omitempty"`
-	LeaseUntil          *time.Time `bson:"leaseUntil,omitempty"`
-	CreatedAt           time.Time  `bson:"createdAt"`
-	UpdatedAt           time.Time  `bson:"updatedAt"`
+	ID            int64 `bson:"_id"`
+	LeagueID      int64 `bson:"leagueId"`
+	SeasonID      int64 `bson:"seasonId"`
+	LocalTeamID   int64 `bson:"localTeamId"`
+	VisitorTeamID int64 `bson:"visitorTeamId"`
+	// Team labels as the provider prints them ("NEP", "UAE"). The overs feed
+	// names the batting side by label only, so a poll during play needs them
+	// to resolve it back to a team id.
+	LocalTeamShort   string `bson:"localTeamShort,omitempty"`
+	VisitorTeamShort string `bson:"visitorTeamShort,omitempty"`
+	Format           string `bson:"format"`
+	ScheduledBalls   int    `bson:"scheduledBalls"`
+	ProviderStatus   string `bson:"providerStatus"`
+	// LiveInnings is refreshed by discovery from /cricket/live so a poll
+	// during play needs only the ball-by-ball endpoint.
+	LiveInnings         []client.FixtureInnings `bson:"liveInnings,omitempty"`
+	StartTime           time.Time               `bson:"startTime"`
+	Eligible            bool                    `bson:"eligible"`
+	Supported           bool                    `bson:"supported"`
+	NextPollAt          time.Time               `bson:"nextPollAt"`
+	LastPollAt          *time.Time              `bson:"lastPollAt,omitempty"`
+	LastSuccessAt       *time.Time              `bson:"lastSuccessAt,omitempty"`
+	LastSuccessMode     string                  `bson:"lastSuccessMode,omitempty"`
+	LastSnapshotHash    string                  `bson:"lastSnapshotHash,omitempty"`
+	LastError           string                  `bson:"lastError,omitempty"`
+	ConsecutiveFailures int                     `bson:"consecutiveFailures,omitempty"`
+	LeaseOwner          string                  `bson:"leaseOwner,omitempty"`
+	LeaseToken          string                  `bson:"leaseToken,omitempty"`
+	LeaseUntil          *time.Time              `bson:"leaseUntil,omitempty"`
+	CreatedAt           time.Time               `bson:"createdAt"`
+	UpdatedAt           time.Time               `bson:"updatedAt"`
 }
 
 type ApplyOptions struct {

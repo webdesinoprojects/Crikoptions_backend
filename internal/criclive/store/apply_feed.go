@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -338,15 +339,14 @@ func (s *Store) HealFalselyStaleLiveMatches(ctx context.Context, now time.Time, 
 // become ineligible, which leaves matches stuck in reconciling forever.
 func (s *Store) EnsureAdmittedFixturesPollable(ctx context.Context, now time.Time) (int64, error) {
 	now = now.UTC()
+	// Recovery is limited to matches that are actually in play. A match merely
+	// warming or stale is recovered by the next discovery pass, which reports
+	// every fixture's state in a single shared request; pulling those forward
+	// here spent one metered request per fixture on every process start.
 	cursor, err := s.matches.Find(ctx, bson.M{
-		"provider": ProviderName,
+		"provider":  ProviderName,
 		"feedState": bson.M{"$ne": matches.FeedStateTerminal},
-		"$or": bson.A{
-			bson.M{"status": bson.M{"$in": []string{matches.StatusLive, matches.StatusInningsBreak}}},
-			bson.M{"feedState": bson.M{"$in": []string{
-				matches.FeedStateReconciling, matches.FeedStateStale, matches.FeedStateWarming,
-			}}},
-		},
+		"status":    bson.M{"$in": []string{matches.StatusLive, matches.StatusInningsBreak}},
 	})
 	if err != nil {
 		return 0, err
@@ -394,7 +394,14 @@ func (s *Store) RescheduleStaleTargets(ctx context.Context, now time.Time) (int6
 	} else if admitted > 0 {
 		log.Printf("criclive ensured %d admitted fixtures pollable", admitted)
 	}
-	result, err := s.fixtures.UpdateMany(ctx, bson.M{"eligible": true}, bson.M{
+	// Only fixtures that are actually under way are pulled forward. Waking every
+	// eligible fixture on each start cost a burst of one request per fixture per
+	// restart, which on a metered daily allowance is money spent to re-read
+	// matches that had not begun.
+	result, err := s.fixtures.UpdateMany(ctx, bson.M{
+		"eligible":       true,
+		"providerStatus": bson.M{"$in": client.LiveStates},
+	}, bson.M{
 		"$set": bson.M{"nextPollAt": now, "updatedAt": now},
 	})
 	if err != nil {

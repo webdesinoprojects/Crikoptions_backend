@@ -3,8 +3,8 @@ package store
 import (
 	"testing"
 
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/reconcile"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 )
 
 func TestProgressiveMatchViewStepsScorePerBall(t *testing.T) {
@@ -72,5 +72,29 @@ func TestSortBallEventsOrdersBySequence(t *testing.T) {
 	sortBallEvents(events)
 	if events[0].ProviderEventID != "a" || events[1].ProviderEventID != "b" || events[2].ProviderEventID != "c" {
 		t.Fatalf("order=%v", []string{events[0].ProviderEventID, events[1].ProviderEventID, events[2].ProviderEventID})
+	}
+}
+
+// A poll with no ball-by-ball data (the commentary state read) has observed
+// nothing, so it must not put any stored ball "in window" for tombstoning —
+// otherwise a finished match's final poll deletes its whole innings and then
+// fails on every retry.
+func TestWithinDeliveryWindowSkipsSweepWithoutDeliveries(t *testing.T) {
+	stored := matches.BallEvent{Innings: 2, Sequence: 2707}
+	none := reconcile.Projection{}
+	if withinDeliveryWindow(none, stored) {
+		t.Fatal("a poll with no deliveries put a stored ball in the tombstone window")
+	}
+	// With a real delivery window the existing semantics hold.
+	windowed := reconcile.Projection{
+		DeliveryWindowInnings: 2, DeliveryWindowSequence: 2601,
+		Deliveries: []reconcile.Delivery{{ProviderEventID: "2-26-1", Innings: 2, Sequence: 2601}},
+	}
+	if !withinDeliveryWindow(windowed, stored) {
+		t.Fatal("a ball inside the observed window should be sweepable")
+	}
+	older := matches.BallEvent{Innings: 2, Sequence: 2505}
+	if withinDeliveryWindow(windowed, older) {
+		t.Fatal("a ball before the observed window must not be swept")
 	}
 }

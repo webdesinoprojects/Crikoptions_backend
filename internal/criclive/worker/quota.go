@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -79,4 +82,70 @@ func (q *quotaState) prune(now time.Time) {
 	if first > 0 {
 		q.requests = append(q.requests[:0], q.requests[first:]...)
 	}
+}
+
+// providerBreaker halts every outbound CricLive request while the provider is
+// refusing us as a whole. Per-fixture backoff cannot do this job: with ~50
+// fixtures each retrying on its own timer, a provider-level 429 or 401 turned
+// into ~1,500 billed-and-rejected requests an hour — the retry storm was
+// spending the daily allowance faster than anything that actually worked.
+type providerBreaker struct {
+	mu           sync.Mutex
+	blockedUntil time.Time
+	reason       string
+}
+
+// open reports whether calls are currently suspended.
+func (b *providerBreaker) open(now time.Time) (bool, string, time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.Before(b.blockedUntil) {
+		return true, b.reason, b.blockedUntil
+	}
+	return false, "", time.Time{}
+}
+
+// trip extends the suspension. It reports whether this call lengthened it, so
+// the caller logs once per incident rather than once per fixture.
+func (b *providerBreaker) trip(until time.Time, reason string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !until.After(b.blockedUntil) {
+		return false
+	}
+	b.blockedUntil = until
+	b.reason = reason
+	return true
+}
+
+// credentialRejectedBackoff is how long to stand down after a 401/403. The
+// token will not fix itself; this only stops the bleeding until an operator
+// replaces it and restarts.
+const credentialRejectedBackoff = 30 * time.Minute
+
+// providerOutage classifies an error into how long the provider should be left
+// alone, or reports that it is an ordinary per-fixture failure.
+func providerOutage(err error, now time.Time) (until time.Time, reason string, ok bool) {
+	var limited *client.RateLimitError
+	if errors.As(err, &limited) {
+		if limited.RetryAfter > 0 {
+			return now.Add(limited.RetryAfter), "rate limited", true
+		}
+		// CricLive sends no Retry-After: a bare 429 means the day's allowance
+		// is spent, and it comes back at the UTC day boundary.
+		return nextUTCDay(now), "daily allowance exhausted (HTTP 429)", true
+	}
+	var httpErr *client.HTTPError
+	if errors.As(err, &httpErr) {
+		switch httpErr.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return now.Add(credentialRejectedBackoff),
+				fmt.Sprintf("credentials rejected (HTTP %d) — check CRICLIVE_API_TOKEN", httpErr.StatusCode), true
+		}
+	}
+	return time.Time{}, "", false
+}
+
+func nextUTCDay(now time.Time) time.Time {
+	return now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
 }
