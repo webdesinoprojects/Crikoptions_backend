@@ -173,7 +173,7 @@ func TestReducedOversApplyEndToEnd(t *testing.T) {
 	// poll result is discarded and the fixture retries forever.
 	if err := store.CompleteTargetPoll(ctx, fixtureID, owner, token, "live",
 		projection.SnapshotHash, projection.ProviderStatus,
-		base.Add(3*time.Second), base.Add(5*time.Second)); err != nil {
+		base.Add(3*time.Second), base.Add(5*time.Second), base.Add(3*time.Second)); err != nil {
 		t.Fatalf("complete poll after a long apply: %v", err)
 	}
 }

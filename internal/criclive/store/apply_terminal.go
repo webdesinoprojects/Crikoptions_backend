@@ -374,6 +374,15 @@ func (s *Store) abandonDeadMatch(ctx context.Context, id primitive.ObjectID, now
 		if err := s.insertMatchOutbox(sessionContext, match, "match.state", now); err != nil {
 			return nil, err
 		}
+		// The match is closed; its target must stop costing requests too.
+		// Without this the fixture kept its live status and was re-armed by
+		// the next discovery pass.
+		if match.ProviderFixtureID > 0 {
+			if _, err := s.fixtures.UpdateOne(sessionContext, bson.M{"_id": match.ProviderFixtureID},
+				parkUpdate(now, ParkReasonAbandoned)); err != nil {
+				return nil, err
+			}
+		}
 		closed = true
 		log.Printf(
 			"criclive match %s (fixture %d): abandoned — feed dead since %s, no terminal provider phase",

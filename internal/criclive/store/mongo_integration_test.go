@@ -117,7 +117,7 @@ func TestMongoLiveProjectionTransaction(t *testing.T) {
 
 	if err := store.CompleteTargetPoll(
 		ctx, fixtureID, firstOwner, firstToken, "live", projection.SnapshotHash,
-		projection.ProviderStatus, base.Add(3*time.Second), base.Add(3*time.Second),
+		projection.ProviderStatus, base.Add(3*time.Second), base.Add(3*time.Second), base.Add(3*time.Second),
 	); err != nil {
 		t.Fatalf("complete first fixture lease: %v", err)
 	}

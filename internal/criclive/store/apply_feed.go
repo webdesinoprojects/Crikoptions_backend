@@ -12,7 +12,6 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const maxReconcilingPolls = 5
@@ -361,20 +360,15 @@ func (s *Store) EnsureAdmittedFixturesPollable(ctx context.Context, now time.Tim
 		if match.ProviderFixtureID <= 0 {
 			continue
 		}
-		result, err := s.fixtures.UpdateOne(ctx, bson.M{"_id": match.ProviderFixtureID}, bson.M{
-			"$set": bson.M{
-				"eligible": true, "nextPollAt": now, "updatedAt": now,
-			},
-			"$setOnInsert": bson.M{
-				"leagueId": match.ProviderLeagueID, "seasonId": match.ProviderSeasonID,
-				"localTeamId": match.ProviderTeamAID, "visitorTeamId": match.ProviderTeamBID,
-				"supported": true, "createdAt": now,
-			},
-		}, options.Update().SetUpsert(true))
+		changed, err := s.armUnparkedTarget(ctx, match.ProviderFixtureID, now, bson.M{
+			"leagueId": match.ProviderLeagueID, "seasonId": match.ProviderSeasonID,
+			"localTeamId": match.ProviderTeamAID, "visitorTeamId": match.ProviderTeamBID,
+			"supported": true, "createdAt": now,
+		})
 		if err != nil {
 			return updated, err
 		}
-		if result.ModifiedCount > 0 || result.UpsertedCount > 0 {
+		if changed {
 			updated++
 		}
 	}
@@ -401,6 +395,7 @@ func (s *Store) RescheduleStaleTargets(ctx context.Context, now time.Time) (int6
 	result, err := s.fixtures.UpdateMany(ctx, bson.M{
 		"eligible":       true,
 		"providerStatus": bson.M{"$in": client.LiveStates},
+		"parkedReason":   bson.M{"$exists": false},
 	}, bson.M{
 		"$set": bson.M{"nextPollAt": now, "updatedAt": now},
 	})
@@ -426,9 +421,7 @@ func (s *Store) RescheduleStaleTargets(ctx context.Context, now time.Time) (int6
 		if match.ProviderFixtureID <= 0 {
 			continue
 		}
-		_, _ = s.fixtures.UpdateOne(ctx, bson.M{"_id": match.ProviderFixtureID}, bson.M{
-			"$set": bson.M{"eligible": true, "nextPollAt": now, "updatedAt": now},
-		}, options.Update().SetUpsert(true))
+		_, _ = s.armUnparkedTarget(ctx, match.ProviderFixtureID, now, bson.M{"createdAt": now})
 	}
 	return result.ModifiedCount, nil
 }

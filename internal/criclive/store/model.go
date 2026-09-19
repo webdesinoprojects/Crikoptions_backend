@@ -27,6 +27,7 @@ type League struct {
 type Status struct {
 	EnabledLeagues       int64            `json:"enabledLeagues"`
 	EligibleFixtures     int64            `json:"eligibleFixtures"`
+	ParkedFixtures       int64            `json:"parkedFixtures"`
 	LeasedFixtures       int64            `json:"leasedFixtures"`
 	PendingSettlements   int64            `json:"pendingSettlements"`
 	PendingCancellations int64            `json:"pendingCancellations"`
@@ -86,8 +87,21 @@ type FixtureTarget struct {
 	LeaseOwner          string                  `bson:"leaseOwner,omitempty"`
 	LeaseToken          string                  `bson:"leaseToken,omitempty"`
 	LeaseUntil          *time.Time              `bson:"leaseUntil,omitempty"`
-	CreatedAt           time.Time               `bson:"createdAt"`
-	UpdatedAt           time.Time               `bson:"updatedAt"`
+	// Guardrail bookkeeping (see guardrails.go). RequestCount is every
+	// provider request this fixture has cost; LiveSince is when it was first
+	// seen in a live state (the live window is measured from the later of
+	// this and the scheduled start, so a rain-delayed match is not parked
+	// mid-play); UnchangedSince is when the snapshot hash last changed;
+	// MissingFromLiveSince is when /cricket/live stopped listing a fixture
+	// still marked live; ParkedReason, when set, stops every path that would
+	// otherwise re-arm the target.
+	RequestCount         int        `bson:"requestCount,omitempty"`
+	LiveSince            *time.Time `bson:"liveSince,omitempty"`
+	UnchangedSince       *time.Time `bson:"unchangedSince,omitempty"`
+	MissingFromLiveSince *time.Time `bson:"missingFromLiveSince,omitempty"`
+	ParkedReason         string     `bson:"parkedReason,omitempty"`
+	CreatedAt            time.Time  `bson:"createdAt"`
+	UpdatedAt            time.Time  `bson:"updatedAt"`
 }
 
 type ApplyOptions struct {

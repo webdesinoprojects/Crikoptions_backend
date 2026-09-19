@@ -314,7 +314,7 @@ func (s *Store) SetLeagueEnabled(ctx context.Context, leagueID int64, enabled bo
 		}
 		if enabled {
 			if _, err := s.fixtures.UpdateMany(sessionContext, bson.M{
-				"leagueId": leagueID, "supported": true,
+				"leagueId": leagueID, "supported": true, "parkedReason": bson.M{"$exists": false},
 			}, bson.M{"$set": bson.M{"eligible": true, "nextPollAt": now, "updatedAt": now}}); err != nil {
 				return false, err
 			}
@@ -451,12 +451,17 @@ func (s *Store) ListIncidents(ctx context.Context, limit int64) ([]Incident, err
 }
 
 func (s *Store) RequestFixtureResync(ctx context.Context, fixtureID int64, now time.Time) (bool, error) {
+	// An operator resync is the one way out of a hard park, so it clears the
+	// park and restarts the request budget the fixture is judged against.
 	result, err := s.fixtures.UpdateOne(ctx, bson.M{"_id": fixtureID}, bson.M{
 		"$set": bson.M{
-			"eligible": true, "nextPollAt": now.UTC(),
+			"eligible": true, "nextPollAt": now.UTC(), "requestCount": 0,
 			"lastError": "manual_resync", "updatedAt": now.UTC(),
 		},
-		"$unset": bson.M{"leaseOwner": "", "leaseToken": "", "leaseUntil": ""},
+		"$unset": bson.M{
+			"leaseOwner": "", "leaseToken": "", "leaseUntil": "",
+			"parkedReason": "", "missingFromLiveSince": "",
+		},
 	}, options.Update().SetUpsert(true))
 	if err != nil {
 		return false, err
@@ -473,6 +478,9 @@ func (s *Store) AdminStatus(ctx context.Context, now time.Time) (Status, error) 
 		return Status{}, err
 	}
 	if status.EligibleFixtures, err = s.fixtures.CountDocuments(ctx, bson.M{"eligible": true}); err != nil {
+		return Status{}, err
+	}
+	if status.ParkedFixtures, err = s.fixtures.CountDocuments(ctx, bson.M{"parkedReason": bson.M{"$exists": true}}); err != nil {
 		return Status{}, err
 	}
 	if status.LeasedFixtures, err = s.fixtures.CountDocuments(ctx, bson.M{"leaseUntil": bson.M{"$gt": now.UTC()}}); err != nil {
@@ -866,10 +874,28 @@ func (s *Store) UpsertFixtureTargets(ctx context.Context, fixtures []client.Fixt
 		} else {
 			set["providerStatus"] = fixture.State
 		}
-		if nextPoll, apply, replace := fixtureTargetNextPoll(existing[fixture.ID], fixture, start, now); apply {
+		var liveSince *time.Time
+		if existing[fixture.ID] != nil {
+			liveSince = existing[fixture.ID].LiveSince
+		}
+		if client.IsLiveState(fixture.State) {
+			// First live sighting, kept by $min so a later pass never moves it.
+			update["$min"] = bson.M{"liveSince": now}
+		}
+		if client.IsLiveState(fixture.State) && liveWindowExceededAt(format, start, liveSince, now) &&
+			(existing[fixture.ID] == nil || existing[fixture.ID].ParkedReason == "") {
+			// The feed still calls it live, but its start is too far back for
+			// that to be true. Park it here so it never arms in the first
+			// place; the sweep and dispatch guard the same bound elsewhere.
+			set["nextPollAt"] = now.Add(TerminalFixtureRecheck)
+			set["parkedReason"] = ParkReasonLiveWindow
+			set["lastError"] = ParkReasonLiveWindow
+		} else if nextPoll, apply, replace := fixtureTargetNextPoll(existing[fixture.ID], fixture, start, now); apply {
 			if replace {
 				set["nextPollAt"] = nextPoll
 			} else {
+				// Only a not-started source reaches here, so no $min for
+				// liveSince was set above and this cannot clobber it.
 				update["$min"] = bson.M{"nextPollAt": nextPoll}
 			}
 		}
@@ -934,6 +960,11 @@ const TerminalFixtureRecheck = 365 * 24 * time.Hour
 // polled. This is the difference between roughly 4,400 requests a day and a few
 // hundred on a provider that meters 5,000 a day.
 func fixtureTargetNextPoll(existing *FixtureTarget, fixture client.Fixture, start, now time.Time) (time.Time, bool, bool) {
+	// A parked target keeps its schedule whatever the feed says. Only the
+	// guard that parked it (or an operator resync) may release it.
+	if existing != nil && existing.ParkedReason != "" {
+		return time.Time{}, false, false
+	}
 	switch {
 	case reconcile.IsTerminalProviderStatus(fixture.State):
 		// Finished. The result cannot change; stop paying to re-read it.
@@ -1193,6 +1224,9 @@ func (s *Store) PollableTargetCount(ctx context.Context, now time.Time) (int64, 
 	return s.fixtures.CountDocuments(ctx, bson.M{
 		"eligible":       true,
 		"providerStatus": bson.M{"$in": client.LiveStates},
+		// A parked fixture costs nothing and must not slow the ones that are
+		// actually being read.
+		"parkedReason": bson.M{"$exists": false},
 	})
 }
 
@@ -1205,6 +1239,9 @@ func (s *Store) OpenTargetCount(ctx context.Context, now time.Time, mode string)
 	return s.fixtures.CountDocuments(ctx, bson.M{
 		"eligible":       true,
 		"providerStatus": bson.M{"$in": client.LiveStates},
+		// Parked fixtures once filled this budget: four zombies left room
+		// for two new matches a day.
+		"parkedReason": bson.M{"$exists": false},
 		"$or": bson.A{
 			bson.M{"lastSuccessAt": bson.M{"$exists": true}, "lastSuccessMode": mode},
 			bson.M{"leaseUntil": bson.M{"$gt": now.UTC()}},
@@ -1250,16 +1287,27 @@ func (s *Store) RenewTargetLease(ctx context.Context, fixtureID int64, owner, to
 	return nil
 }
 
-func (s *Store) CompleteTargetPoll(ctx context.Context, fixtureID int64, owner, token, mode, snapshotHash, status string, now, next time.Time) error {
-	result, err := s.fixtures.UpdateOne(ctx, bson.M{"_id": fixtureID, "leaseOwner": owner, "leaseToken": token}, bson.M{
+// CompleteTargetPoll records a successful read. unchangedSince is when the
+// snapshot last differed from the previous one (now, if it just did); the
+// worker uses it to slow the cadence on a scoreboard that is not moving.
+func (s *Store) CompleteTargetPoll(ctx context.Context, fixtureID int64, owner, token, mode, snapshotHash, status string, now, next, unchangedSince time.Time) error {
+	if unchangedSince.IsZero() {
+		unchangedSince = now
+	}
+	update := bson.M{
 		"$set": bson.M{
 			"providerStatus": status, "lastPollAt": now.UTC(), "lastSuccessAt": now.UTC(),
 			"lastSuccessMode":  mode,
 			"lastSnapshotHash": snapshotHash, "lastError": "", "consecutiveFailures": 0,
-			"nextPollAt": next.UTC(), "updatedAt": now.UTC(),
+			"nextPollAt": next.UTC(), "unchangedSince": unchangedSince.UTC(), "updatedAt": now.UTC(),
 		},
+		"$inc":   bson.M{"requestCount": 1},
 		"$unset": bson.M{"leaseOwner": "", "leaseToken": "", "leaseUntil": ""},
-	})
+	}
+	if client.IsLiveState(status) {
+		update["$min"] = bson.M{"liveSince": now.UTC()}
+	}
+	result, err := s.fixtures.UpdateOne(ctx, bson.M{"_id": fixtureID, "leaseOwner": owner, "leaseToken": token}, update)
 	if err == nil && result.ModifiedCount != 1 {
 		return errors.New("CricLive fixture lease was lost before poll completion")
 	}
@@ -1274,11 +1322,17 @@ func (s *Store) FailTargetPoll(ctx context.Context, fixtureID int64, owner, toke
 	if len(message) > 500 {
 		message = message[:500]
 	}
+	increments := bson.M{"consecutiveFailures": 1}
+	// A poll the quota guard refused never reached the provider; every other
+	// failure was a request that was billed.
+	if !errors.Is(cause, ErrQuotaReserved) {
+		increments["requestCount"] = 1
+	}
 	result, err := s.fixtures.UpdateOne(ctx, bson.M{"_id": fixtureID, "leaseOwner": owner, "leaseToken": token}, bson.M{
 		"$set": bson.M{
 			"lastPollAt": now.UTC(), "lastError": message, "nextPollAt": next.UTC(), "updatedAt": now.UTC(),
 		},
-		"$inc":   bson.M{"consecutiveFailures": 1},
+		"$inc":   increments,
 		"$unset": bson.M{"leaseOwner": "", "leaseToken": "", "leaseUntil": ""},
 	})
 	if err == nil && result.ModifiedCount != 1 {

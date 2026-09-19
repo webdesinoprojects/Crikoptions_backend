@@ -18,7 +18,9 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/matches"
 )
 
-var ErrQuotaReserved = errors.New("CricLive quota reserve reached")
+// ErrQuotaReserved is the store's sentinel: FailTargetPoll must recognise it
+// to leave a refused (unbilled) request out of the fixture's request count.
+var ErrQuotaReserved = store.ErrQuotaReserved
 
 // scheduleHorizon bounds how far ahead the schedule is turned into fixture
 // targets. CricLive publishes months of fixtures in one response; polling
@@ -42,6 +44,17 @@ const (
 	// that it is rechecked only every overdueUpcomingRecheck.
 	overdueUpcomingGrace   = 20 * time.Minute
 	overdueUpcomingRecheck = 6 * time.Hour
+	// quietFeedAfter is how long a snapshot may stay byte-for-byte identical
+	// before the fixture drops to the break cadence. A ball arrives every
+	// 30–45s in play, so a scoreboard that has not moved for this long is at
+	// a break, a stoppage, or (as on 19 Sep) a match that ended days ago and
+	// was still being read every 15s. Discovery lists every live match once
+	// a minute and re-arms the target the moment the feed changes, so the
+	// slower cadence costs at most one minute of latency on resumption.
+	quietFeedAfter = 5 * time.Minute
+	// dailyBudgetRefresh is how often the day's spend is re-read for the
+	// pacer; a poll tick is every second and the figure moves slowly.
+	dailyBudgetRefresh = 30 * time.Second
 )
 
 type Provider interface {
@@ -63,9 +76,13 @@ type Storage interface {
 	OpenTargetCount(context.Context, time.Time, string) (int64, error)
 	ClaimTarget(context.Context, int64, string, time.Time, time.Duration) (string, bool, error)
 	RenewTargetLease(context.Context, int64, string, string, time.Time) error
-	CompleteTargetPoll(context.Context, int64, string, string, string, string, string, time.Time, time.Time) error
+	CompleteTargetPoll(context.Context, int64, string, string, string, string, string, time.Time, time.Time, time.Time) error
 	FailTargetPoll(context.Context, int64, string, string, error, time.Time, time.Time) error
 	DeferTarget(context.Context, int64, time.Time, string) error
+	ParkTarget(context.Context, int64, time.Time, string) error
+	ParkOverrunLiveTargets(context.Context, time.Time) (int64, error)
+	MarkLiveTargetsMissing(context.Context, []int64, time.Time, time.Duration) (int64, error)
+	DailyQuotaUsed(context.Context, time.Time) (int, error)
 	SavePayload(context.Context, int64, string, []byte, time.Time, time.Duration, bool, error) error
 	ApplyProjection(context.Context, reconcile.Projection, []byte, time.Time, store.ApplyOptions) (store.ApplyResult, error)
 	ApplyProviderTerminalClosure(context.Context, int64, string, time.Time, store.ApplyOptions) (bool, error)
@@ -99,6 +116,11 @@ type Worker struct {
 	wg                  sync.WaitGroup
 	semaphore           chan struct{}
 	now                 func() time.Time
+
+	budgetMu        sync.Mutex
+	budgetUsed      int
+	budgetCheckedAt time.Time
+	budgetTier      string
 }
 
 func New(cfg client.Config, provider Provider, storage Storage, owner string, logger Logger) (*Worker, error) {
@@ -259,7 +281,22 @@ func (w *Worker) bootstrap(ctx context.Context) error {
 	} else if count > 0 {
 		w.logger.Printf("criclive rescheduled %d fixture targets for immediate poll", count)
 	}
+	w.sweepOverrunTargets(ctx)
 	return nil
+}
+
+// sweepOverrunTargets parks every fixture that is past its live window or
+// request budget. It runs at boot and after each discovery pass, and costs no
+// provider requests.
+func (w *Worker) sweepOverrunTargets(ctx context.Context) {
+	parked, err := w.store.ParkOverrunLiveTargets(ctx, w.now().UTC())
+	if err != nil {
+		w.logger.Printf("criclive park overrun targets: %v", err)
+		return
+	}
+	if parked > 0 {
+		w.logger.Printf("criclive parked %d fixture(s) past their live window or request budget", parked)
+	}
 }
 
 // syncFixtures reads the CricLive schedule, which is a single global response
@@ -411,6 +448,22 @@ func (w *Worker) discoverLive(ctx context.Context) error {
 			return err
 		}
 	}
+	// This response is the complete list of matches in play. A stored live
+	// fixture it does not carry has ended (or the feed has lost it); after
+	// ActiveFreezeTimeout of absence it drops to a slow probe instead of
+	// the live cadence. This is the guard the 19 Sep zombies slipped past:
+	// their status was only ever refreshed by fixtures the feed still listed.
+	seen := make([]int64, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		seen = append(seen, fixture.ID)
+	}
+	if demoted, err := w.store.MarkLiveTargetsMissing(ctx, seen, now, w.cfg.ActiveFreezeTimeout); err != nil {
+		w.logger.Printf("criclive mark live targets missing: %v", err)
+	} else if demoted > 0 {
+		w.logger.Printf("criclive demoted %d live fixture(s) absent from /cricket/live for %s to a %s probe",
+			demoted, w.cfg.ActiveFreezeTimeout, store.AbsentProbeInterval)
+	}
+	w.sweepOverrunTargets(ctx)
 	return nil
 }
 
@@ -434,7 +487,7 @@ func (w *Worker) dispatch(ctx context.Context) error {
 	}
 	newBudget := newFixtureBudget(int(openCount))
 	newAdmitted := 0
-	pollInterval := adaptivePollInterval(int(activeCount), w.cfg)
+	pollInterval := w.pacedPollInterval(ctx, now, adaptivePollInterval(int(activeCount), w.cfg))
 	sort.SliceStable(targets, func(i, j int) bool {
 		iOpen := targetOpenInMode(targets[i], w.cfg.Mode)
 		jOpen := targetOpenInMode(targets[j], w.cfg.Mode)
@@ -445,6 +498,19 @@ func (w *Worker) dispatch(ctx context.Context) error {
 	})
 	for index := range targets {
 		target := targets[index]
+		// Per-target copy of the sweep's bound, so a fixture cannot be read
+		// between sweeps once it has overrun. This runs before any request.
+		if reason := store.OverrunReason(target, now); reason != "" {
+			w.logger.Printf("criclive fixture %d PARKED (%s): start %s, %d requests spent — no further polls",
+				target.ID, reason, target.StartTime.UTC().Format(time.RFC3339), target.RequestCount)
+			if err := w.store.ParkTarget(ctx, target.ID, now, reason); err != nil {
+				w.logger.Printf("criclive fixture %d park: %v", target.ID, err)
+			}
+			if w.cfg.Mode == client.ModeLive {
+				_ = w.store.MarkFeedUnavailable(ctx, target.ID, matches.FeedStateStale, "feed_stale", now, nil)
+			}
+			continue
+		}
 		alreadyOpen := targetOpenInMode(target, w.cfg.Mode)
 		if !alreadyOpen && newAdmitted >= newBudget {
 			// Deferred for budget, not for a transient error: wait for the quota
@@ -554,6 +620,7 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	stopHeartbeat := w.leaseHeartbeat(ctx, target.ID, token)
 	defer stopHeartbeat()
 	now := w.now().UTC()
+	activeInterval = formatPollInterval(target.Format, activeInterval, w.cfg)
 	// A poll costs one request for the miniscore; the ball-by-ball read is
 	// reserved separately, and only when play is actually under way.
 	if !w.takeProviderQuota(ctx, pollEndpointFor(target)) {
@@ -607,7 +674,7 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 				} else if closed {
 					w.logger.Printf("criclive fixture %d: closed after reduce failure provider=%s", target.ID, providerStatus)
 					next := receivedAt.Add(intervalForProviderStatus(providerStatus, activeInterval, w.cfg))
-					_ = w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), "", providerStatus, receivedAt, next)
+					_ = w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), "", providerStatus, receivedAt, next, receivedAt)
 					return
 				}
 			}
@@ -649,12 +716,122 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	// for 90s) are normal in cricket; treating them as feed_stale blocked trading
 	// while polls were healthy. Real outages are handled by ExpireStaleFeeds /
 	// handlePollFailure when LastSuccessfulPollAt goes stale.
+	unchangedSince := snapshotUnchangedSince(target, projection.SnapshotHash, receivedAt)
 	nextInterval := intervalForProjection(projection, result, activeInterval, w.cfg)
+	nextInterval = quietFeedInterval(nextInterval, projection.Status, receivedAt.Sub(unchangedSince), w.cfg)
 	next := receivedAt.Add(w.jitter(nextInterval))
 	next = clampPreMatchPoll(projection, receivedAt, next)
-	if err := w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), projection.SnapshotHash, projection.ProviderState, receivedAt, next); err != nil {
+	next = clampAbsentProbe(target, receivedAt, next)
+	if err := w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), projection.SnapshotHash, projection.ProviderState, receivedAt, next, unchangedSince); err != nil {
 		w.logger.Printf("criclive fixture %d complete poll: %v", target.ID, err)
 	}
+}
+
+// formatPollInterval is the live cadence a fixture of this format may run at.
+// A T20 keeps the fast cadence: it is short and every ball is traded. An ODI
+// is read no faster than MaxPollInterval — at 6s a single ODI costs ~4,650
+// requests, most of a 5,000-a-day plan, while at 10s it costs ~2,850 and
+// stays inside its strict request budget (store.MaxRequestsODI). A ball in
+// an ODI is 40s apart, so the slower read is still well ahead of the next
+// delivery. Never shortens an interval the pacer has already stretched.
+func formatPollInterval(format string, active time.Duration, cfg client.Config) time.Duration {
+	if strings.EqualFold(strings.TrimSpace(format), "ODI") {
+		return maxDuration(active, cfg.MaxPollInterval)
+	}
+	return active
+}
+
+// snapshotUnchangedSince is when the fixture's snapshot last differed from
+// the one before it: the stored stamp if this read is identical to the last,
+// otherwise now.
+func snapshotUnchangedSince(target store.FixtureTarget, snapshotHash string, now time.Time) time.Time {
+	if snapshotHash != "" && snapshotHash == target.LastSnapshotHash && target.UnchangedSince != nil && !target.UnchangedSince.IsZero() {
+		return target.UnchangedSince.UTC()
+	}
+	return now.UTC()
+}
+
+// quietFeedInterval lengthens the cadence of a fixture whose snapshot has not
+// changed for quietFeedAfter. It never shortens an interval and leaves the
+// pre-match and terminal schedules alone.
+func quietFeedInterval(interval time.Duration, status string, quietFor time.Duration, cfg client.Config) time.Duration {
+	if quietFor < quietFeedAfter {
+		return interval
+	}
+	switch status {
+	case matches.StatusLive, matches.StatusInningsBreak:
+		return maxDuration(interval, cfg.BreakInterval)
+	}
+	return interval
+}
+
+// clampAbsentProbe holds a fixture the live feed no longer lists to the slow
+// probe cadence. A successful per-fixture read must not restore the live
+// cadence on its own: a match the shared feed has dropped is read again only
+// to notice a terminal state, and discovery lifts the hold the moment the
+// feed lists it again.
+func clampAbsentProbe(target store.FixtureTarget, now, candidate time.Time) time.Time {
+	if target.ParkedReason != store.ParkReasonAbsentFromLive {
+		return candidate
+	}
+	if probe := now.Add(store.AbsentProbeInterval); probe.After(candidate) {
+		return probe
+	}
+	return candidate
+}
+
+// pacedPollInterval stretches the live cadence as the day's allowance runs
+// down, so a busy day degrades to slower updates instead of a dead feed at
+// midday. The day bucket is shared by every process, so the figure is read
+// from the store and cached briefly.
+func (w *Worker) pacedPollInterval(ctx context.Context, now time.Time, base time.Duration) time.Duration {
+	w.budgetMu.Lock()
+	defer w.budgetMu.Unlock()
+	if w.budgetCheckedAt.IsZero() || now.Sub(w.budgetCheckedAt) >= dailyBudgetRefresh {
+		used, err := w.store.DailyQuotaUsed(ctx, now)
+		if err != nil {
+			w.logger.Printf("criclive daily quota read: %v", err)
+		} else {
+			w.budgetUsed = used
+			w.budgetCheckedAt = now
+		}
+	}
+	interval, tier := budgetPacedInterval(base, w.budgetUsed, usableDailyRequests(w.cfg), w.cfg)
+	if tier != w.budgetTier {
+		w.budgetTier = tier
+		if tier == "" {
+			w.logger.Printf("criclive budget pacer: full cadence restored (%d/%d used today)", w.budgetUsed, usableDailyRequests(w.cfg))
+		} else {
+			w.logger.Printf("criclive budget pacer: %s — %d/%d used today, live cadence now %s", tier, w.budgetUsed, usableDailyRequests(w.cfg), interval)
+		}
+	}
+	return interval
+}
+
+// usableDailyRequests mirrors the store's reserve arithmetic.
+func usableDailyRequests(cfg client.Config) int {
+	usable := cfg.DailyRequestLimit * (100 - cfg.QuotaReservePercent) / 100
+	if usable < 1 {
+		usable = 1
+	}
+	return usable
+}
+
+// budgetPacedInterval is the pure decision behind pacedPollInterval. With
+// half the usable day spent the live cadence falls to MaxPollInterval; with
+// three quarters spent it doubles again. The tier name is for the log.
+func budgetPacedInterval(base time.Duration, used, usable int, cfg client.Config) (time.Duration, string) {
+	if usable <= 0 || used <= 0 {
+		return base, ""
+	}
+	remaining := float64(usable-used) / float64(usable)
+	switch {
+	case remaining <= 0.25:
+		return maxDuration(base, 2*cfg.MaxPollInterval), "under 25% of daily allowance left"
+	case remaining <= 0.5:
+		return maxDuration(base, cfg.MaxPollInterval), "under 50% of daily allowance left"
+	}
+	return base, ""
 }
 
 // fetchSnapshot reads a match with exactly one provider request.
