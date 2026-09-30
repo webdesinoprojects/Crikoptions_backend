@@ -674,3 +674,33 @@ func TestFixtureTargetNextPollKeepsFailureBackoffOnLiveFixtures(t *testing.T) {
 		t.Fatalf("healthy live fixture was not pulled forward: %s/%t", next, apply)
 	}
 }
+
+// A match admitted during its chase only ever has an innings-2 market. When
+// innings 1 becomes settlement-ready there is no market to gate, and failing
+// on it rolled back every update, so the match never finished.
+func TestSettledInningsWithoutAMarketDoesNotFailTheUpdate(t *testing.T) {
+	ctx := context.Background()
+	marketService := markets.NewService(markets.NewMemoryRepository())
+	matchID := primitive.NewObjectID()
+	match := matches.Match{
+		ID: matchID, Status: matches.StatusInningsBreak, FeedState: matches.FeedStateFinalizing, Innings: 2,
+		ProviderBattingTeamID: 11, ProviderTeamBID: 11,
+		TeamAName: "Alpha", TeamBName: "Beta", Format: "T20", ScheduledBalls: 120,
+		StateVersion: 9, TradingVersion: 5,
+		InningsSummaries: []matches.InningsSummary{
+			{Innings: 1, Runs: 102, Complete: true, SettlementReady: true, FinalCandidate: &matches.FinalCandidate{Revision: 7, SnapshotHash: "final-1"}},
+			{Innings: 2, Runs: 105, Complete: true},
+		},
+	}
+	store := &Store{markets: marketService}
+	if err := store.projectMarkets(ctx, match, reconcile.Projection{}); err != nil {
+		t.Fatalf("projectMarkets: %v", err)
+	}
+	marketList, err := marketService.ListMarketsByMatchID(ctx, matchID.Hex())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(marketList) != 1 || marketList[0].Innings != 2 {
+		t.Fatalf("markets = %+v, want only the innings-2 market", marketList)
+	}
+}

@@ -1145,6 +1145,12 @@ func (s *Store) projectMarkets(ctx context.Context, match matches.Match, project
 		if !innings.SettlementReady || innings.Innings == match.Innings && match.Status == matches.StatusLive {
 			continue
 		}
+		// A match admitted part-way through never had a market for the innings
+		// already played; there is nothing to settle, and gating a market that
+		// does not exist failed the whole update, every poll, for good.
+		if !hasInningsMarket(marketList, innings.Innings) {
+			continue
+		}
 		if innings.Innings == 2 && match.Status != matches.StatusCompleted && match.Status != matches.StatusAbandoned {
 			continue
 		}
@@ -1158,6 +1164,18 @@ func (s *Store) projectMarkets(ctx context.Context, match matches.Match, project
 		}
 	}
 	return nil
+}
+
+// hasInningsMarket reports whether the match has a provider innings-score
+// market for innings.
+func hasInningsMarket(marketsForMatch []markets.Market, innings int) bool {
+	for _, market := range marketsForMatch {
+		if market.Kind == markets.MarketKindInningsScore && market.Innings == innings &&
+			market.FormulaVersion == markets.FormulaVersionInningsScoreV1 {
+			return true
+		}
+	}
+	return false
 }
 
 func providerMarketPreviouslyOpened(marketsForMatch []markets.Market, innings int) bool {
@@ -1177,11 +1195,23 @@ func (s *Store) insertMarketSnapshots(ctx context.Context, match matches.Match, 
 }
 
 func (s *Store) enqueueSettlementJobs(ctx context.Context, match matches.Match, now time.Time) error {
+	var marketList []markets.Market
+	if s.markets != nil {
+		var err error
+		if marketList, err = s.markets.ListMarketsByMatchID(ctx, match.ID.Hex()); err != nil {
+			return fmt.Errorf("list provider markets: %w", err)
+		}
+	}
 	for _, innings := range match.InningsSummaries {
 		if !innings.SettlementReady || innings.FinalCandidate == nil {
 			continue
 		}
 		if innings.Innings == 2 && match.Status != matches.StatusCompleted && match.Status != matches.StatusAbandoned {
+			continue
+		}
+		// No market, nothing to settle: a job for it would fail forever
+		// looking for the market (see projectMarkets).
+		if s.markets != nil && !hasInningsMarket(marketList, innings.Innings) {
 			continue
 		}
 		id := fmt.Sprintf("%s:%d", match.ID.Hex(), innings.Innings)
