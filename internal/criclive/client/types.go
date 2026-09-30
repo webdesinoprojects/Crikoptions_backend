@@ -79,11 +79,15 @@ type Fixture struct {
 	VisitorTeamShort   string
 	LocalTeamImageID   int64
 	VisitorTeamImageID int64
-	Venue              string
-	Status             string
-	StatusDetail       string
-	State              string
-	Live               bool
+	// Team image URLs, for a feed whose image links cannot be rebuilt from an
+	// id. When set they take precedence over the image ids.
+	LocalTeamImageURL   string
+	VisitorTeamImageURL string
+	Venue               string
+	Status              string
+	StatusDetail        string
+	State               string
+	Live                bool
 	// LiveInnings is the per-innings summary /cricket/live reports for every
 	// match in one shared request. Carried on the fixture target so a poll
 	// during play needs only /cricket/overs for the ball-by-ball detail.
@@ -136,26 +140,29 @@ type LiveResponse struct {
 }
 
 type MatchItem struct {
-	MatchID       int64           `json:"match_id"`
-	SeriesID      int64           `json:"series_id"`
-	SeriesName    string          `json:"series_name"`
-	MatchDesc     string          `json:"match_desc"`
-	Title         string          `json:"title"`
-	Format        string          `json:"format"`
-	MatchType     string          `json:"match_type"`
-	Date          string          `json:"date"`
-	EndDate       string          `json:"end_date"`
-	Venue         string          `json:"venue"`
-	VenueTimezone string          `json:"venue_timezone"`
-	VenueID       int64           `json:"venue_id"`
-	StatusDetail  string          `json:"status_detail"`
-	ShortStatus   string          `json:"short_status"`
-	State         string          `json:"state"`
-	Slug          string          `json:"slug"`
-	FirstTeam     TeamItem        `json:"first_team"`
-	SecondTeam    TeamItem        `json:"second_team"`
-	Status        string          `json:"status"`
-	Raw           json.RawMessage `json:"-"`
+	MatchID       int64    `json:"match_id"`
+	SeriesID      int64    `json:"series_id"`
+	SeriesName    string   `json:"series_name"`
+	MatchDesc     string   `json:"match_desc"`
+	Title         string   `json:"title"`
+	Format        string   `json:"format"`
+	MatchType     string   `json:"match_type"`
+	Date          string   `json:"date"`
+	EndDate       string   `json:"end_date"`
+	Venue         string   `json:"venue"`
+	VenueTimezone string   `json:"venue_timezone"`
+	VenueID       int64    `json:"venue_id"`
+	StatusDetail  string   `json:"status_detail"`
+	ShortStatus   string   `json:"short_status"`
+	State         string   `json:"state"`
+	Slug          string   `json:"slug"`
+	FirstTeam     TeamItem `json:"first_team"`
+	SecondTeam    TeamItem `json:"second_team"`
+	Status        string   `json:"status"`
+	// StartTime is an exact start for a feed that knows one; it wins over the
+	// yearless Date.
+	StartTime time.Time       `json:"-"`
+	Raw       json.RawMessage `json:"-"`
 }
 
 func (m *MatchItem) UnmarshalJSON(data []byte) error {
@@ -174,6 +181,7 @@ type TeamItem struct {
 	Name     string        `json:"name"`
 	FullName string        `json:"full_name"`
 	ImageID  int64         `json:"image_id,omitempty"`
+	ImageURL string        `json:"-"`
 	Score    string        `json:"score"`
 	Innings  []InningsItem `json:"innings"`
 }
@@ -227,6 +235,9 @@ type ScheduleMatch struct {
 	City        string `json:"city"`
 	Country     string `json:"country"`
 	Timezone    string `json:"timezone"`
+	// Team image URLs, filled by a feed that publishes them.
+	Team1ImageURL string `json:"-"`
+	Team2ImageURL string `json:"-"`
 }
 
 // ---------------------------------------------------------- /cricket/commentary
@@ -270,6 +281,13 @@ type MiniScore struct {
 	MatchFormat    string         `json:"match_format"`
 	CustomStatus   string         `json:"custom_status"`
 	State          string         `json:"state"`
+	// ScheduledOvers is the per-innings length a feed reports for this match,
+	// when it differs from the format's standard (a rain-shortened game, or a
+	// league that plays "T20" at ten overs). Zero means "the format standard".
+	ScheduledOvers int `json:"-"`
+	// RevisedTarget marks a chase target the feed reports as different from
+	// first-innings runs + 1 (a rain rule). Target then carries it.
+	RevisedTarget bool `json:"-"`
 }
 
 type PhaseSummary struct {

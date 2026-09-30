@@ -1056,8 +1056,8 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 		}
 		localName := fixtureTeamName(fixture.LocalTeamName, fixture.LocalTeamID)
 		visitorName := fixtureTeamName(fixture.VisitorTeamName, fixture.VisitorTeamID)
-		localLogo := teamImageURL(fixture.LocalTeamImageID, fixture.LocalTeamShort)
-		visitorLogo := teamImageURL(fixture.VisitorTeamImageID, fixture.VisitorTeamShort)
+		localLogo := fixtureTeamLogo(fixture.LocalTeamImageURL, fixture.LocalTeamImageID, fixture.LocalTeamShort)
+		visitorLogo := fixtureTeamLogo(fixture.VisitorTeamImageURL, fixture.VisitorTeamImageID, fixture.VisitorTeamShort)
 		setOnInsert := bson.M{
 			"_id": primitive.NewObjectID(), "dataSource": ProviderName, "provider": ProviderName,
 			"providerFixtureId": fixture.ID, "providerLeagueId": fixture.SeriesID,
@@ -1087,6 +1087,14 @@ func (s *Store) PublishFixtureMatches(ctx context.Context, fixtures []client.Fix
 			"teamAId":      fmt.Sprintf("%s:%d", ProviderName, fixture.LocalTeamID),
 			"teamBId":      fmt.Sprintf("%s:%d", ProviderName, fixture.VisitorTeamID),
 			"hidden":       false, "updatedAt": now.UTC(),
+		}
+		// A source that carries no image (the schedule, on some feeds) must not
+		// blank a logo another source already published.
+		if localLogo == "" {
+			delete(setFields, "teamALogo")
+		}
+		if visitorLogo == "" {
+			delete(setFields, "teamBLogo")
 		}
 		// Mongo rejects an update that touches the same path in both $set and
 		// $setOnInsert; $set also applies on an upsert insert, so the inserted
@@ -1590,6 +1598,15 @@ func teamImageURL(imageID int64, slug string) string {
 		clean = "team"
 	}
 	return fmt.Sprintf("%s/player-image/%d/%s", strings.TrimRight(client.DefaultBaseURL, "/"), imageID, clean)
+}
+
+// fixtureTeamLogo prefers an image URL the feed published over one rebuilt
+// from a CricLive image id.
+func fixtureTeamLogo(imageURL string, imageID int64, slug string) string {
+	if trimmed := strings.TrimSpace(imageURL); trimmed != "" {
+		return trimmed
+	}
+	return teamImageURL(imageID, slug)
 }
 
 func isNoDocuments(err error) bool { return errors.Is(err, mongo.ErrNoDocuments) }

@@ -58,6 +58,23 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("criclive request %s returned HTTP %d: %s", e.Endpoint, e.StatusCode, e.Message)
 }
 
+// CodePlanRestricted is CricketLineApi's HTTP 403 code for a request the plan
+// does not cover (an endpoint, or a match outside the plan's formats). It
+// concerns one request, not the key, so it must not suspend the whole provider
+// the way a rejected credential does.
+const CodePlanRestricted = "plan_endpoint_restricted"
+
+// ErrForeignFixture is returned by a feed adapter asked for a fixture id that
+// belongs to a different feed (left over from before a provider switch). It
+// will fail the same way every time.
+var ErrForeignFixture = errors.New("fixture does not belong to the configured feed")
+
+// IsPlanRestricted reports an error for one request the plan does not cover.
+func IsPlanRestricted(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.Code == CodePlanRestricted
+}
+
 // RateLimitError is returned for HTTP 429 and carries enough metadata for a
 // scheduler to defer work without parsing an error string.
 type RateLimitError struct {
@@ -258,6 +275,11 @@ func providerError(body []byte) (message string, code string) {
 		}
 	}
 	return message, code
+}
+
+// ParseRateLimit reads the rate-limit headers any feed adapter may receive.
+func ParseRateLimit(header http.Header, now time.Time) RateLimit {
+	return parseRateLimit(header, now)
 }
 
 func parseRateLimit(header http.Header, now time.Time) RateLimit {

@@ -65,29 +65,35 @@ func ParseEpochMillis(value string) time.Time {
 // between CricLive endpoints, so downstream code must match on team ID rather
 // than on local/visitor position.
 func FixtureFromMatchItem(item MatchItem, now time.Time) Fixture {
+	start := item.StartTime.UTC()
+	if item.StartTime.IsZero() {
+		start = ParseLiveDate(item.Date, now)
+	}
 	return Fixture{
-		ID:                 item.MatchID,
-		SeriesID:           item.SeriesID,
-		SeriesName:         item.SeriesName,
-		MatchDesc:          item.MatchDesc,
-		Format:             item.Format,
-		MatchType:          item.MatchType,
-		StartingAt:         ParseLiveDate(item.Date, now),
-		LocalTeamID:        item.FirstTeam.ID,
-		VisitorTeamID:      item.SecondTeam.ID,
-		LocalTeamName:      teamDisplayName(item.FirstTeam),
-		VisitorTeamName:    teamDisplayName(item.SecondTeam),
-		LocalTeamShort:     strings.TrimSpace(item.FirstTeam.Name),
-		VisitorTeamShort:   strings.TrimSpace(item.SecondTeam.Name),
-		LocalTeamImageID:   item.FirstTeam.ImageID,
-		VisitorTeamImageID: item.SecondTeam.ImageID,
-		Venue:              item.Venue,
-		Status:             strings.TrimSpace(item.State),
-		StatusDetail:       strings.TrimSpace(item.StatusDetail),
-		State:              strings.TrimSpace(item.State),
-		Live:               IsLiveState(item.State),
-		LiveInnings:        liveInningsFromTeams(item.FirstTeam, item.SecondTeam),
-		Raw:                item.Raw,
+		ID:                  item.MatchID,
+		SeriesID:            item.SeriesID,
+		SeriesName:          item.SeriesName,
+		MatchDesc:           item.MatchDesc,
+		Format:              item.Format,
+		MatchType:           item.MatchType,
+		StartingAt:          start,
+		LocalTeamID:         item.FirstTeam.ID,
+		VisitorTeamID:       item.SecondTeam.ID,
+		LocalTeamName:       teamDisplayName(item.FirstTeam),
+		VisitorTeamName:     teamDisplayName(item.SecondTeam),
+		LocalTeamShort:      strings.TrimSpace(item.FirstTeam.Name),
+		VisitorTeamShort:    strings.TrimSpace(item.SecondTeam.Name),
+		LocalTeamImageID:    item.FirstTeam.ImageID,
+		VisitorTeamImageID:  item.SecondTeam.ImageID,
+		LocalTeamImageURL:   strings.TrimSpace(item.FirstTeam.ImageURL),
+		VisitorTeamImageURL: strings.TrimSpace(item.SecondTeam.ImageURL),
+		Venue:               item.Venue,
+		Status:              strings.TrimSpace(item.State),
+		StatusDetail:        strings.TrimSpace(item.StatusDetail),
+		State:               strings.TrimSpace(item.State),
+		Live:                IsLiveState(item.State),
+		LiveInnings:         liveInningsFromTeams(item.FirstTeam, item.SecondTeam),
+		Raw:                 item.Raw,
 	}
 }
 
@@ -129,22 +135,24 @@ func FixtureFromScheduleMatch(match ScheduleMatch, series ScheduleSeries) Fixtur
 		}
 	}
 	return Fixture{
-		ID:               match.MatchID,
-		SeriesID:         series.SeriesID,
-		SeriesName:       strings.TrimSpace(series.SeriesName),
-		MatchDesc:        strings.TrimSpace(match.MatchDesc),
-		Format:           strings.TrimSpace(match.MatchFormat),
-		MatchType:        strings.TrimSpace(series.SeriesCategory),
-		StartingAt:       ParseEpochMillis(match.StartDate),
-		LocalTeamID:      match.Team1ID,
-		VisitorTeamID:    match.Team2ID,
-		LocalTeamName:    strings.TrimSpace(match.Team1),
-		VisitorTeamName:  strings.TrimSpace(match.Team2),
-		LocalTeamShort:   strings.TrimSpace(match.Team1Short),
-		VisitorTeamShort: strings.TrimSpace(match.Team2Short),
-		Venue:            venue,
-		Status:           StatePreview,
-		State:            StatePreview,
+		ID:                  match.MatchID,
+		SeriesID:            series.SeriesID,
+		SeriesName:          strings.TrimSpace(series.SeriesName),
+		MatchDesc:           strings.TrimSpace(match.MatchDesc),
+		Format:              strings.TrimSpace(match.MatchFormat),
+		MatchType:           strings.TrimSpace(series.SeriesCategory),
+		StartingAt:          ParseEpochMillis(match.StartDate),
+		LocalTeamID:         match.Team1ID,
+		VisitorTeamID:       match.Team2ID,
+		LocalTeamName:       strings.TrimSpace(match.Team1),
+		VisitorTeamName:     strings.TrimSpace(match.Team2),
+		LocalTeamShort:      strings.TrimSpace(match.Team1Short),
+		VisitorTeamShort:    strings.TrimSpace(match.Team2Short),
+		LocalTeamImageURL:   strings.TrimSpace(match.Team1ImageURL),
+		VisitorTeamImageURL: strings.TrimSpace(match.Team2ImageURL),
+		Venue:               venue,
+		Status:              StatePreview,
+		State:               StatePreview,
 	}
 }
 

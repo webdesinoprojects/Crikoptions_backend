@@ -35,10 +35,14 @@ services:
                                # Gates CORS *and* the WebSocket CheckOrigin.
                                # No trailing slashes.
 
-      # --- CricLive live feed (runs in-process inside cmd/api) ---
+      # --- Live feed: CricketLineApi (runs in-process inside cmd/api) ---
+      # The API will not start without CRICKETLINE_API_KEY: set it in the
+      # Render dashboard before this deploys.
+      - key: LIVE_FEED_PROVIDER
+        value: cricketline
       - key: CRICLIVE_MODE
         value: live
-      - key: CRICLIVE_API_TOKEN
-        sync: false            # bearer token, set in the Render dashboard
-      - key: CRICLIVE_BASE_URL
-        value: https://cricketliveapi.com/api/v1
+      - key: CRICKETLINE_API_KEY
+        sync: false            # X-API-Key, set in the Render dashboard
+      - key: CRICKETLINE_BASE_URL
+        value: https://apis.cricketlineapi.com

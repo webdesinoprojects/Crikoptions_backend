@@ -7,6 +7,9 @@ import (
 )
 
 var configEnvironment = []string{
+	"LIVE_FEED_PROVIDER",
+	"CRICKETLINE_API_KEY",
+	"CRICKETLINE_BASE_URL",
 	"CRICLIVE_MODE",
 	"CRICLIVE_API_TOKEN",
 	"CRICLIVE_BASE_URL",
@@ -50,6 +53,9 @@ func TestLoadConfigFromEnvDefaultsToOff(t *testing.T) {
 	if cfg.Mode != ModeOff {
 		t.Fatalf("Mode = %q, want %q", cfg.Mode, ModeOff)
 	}
+	if cfg.Feed != FeedCricketLine || cfg.CricketLineBaseURL != DefaultCricketLineBaseURL {
+		t.Fatalf("Feed = %q base %q, want CricketLine defaults", cfg.Feed, cfg.CricketLineBaseURL)
+	}
 	if cfg.BaseURL != DefaultBaseURL {
 		t.Fatalf("BaseURL = %q, want %q", cfg.BaseURL, DefaultBaseURL)
 	}
@@ -70,6 +76,7 @@ func TestLoadConfigFromEnvDefaultsToOff(t *testing.T) {
 
 func TestLoadConfigFromEnvOverrides(t *testing.T) {
 	clearConfigEnvironment(t)
+	t.Setenv("LIVE_FEED_PROVIDER", " CricLive ")
 	t.Setenv("CRICLIVE_MODE", " SHADOW ")
 	t.Setenv("CRICLIVE_API_TOKEN", " token-value ")
 	t.Setenv("CRICLIVE_BASE_URL", "https://example.test/cricket/v2")
@@ -107,11 +114,50 @@ func TestLoadConfigFromEnvOverrides(t *testing.T) {
 
 func TestLoadConfigFromEnvRequiresTokenWhenEnabled(t *testing.T) {
 	clearConfigEnvironment(t)
+	t.Setenv("LIVE_FEED_PROVIDER", "criclive")
 	t.Setenv("CRICLIVE_MODE", "live")
 
 	_, err := LoadConfigFromEnv()
 	if err == nil || !strings.Contains(err.Error(), "CRICLIVE_API_TOKEN") {
 		t.Fatalf("error = %v, want missing token error", err)
+	}
+}
+
+func TestLoadConfigFromEnvPicksFeedFromCredentials(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("CRICLIVE_MODE", "live")
+	t.Setenv("CRICLIVE_API_TOKEN", "criclive-token")
+	cfg, err := LoadConfigFromEnv()
+	if err != nil || cfg.Feed != FeedCricLive {
+		t.Fatalf("feed = %q, %v; a CricLive-only deployment must stay on CricLive", cfg.Feed, err)
+	}
+	t.Setenv("CRICKETLINE_API_KEY", "crx_key")
+	cfg, err = LoadConfigFromEnv()
+	if err != nil || cfg.Feed != FeedCricketLine {
+		t.Fatalf("feed = %q, %v; a CricketLine key selects CricketLine", cfg.Feed, err)
+	}
+}
+
+func TestLoadConfigFromEnvRequiresCricketLineKeyWhenEnabled(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("LIVE_FEED_PROVIDER", "cricketline")
+	t.Setenv("CRICLIVE_MODE", "live")
+	// A CricLive token does not satisfy the CricketLine feed.
+	t.Setenv("CRICLIVE_API_TOKEN", "criclive-token")
+
+	_, err := LoadConfigFromEnv()
+	if err == nil || !strings.Contains(err.Error(), "CRICKETLINE_API_KEY") {
+		t.Fatalf("error = %v, want missing CricketLine key error", err)
+	}
+
+	t.Setenv("CRICKETLINE_API_KEY", " crx_key ")
+	t.Setenv("CRICKETLINE_BASE_URL", "https://example.test")
+	cfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("LoadConfigFromEnv() error = %v", err)
+	}
+	if cfg.Feed != FeedCricketLine || cfg.CricketLineAPIKey != "crx_key" || cfg.CricketLineBaseURL != "https://example.test" {
+		t.Fatalf("unexpected CricketLine config: %+v", cfg)
 	}
 }
 
@@ -128,6 +174,9 @@ func TestLoadConfigFromEnvRejectsInvalidSettings(t *testing.T) {
 		{name: "concurrency", env: "CRICLIVE_MAX_CONCURRENCY", value: "0", want: "CRICLIVE_MAX_CONCURRENCY"},
 		{name: "base url query", env: "CRICLIVE_BASE_URL", value: "https://example.test/v2?api_token=bad", want: "CRICLIVE_BASE_URL"},
 		{name: "insecure remote URL", env: "CRICLIVE_BASE_URL", value: "http://example.test/v2", want: "https"},
+		{name: "feed", env: "LIVE_FEED_PROVIDER", value: "sportmonks", want: "LIVE_FEED_PROVIDER"},
+		{name: "innings hold beyond match hold", env: "CRICLIVE_INNINGS_FINALIZATION_HOLD", value: "5m", want: "CRICLIVE_INNINGS_FINALIZATION_HOLD"},
+		{name: "cricketline base url query", env: "CRICKETLINE_BASE_URL", value: "https://example.test?api_key=bad", want: "CRICKETLINE_BASE_URL"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

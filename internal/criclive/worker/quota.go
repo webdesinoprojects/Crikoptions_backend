@@ -137,10 +137,15 @@ func providerOutage(err error, now time.Time) (until time.Time, reason string, o
 	}
 	var httpErr *client.HTTPError
 	if errors.As(err, &httpErr) {
+		// A plan that does not cover one match or endpoint says nothing about
+		// the key; the fixture is parked instead (failureBackoff).
+		if httpErr.Code == client.CodePlanRestricted {
+			return time.Time{}, "", false
+		}
 		switch httpErr.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return now.Add(credentialRejectedBackoff),
-				fmt.Sprintf("credentials rejected (HTTP %d) — check CRICLIVE_API_TOKEN", httpErr.StatusCode), true
+				fmt.Sprintf("credentials rejected (HTTP %d) — check the feed's API key (CRICKETLINE_API_KEY or CRICLIVE_API_TOKEN)", httpErr.StatusCode), true
 		}
 	}
 	return time.Time{}, "", false

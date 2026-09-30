@@ -14,6 +14,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/markets"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/feed"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/worker"
 )
@@ -58,10 +59,11 @@ func main() {
 		log.Fatalf("feed indexes: %v", err)
 	}
 
-	provider, err := client.New(feedConfig, &http.Client{Timeout: feedConfig.HTTPTimeout})
+	provider, ownIDs, err := feed.NewProvider(feedConfig, &http.Client{Timeout: feedConfig.HTTPTimeout})
 	if err != nil {
-		log.Fatalf("CricLive client: %v", err)
+		log.Fatalf("%s feed client: %v", feedConfig.Feed, err)
 	}
+	feed.Prepare(ctx, feedConfig, provider, ownIDs, feedStore, instanceID(), log.Default())
 	feedWorker, err := worker.New(feedConfig, provider, feedStore, instanceID(), log.Default())
 	if err != nil {
 		log.Fatalf("CricLive worker: %v", err)

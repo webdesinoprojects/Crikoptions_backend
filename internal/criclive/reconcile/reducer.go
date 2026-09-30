@@ -168,6 +168,12 @@ func ReduceSnapshot(snapshot client.Snapshot) (Projection, error) {
 	if err != nil {
 		return Projection{}, err
 	}
+	formatInfo = withScheduledOvers(formatInfo, mini.ScheduledOvers)
+	// A revised chase target breaks the same pricing assumption a shortened
+	// innings does, so it is held the same way.
+	if mini.RevisedTarget {
+		formatInfo.Reduced = true
+	}
 	scheduledBalls := formatInfo.ScheduledBalls
 
 	state := firstNonEmpty(mini.State, fixture.State, header.State)
@@ -616,7 +622,8 @@ func normalizeFormat(raw string) (string, int, error) {
 			return "", 0, fmt.Errorf("%w: %s", ErrUnsupportedFormat, raw)
 		}
 		return "T20", 120, nil
-	case "odi", "odm", "lista":
+	case "odi", "odm", "lista", "oneday":
+		// "One Day" is CricketLineApi's label for domestic List A.
 		return "ODI", 300, nil
 	default:
 		// TEST, first class, and the hundred are deliberately unsupported:
@@ -643,6 +650,20 @@ func ClassifyFormatInfo(raw string) (FormatInfo, error) {
 		Format: format, ScheduledBalls: scheduledBalls,
 		ScheduledOvers: standardOvers, StandardOvers: standardOvers,
 	}, nil
+}
+
+// withScheduledOvers applies a feed-reported innings length shorter than the
+// format standard. The match keeps a deterministic ball count, so it is admitted
+// read-only (Reduced) rather than rejected; pricing it on the standard length
+// would value a ten-over innings as a twenty-over one.
+func withScheduledOvers(info FormatInfo, overs int) FormatInfo {
+	if overs <= 0 || overs >= info.StandardOvers {
+		return info
+	}
+	info.ScheduledOvers = overs
+	info.ScheduledBalls = overs * 6
+	info.Reduced = true
+	return info
 }
 
 func inningsComplete(localStatus string, number, current, legalBalls, scheduledBalls, wickets int) bool {
@@ -694,6 +715,12 @@ func projectionHash(projection Projection) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// inningsProjectionHash fingerprints an innings for the settlement hold. A
+// completed innings is fingerprinted by its aggregates alone: the feeds expose
+// only a window of recent overs, so once the next innings starts its deliveries
+// scroll out of view. Hashing them made a settled innings look "corrected" the
+// moment the chase began, which refused every later poll of the match. The
+// settled figure is the aggregate, so the aggregate is what must hold still.
 func inningsProjectionHash(innings Innings, deliveries []Delivery) string {
 	type hashInput struct {
 		Innings    Innings
@@ -701,6 +728,11 @@ func inningsProjectionHash(innings Innings, deliveries []Delivery) string {
 	}
 	clone := innings
 	clone.SnapshotHash = ""
+	if innings.Complete {
+		encoded, _ := json.Marshal(hashInput{Innings: clone})
+		sum := sha256.Sum256(encoded)
+		return hex.EncodeToString(sum[:])
+	}
 	relevant := make([]Delivery, 0)
 	for _, delivery := range deliveries {
 		if delivery.Innings == innings.Number {

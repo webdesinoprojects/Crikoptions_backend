@@ -13,6 +13,18 @@ import (
 
 const DefaultBaseURL = "https://cricketliveapi.com/api/v1"
 
+// DefaultCricketLineBaseURL is the CricketLineApi host. Its paths start at /api.
+const DefaultCricketLineBaseURL = "https://apis.cricketlineapi.com"
+
+// Feed names the upstream a feed pipeline reads. The pipeline (worker, reducer,
+// store) is shared; only the provider adapter differs.
+type Feed string
+
+const (
+	FeedCricketLine Feed = "cricketline"
+	FeedCricLive    Feed = "criclive"
+)
+
 type Mode string
 
 const (
@@ -25,10 +37,16 @@ const (
 // shared by feedworker components. Durations are deliberately parsed here so
 // command entrypoints do not each grow their own subtly different env parser.
 type Config struct {
-	Mode        Mode
-	APIToken    string
-	BaseURL     string
-	HTTPTimeout time.Duration
+	Mode Mode
+	// Feed selects the provider adapter. APIToken/BaseURL belong to CricLive,
+	// CricketLineAPIKey/CricketLineBaseURL to CricketLineApi; every other
+	// setting tunes the shared pipeline whichever feed is selected.
+	Feed               Feed
+	APIToken           string
+	BaseURL            string
+	CricketLineAPIKey  string
+	CricketLineBaseURL string
+	HTTPTimeout        time.Duration
 
 	QuotaReservePercent        int
 	HourlyRequestLimit         int
@@ -58,7 +76,9 @@ type Config struct {
 func LoadConfigFromEnv() (Config, error) {
 	cfg := Config{
 		Mode:                ModeOff,
+		Feed:                FeedCricketLine,
 		BaseURL:             DefaultBaseURL,
+		CricketLineBaseURL:  DefaultCricketLineBaseURL,
 		HTTPTimeout:         15 * time.Second,
 		QuotaReservePercent: 20,
 		// CricLive meters a fixed number of calls per calendar day, so the
@@ -96,6 +116,18 @@ func LoadConfigFromEnv() (Config, error) {
 	cfg.APIToken = strings.TrimSpace(os.Getenv("CRICLIVE_API_TOKEN"))
 	if value := strings.TrimSpace(os.Getenv("CRICLIVE_BASE_URL")); value != "" {
 		cfg.BaseURL = value
+	}
+	cfg.CricketLineAPIKey = strings.TrimSpace(os.Getenv("CRICKETLINE_API_KEY"))
+	if value := strings.TrimSpace(os.Getenv("CRICKETLINE_BASE_URL")); value != "" {
+		cfg.CricketLineBaseURL = value
+	}
+	// An explicit LIVE_FEED_PROVIDER wins. Without one the feed follows the
+	// credential that is configured, so a deployment that only ever had a
+	// CricLive token keeps booting on CricLive until a CricketLine key is added.
+	if value := strings.ToLower(strings.TrimSpace(os.Getenv("LIVE_FEED_PROVIDER"))); value != "" {
+		cfg.Feed = Feed(value)
+	} else if cfg.CricketLineAPIKey == "" && cfg.APIToken != "" {
+		cfg.Feed = FeedCricLive
 	}
 
 	durations := []struct {
@@ -156,21 +188,23 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("CRICLIVE_MODE must be one of off, shadow, or live")
 	}
-	if c.Mode != ModeOff && strings.TrimSpace(c.APIToken) == "" {
-		return errors.New("CRICLIVE_API_TOKEN is required when CRICLIVE_MODE is shadow or live")
+	switch c.Feed {
+	case FeedCricketLine:
+		if c.Mode != ModeOff && strings.TrimSpace(c.CricketLineAPIKey) == "" {
+			return errors.New("CRICKETLINE_API_KEY is required when LIVE_FEED_PROVIDER is cricketline and CRICLIVE_MODE is shadow or live")
+		}
+		if err := validateProviderBaseURL("CRICKETLINE_BASE_URL", c.CricketLineBaseURL); err != nil {
+			return err
+		}
+	case FeedCricLive:
+		if c.Mode != ModeOff && strings.TrimSpace(c.APIToken) == "" {
+			return errors.New("CRICLIVE_API_TOKEN is required when CRICLIVE_MODE is shadow or live")
+		}
+	default:
+		return fmt.Errorf("LIVE_FEED_PROVIDER must be one of %s or %s", FeedCricketLine, FeedCricLive)
 	}
-	if strings.TrimSpace(c.BaseURL) == "" {
-		return errors.New("CRICLIVE_BASE_URL must not be empty")
-	}
-	u, err := url.Parse(c.BaseURL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return errors.New("CRICLIVE_BASE_URL must be an absolute http or https URL")
-	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("CRICLIVE_BASE_URL must not contain credentials, query parameters, or a fragment")
-	}
-	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
-		return errors.New("CRICLIVE_BASE_URL must use https outside loopback development")
+	if err := validateProviderBaseURL("CRICLIVE_BASE_URL", c.BaseURL); err != nil {
+		return err
 	}
 	if c.HTTPTimeout <= 0 {
 		return errors.New("CRICLIVE_HTTP_TIMEOUT must be positive")
@@ -210,6 +244,29 @@ func (c Config) Validate() error {
 	}
 	if c.MaxConcurrency <= 0 {
 		return errors.New("CRICLIVE_MAX_CONCURRENCY must be positive")
+	}
+	// The last innings must finish its settlement hold before the match does:
+	// once the match is terminal its fixture is no longer polled, and an
+	// innings still inside its hold would never settle.
+	if c.InningsFinalizationHold > c.MatchFinalizationHold {
+		return errors.New("CRICLIVE_INNINGS_FINALIZATION_HOLD must not exceed CRICLIVE_MATCH_FINALIZATION_HOLD")
+	}
+	return nil
+}
+
+func validateProviderBaseURL(name, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s must not be empty", name)
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("%s must be an absolute http or https URL", name)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s must not contain credentials, query parameters, or a fragment", name)
+	}
+	if u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("%s must use https outside loopback development", name)
 	}
 	return nil
 }

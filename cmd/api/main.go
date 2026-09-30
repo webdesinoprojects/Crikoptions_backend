@@ -32,6 +32,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/routes"
 	cricliveadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/admin"
 	cricliveclient "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
+	criclivefeed "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/feed"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/settlement"
 	criclivestore "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/watchdog"
@@ -194,16 +195,17 @@ func main() {
 		}
 		go watchdog.Run(providerCtx, feedStore, 5*time.Second)
 		go watchdog.RunReaper(providerCtx, feedStore, 5*time.Minute, deadFeedAbandonAfter, matches.DeadLiveMatchAfter)
-		provider, providerErr := cricliveclient.New(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
+		provider, ownIDs, providerErr := criclivefeed.NewProvider(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
 		if providerErr != nil {
-			log.Fatalf("CricLive client: %v", providerErr)
+			log.Fatalf("%s feed client: %v", providerConfig.Feed, providerErr)
 		}
+		criclivefeed.Prepare(providerCtx, providerConfig, provider, ownIDs, feedStore, processInstanceID(), log.Default())
 		feedWorker, workerErr := cricliveworker.New(providerConfig, provider, feedStore, processInstanceID(), log.Default())
 		if workerErr != nil {
 			log.Fatalf("CricLive feed worker: %v", workerErr)
 		}
 		go func() {
-			log.Printf("CricLive feed worker started mode=%s fastPolling=%t", providerConfig.Mode, providerConfig.FastPollingEnabled)
+			log.Printf("feed worker started feed=%s mode=%s fastPolling=%t", providerConfig.Feed, providerConfig.Mode, providerConfig.FastPollingEnabled)
 			if runErr := feedWorker.Run(providerCtx); runErr != nil && providerCtx.Err() == nil {
 				log.Printf("CricLive feed worker stopped: %v", runErr)
 			}

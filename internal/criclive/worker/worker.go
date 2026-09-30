@@ -64,6 +64,15 @@ type Provider interface {
 	Overs(context.Context, int64) (client.OversResponse, client.RateLimit, error)
 }
 
+// SnapshotProvider is implemented by a feed that reads everything a poll needs
+// — score, batters, bowler and the recent overs — in one request, so a poll
+// does not have to choose between the commentary and overs endpoints.
+// SnapshotEndpoint is the quota label that request is accounted under.
+type SnapshotProvider interface {
+	MatchSnapshot(context.Context, client.Fixture) (client.Snapshot, client.RateLimit, error)
+	SnapshotEndpoint() string
+}
+
 type Storage interface {
 	UpsertSeries(context.Context, []client.Series, time.Time) error
 	EnabledLeagueIDs(context.Context) ([]int64, error)
@@ -172,8 +181,9 @@ func (w *Worker) Run(ctx context.Context) error {
 // day, and at the configured 60s a wholly idle day still cost 1,440 of a 5,000
 // request allowance — 29% of it — to learn nothing.
 const (
-	idleDiscoveryInterval = 10 * time.Minute
-	discoveryWarmUpWindow = 30 * time.Minute
+	idleDiscoveryInterval  = 10 * time.Minute
+	discoveryWarmUpWindow  = 30 * time.Minute
+	discoveryOverdueWindow = time.Hour
 )
 
 // startAdaptiveDiscovery polls /cricket/live quickly while there is cricket to
@@ -231,7 +241,10 @@ func (w *Worker) setDiscoveryActive(fixtures []client.Fixture, now time.Time) {
 			break
 		}
 		if reconcile.IsNotStartedStatus(fixture.State) && !fixture.StartingAt.IsZero() {
-			if wait := fixture.StartingAt.Sub(now); wait > 0 && wait <= discoveryWarmUpWindow {
+			// A fixture just past its start that has not gone live is delayed
+			// (a late toss, rain before the first ball): it is about to start,
+			// not finished, so it keeps discovery on the fast cadence too.
+			if wait := fixture.StartingAt.Sub(now); wait > -discoveryOverdueWindow && wait <= discoveryWarmUpWindow {
 				active = true
 				break
 			}
@@ -311,11 +324,11 @@ func (w *Worker) syncFixtures(ctx context.Context) error {
 	if err != nil || !claimed {
 		return err
 	}
-	if !w.takeProviderQuota(ctx, client.EndpointSchedule) {
+	if !w.takeProviderQuota(ctx, w.scheduleEndpoint()) {
 		return ErrQuotaReserved
 	}
 	response, rateLimit, err := w.provider.Schedule(ctx)
-	w.quota.observe(client.EndpointSchedule, w.now().UTC(), rateLimit)
+	w.quota.observe(w.scheduleEndpoint(), w.now().UTC(), rateLimit)
 	if err != nil {
 		w.tripBreakerIfOutage(err)
 		return err
@@ -380,11 +393,11 @@ func (w *Worker) discoverLive(ctx context.Context) error {
 	if err != nil || !claimed {
 		return err
 	}
-	if !w.takeProviderQuota(ctx, client.EndpointLive) {
+	if !w.takeProviderQuota(ctx, w.liveEndpoint()) {
 		return ErrQuotaReserved
 	}
 	response, rateLimit, err := w.provider.LiveScores(ctx)
-	w.quota.observe(client.EndpointLive, w.now().UTC(), rateLimit)
+	w.quota.observe(w.liveEndpoint(), w.now().UTC(), rateLimit)
 	if err != nil {
 		w.tripBreakerIfOutage(err)
 		return err
@@ -453,9 +466,14 @@ func (w *Worker) discoverLive(ctx context.Context) error {
 	// ActiveFreezeTimeout of absence it drops to a slow probe instead of
 	// the live cadence. This is the guard the 19 Sep zombies slipped past:
 	// their status was only ever refreshed by fixtures the feed still listed.
+	// Only a listing in play (or finished) vouches for a live target. A feed
+	// may also list fixtures about to start; a live match that dropped off the
+	// feed must not stay armed because it is also near its start time.
 	seen := make([]int64, 0, len(fixtures))
 	for _, fixture := range fixtures {
-		seen = append(seen, fixture.ID)
+		if client.IsLiveState(fixture.State) || reconcile.IsTerminalProviderStatus(fixture.State) {
+			seen = append(seen, fixture.ID)
+		}
 	}
 	if demoted, err := w.store.MarkLiveTargetsMissing(ctx, seen, now, w.cfg.ActiveFreezeTimeout); err != nil {
 		w.logger.Printf("criclive mark live targets missing: %v", err)
@@ -623,7 +641,7 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	activeInterval = formatPollInterval(target.Format, activeInterval, w.cfg)
 	// A poll costs one request for the miniscore; the ball-by-ball read is
 	// reserved separately, and only when play is actually under way.
-	if !w.takeProviderQuota(ctx, pollEndpointFor(target)) {
+	if !w.takeProviderQuota(ctx, w.pollEndpoint(target)) {
 		if w.cfg.Mode == client.ModeLive {
 			if err := w.store.ResetFinalizationHolds(ctx, target.ID, w.owner, token, now); err != nil {
 				if errors.Is(err, store.ErrFixtureLeaseLost) {
@@ -844,6 +862,15 @@ func budgetPacedInterval(base time.Duration, used, usable int, cfg client.Config
 // read confirms the fixture's state instead. Polling both endpoints on every
 // tick doubled the cost of a live match for three fields nobody traded on.
 func (w *Worker) fetchSnapshot(ctx context.Context, target store.FixtureTarget) (client.Snapshot, []byte, error) {
+	if reader, ok := w.provider.(SnapshotProvider); ok {
+		snapshot, rateLimit, err := reader.MatchSnapshot(ctx, fixtureFromTarget(target))
+		w.quota.observe(reader.SnapshotEndpoint(), w.now().UTC(), rateLimit)
+		if err != nil {
+			return client.Snapshot{}, nil, err
+		}
+		snapshot.MatchID = target.ID
+		return snapshot, snapshot.Raw, nil
+	}
 	snapshot := client.Snapshot{MatchID: target.ID, Fixture: fixtureFromTarget(target)}
 	var payload struct {
 		Commentary json.RawMessage `json:"commentary,omitempty"`
@@ -872,6 +899,36 @@ func (w *Worker) fetchSnapshot(ctx context.Context, target store.FixtureTarget) 
 	}
 	snapshot.Raw = raw
 	return snapshot, raw, nil
+}
+
+// endpointLabeler is implemented by a feed whose discovery and schedule reads
+// are accounted under its own route names rather than CricLive's.
+type endpointLabeler interface {
+	EndpointLabels() (live, schedule string)
+}
+
+func (w *Worker) liveEndpoint() string {
+	if labeler, ok := w.provider.(endpointLabeler); ok {
+		live, _ := labeler.EndpointLabels()
+		return live
+	}
+	return client.EndpointLive
+}
+
+func (w *Worker) scheduleEndpoint() string {
+	if labeler, ok := w.provider.(endpointLabeler); ok {
+		_, schedule := labeler.EndpointLabels()
+		return schedule
+	}
+	return client.EndpointSchedule
+}
+
+// pollEndpoint is the quota label of the one request a poll will spend.
+func (w *Worker) pollEndpoint(target store.FixtureTarget) string {
+	if reader, ok := w.provider.(SnapshotProvider); ok {
+		return reader.SnapshotEndpoint()
+	}
+	return pollEndpointFor(target)
 }
 
 // pollEndpointFor picks the one endpoint a poll of this fixture will spend.
@@ -1083,7 +1140,8 @@ func (w *Worker) failureBackoff(target store.FixtureTarget, cause error) time.Du
 	// match or the provider changes its mind, so retrying every few minutes
 	// only spends requests. Park it and let the log say why.
 	if errors.Is(cause, store.ErrFixtureIdentity) || errors.Is(cause, store.ErrMidMatchPromotion) ||
-		errors.Is(cause, store.ErrSettledCorrection) || errors.Is(cause, reconcile.ErrUnsupportedFormat) {
+		errors.Is(cause, store.ErrSettledCorrection) || errors.Is(cause, reconcile.ErrUnsupportedFormat) ||
+		errors.Is(cause, client.ErrForeignFixture) || client.IsPlanRestricted(cause) {
 		return deterministicFailureBackoff
 	}
 	shift := min(target.ConsecutiveFailures, 5)
