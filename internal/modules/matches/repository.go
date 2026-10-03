@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -15,6 +16,10 @@ import (
 
 type Repository interface {
 	GetAll(ctx context.Context) []Match
+	// ListActive returns the matches the home, upcoming and fallback views can
+	// show: visible, not finished, and not an upcoming fixture long past its
+	// start. Callers own the returned slice and may modify its elements.
+	ListActive(ctx context.Context) ([]Match, error)
 	GetByID(ctx context.Context, id primitive.ObjectID) (*Match, error)
 	GetByIDs(ctx context.Context, ids []primitive.ObjectID) (map[primitive.ObjectID]Match, error)
 	Create(ctx context.Context, match Match) (*Match, error)
@@ -228,6 +233,25 @@ func (r *MemoryRepository) EnsureIndexes(ctx context.Context) error {
 	return nil
 }
 
+func (r *MemoryRepository) ListActive(_ context.Context) ([]Match, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	now := time.Now().UTC()
+	out := make([]Match, 0, len(r.matches))
+	for i := range r.matches {
+		if activeListing(&r.matches[i], now) {
+			out = append(out, r.matches[i])
+		}
+	}
+	return out, nil
+}
+
+// activeListing is ListActive's filter for a single match.
+func activeListing(m *Match, now time.Time) bool {
+	return !m.Hidden && !isTerminalStatus(m.Status) && !staleUpcoming(m, now)
+}
+
 func (r *MemoryRepository) CountLiveProviderMatches(_ context.Context) (int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -269,6 +293,103 @@ func (r *MemoryRepository) SetHidden(_ context.Context, hidden bool, ids ...prim
 
 type MongoRepository struct {
 	col *mongo.Collection
+
+	// ListActive's shared result. The home and upcoming lists are polled by
+	// every open client every few seconds, and the collection is read at the
+	// speed of the cluster's throughput cap, so one read is shared by all
+	// callers for activeMatchesTTL instead of one read per request.
+	activeMu sync.Mutex
+	active   []Match
+	activeAt time.Time
+}
+
+const (
+	// activeMatchesTTL is how long one read of the active matches is shared.
+	activeMatchesTTL = 3 * time.Second
+	// activeMatchesStaleServe is how long the last good read keeps being served
+	// while fresh reads fail, so a slow cluster thins the lists' freshness
+	// rather than emptying them.
+	activeMatchesStaleServe = time.Minute
+	// activeMatchesTimeout bounds the shared read. It runs detached from the
+	// request that triggered it, since every waiting caller depends on it.
+	activeMatchesTimeout = 15 * time.Second
+)
+
+// Status spellings ListActive leaves out. Matching is exact, so these list the
+// spellings legacy data uses; an unlisted spelling of a finished match is only
+// read needlessly — every caller still filters on the normalized status.
+var (
+	terminalStatusSpellings = bson.A{
+		StatusCompleted, "COMPLETED", "Completed", "finished", "FINISHED", "done", "DONE",
+		StatusAbandoned, "ABANDONED", "Abandoned",
+	}
+	upcomingStatusSpellings = bson.A{
+		StatusUpcoming, "UPCOMING", "Upcoming", "active", "ACTIVE", "scheduled", "SCHEDULED", "",
+	}
+)
+
+// activeMatchFilter is activeListing as a query.
+func activeMatchFilter(now time.Time) bson.M {
+	return bson.M{
+		"hidden": bson.M{"$ne": true},
+		"status": bson.M{"$nin": terminalStatusSpellings},
+		"$or": bson.A{
+			bson.M{"status": bson.M{"$nin": upcomingStatusSpellings}},
+			bson.M{"startTime": bson.M{"$gte": now.Add(-upcomingImminentGrace)}},
+			bson.M{"startTime": bson.M{"$exists": false}},
+			bson.M{"startTime": time.Time{}},
+			bson.M{"startTime": nil},
+		},
+	}
+}
+
+// ListActive serves the shared read of the active matches, refreshing it when
+// it is older than activeMatchesTTL. Concurrent callers wait for one read
+// rather than each issuing their own.
+func (r *MongoRepository) ListActive(ctx context.Context) ([]Match, error) {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+
+	now := time.Now().UTC()
+	if r.active != nil && now.Sub(r.activeAt) < activeMatchesTTL {
+		return append([]Match(nil), r.active...), nil
+	}
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activeMatchesTimeout)
+	defer cancel()
+	fresh, err := r.findMatches(readCtx, activeMatchFilter(now))
+	if err != nil {
+		if r.active != nil && now.Sub(r.activeAt) < activeMatchesStaleServe {
+			log.Printf("matches: active read failed, serving the read from %s ago: %v", now.Sub(r.activeAt).Round(time.Second), err)
+			return append([]Match(nil), r.active...), nil
+		}
+		return nil, fmt.Errorf("list active matches: %w", err)
+	}
+	if fresh == nil {
+		fresh = []Match{}
+	}
+	r.active, r.activeAt = fresh, now
+	return append([]Match(nil), fresh...), nil
+}
+
+// invalidateActive drops the shared read after this repository changes a
+// match, so the next list reflects the write.
+func (r *MongoRepository) invalidateActive() {
+	r.activeMu.Lock()
+	r.active = nil
+	r.activeMu.Unlock()
+}
+
+func (r *MongoRepository) findMatches(ctx context.Context, filter bson.M) ([]Match, error) {
+	cur, err := r.col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "startTime", Value: -1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []Match
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func NewMongoRepository(db *mongo.Database) *MongoRepository {
@@ -296,6 +417,7 @@ func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
 }
 
 func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -324,6 +446,7 @@ func (r *MongoRepository) SeedDefaults(ctx context.Context) (int, error) {
 // HideNonCricLiveMatches marks manual, simulator, and legacy demo matches as
 // hidden so they no longer appear on the home feed when running CricLive live.
 func (r *MongoRepository) HideNonCricLiveMatches(ctx context.Context) (int64, error) {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -377,6 +500,7 @@ func (r *MongoRepository) CountLiveProviderMatches(ctx context.Context) (int, er
 
 // SetHidden toggles the hidden flag on the given match ids.
 func (r *MongoRepository) SetHidden(ctx context.Context, hidden bool, ids ...primitive.ObjectID) error {
+	defer r.invalidateActive()
 	if len(ids) == 0 {
 		return nil
 	}
@@ -393,6 +517,7 @@ func (r *MongoRepository) SetHidden(ctx context.Context, hidden bool, ids ...pri
 // EnsureDefaultMatches upserts the built-in sample matches (T20 + ODI) so
 // hex ids …aa / …bb / …cc / …dd always exist even when the collection was seeded earlier.
 func (r *MongoRepository) EnsureDefaultMatches(ctx context.Context) error {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -437,18 +562,15 @@ func (r *MongoRepository) EnsureDefaultMatches(ctx context.Context) error {
 	return nil
 }
 
+// GetAll reads every match. It is a full collection read, so the views polled
+// by clients use ListActive instead.
 func (r *MongoRepository) GetAll(ctx context.Context) []Match {
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
-	cur, err := r.col.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "startTime", Value: -1}}))
+	out, err := r.findMatches(ctx, bson.M{})
 	if err != nil {
-		return nil
-	}
-	defer cur.Close(ctx)
-
-	var out []Match
-	if err := cur.All(ctx, &out); err != nil {
+		log.Printf("matches: read all matches: %v", err)
 		return nil
 	}
 	return out
@@ -498,6 +620,7 @@ func (r *MongoRepository) GetByIDs(ctx context.Context, ids []primitive.ObjectID
 }
 
 func (r *MongoRepository) Create(ctx context.Context, match Match) (*Match, error) {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -517,6 +640,7 @@ func (r *MongoRepository) Create(ctx context.Context, match Match) (*Match, erro
 }
 
 func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID, score ScoreUpdate) (*Match, error) {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -574,6 +698,7 @@ func (r *MongoRepository) UpdateScore(ctx context.Context, id primitive.ObjectID
 // Soft sync feed states (reconciling/warming) are allowed so SYNC does not
 // block purchase.
 func (r *MongoRepository) VerifyTradingGate(ctx context.Context, id primitive.ObjectID, stateVersion, tradingVersion int64) (*Match, bool, error) {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -625,6 +750,7 @@ func (r *MongoRepository) VerifyTradingGate(ctx context.Context, id primitive.Ob
 }
 
 func (r *MongoRepository) DemoteOtherLiveMatches(ctx context.Context, keepID primitive.ObjectID) error {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
@@ -654,6 +780,7 @@ func (r *MongoRepository) DemoteOtherLiveMatches(ctx context.Context, keepID pri
 }
 
 func (r *MongoRepository) NormalizeLegacyStatuses(ctx context.Context) error {
+	defer r.invalidateActive()
 	ctx, cancel := timeoutCtx(ctx)
 	defer cancel()
 
