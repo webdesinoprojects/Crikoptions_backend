@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -91,7 +92,11 @@ func (s *Service) SetSettlement(runner SettlementRunner) {
 }
 
 func (s *Service) GetHomeMatches(ctx context.Context) []Match {
-	all := s.repo.GetAll(ctx)
+	all, err := s.repo.ListActive(ctx)
+	if err != nil {
+		log.Printf("matches: home list: %v", err)
+		return []Match{}
+	}
 	live := make([]Match, 0, len(all))
 	upcoming := make([]Match, 0, len(all))
 	// Demo/simulator replays (e.g. CSK vs MI, RCB vs KKR). The fallback controller
@@ -152,7 +157,12 @@ func (s *Service) CountLiveProviderMatches(ctx context.Context) (int, error) {
 // play OR is scheduled to start within the given lead time. The fallback
 // controller uses this to wind down the demo games ahead of a real fixture.
 func (s *Service) ProviderMatchImminent(ctx context.Context, within time.Duration) (bool, error) {
-	all := s.repo.GetAll(ctx)
+	// An unreadable list must not be mistaken for "nothing imminent": that
+	// would reveal the demo games over a real fixture.
+	all, err := s.repo.ListActive(ctx)
+	if err != nil {
+		return false, err
+	}
 	now := time.Now().UTC()
 	cutoff := now.Add(within)
 	for i := range all {
@@ -211,7 +221,11 @@ func (s *Service) SetDemoMatchesHidden(ctx context.Context, hidden bool, hexIDs 
 // GetUpcomingMatches returns CricLive fixtures that have not started yet,
 // soonest start first. Unlike home, this never falls back to live matches.
 func (s *Service) GetUpcomingMatches(ctx context.Context) []Match {
-	all := s.repo.GetAll(ctx)
+	all, err := s.repo.ListActive(ctx)
+	if err != nil {
+		log.Printf("matches: upcoming list: %v", err)
+		return []Match{}
+	}
 	upcoming := make([]Match, 0, len(all))
 	now := time.Now().UTC()
 	for i := range all {
