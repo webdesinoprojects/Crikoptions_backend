@@ -12,4 +12,6 @@ func RegisterRoutes(mux *http.ServeMux, handler *Handler, authHandler *auth.Hand
 	}
 
 	mux.HandleFunc("GET /api/v1/admin/analytics/overview", authHandler.RequireAuth(authHandler.RequireAdmin(handler.Overview)))
+	mux.HandleFunc("GET /api/v1/admin/analytics/users", authHandler.RequireAuth(authHandler.RequireAdmin(handler.ListUsers)))
+	mux.HandleFunc("GET /api/v1/admin/analytics/users/{userId}", authHandler.RequireAuth(authHandler.RequireAdmin(handler.GetUser)))
 }

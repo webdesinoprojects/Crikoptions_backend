@@ -169,7 +169,10 @@ func (r *MongoUserRepository) UpdateMe(ctx context.Context, id primitive.ObjectI
 func (r *MongoUserRepository) TouchLogin(ctx context.Context, id primitive.ObjectID, at time.Time) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err := r.col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"loginAt": at, "lastSeenAt": at}})
+	_, err := r.col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
+		"$set": bson.M{"loginAt": at, "lastSeenAt": at},
+		"$inc": bson.M{"sessionCount": 1},
+	})
 	return err
 }
 
@@ -183,12 +186,40 @@ func (r *MongoUserRepository) TouchLastSeen(ctx context.Context, id primitive.Ob
 	//
 	// A missing lastSeenAt (account that predates this field) compares as
 	// null, which sorts below any date, so it takes the new-session branch.
+	// isNewSession: no recorded activity, or the last one is older than the
+	// idle cutoff. A missing lastSeenAt compares as null, which sorts below
+	// any date, so untouched accounts take this branch.
+	isNewSession := bson.M{"$lt": bson.A{"$lastSeenAt", idleCutoff}}
+
+	// Time to add to the running total: the gap since the previous activity,
+	// but only while the session continues. A resumed session contributes
+	// nothing for the time the user was away.
+	elapsed := bson.M{"$cond": bson.A{
+		isNewSession,
+		0,
+		bson.M{"$divide": bson.A{
+			bson.M{"$subtract": bson.A{at, bson.M{"$ifNull": bson.A{"$lastSeenAt", at}}}},
+			1000, // ms -> seconds
+		}},
+	}}
+
 	pipeline := mongo.Pipeline{
 		bson.D{{Key: "$set", Value: bson.M{
 			"loginAt": bson.M{"$cond": bson.A{
-				bson.M{"$lt": bson.A{"$lastSeenAt", idleCutoff}},
+				isNewSession,
 				at,
 				bson.M{"$ifNull": bson.A{"$loginAt", at}},
+			}},
+			"sessionCount": bson.M{"$add": bson.A{
+				bson.M{"$ifNull": bson.A{"$sessionCount", 0}},
+				bson.M{"$cond": bson.A{isNewSession, 1, 0}},
+			}},
+			"totalActiveSeconds": bson.M{"$round": bson.A{
+				bson.M{"$add": bson.A{
+					bson.M{"$ifNull": bson.A{"$totalActiveSeconds", 0}},
+					elapsed,
+				}},
+				0,
 			}},
 			"lastSeenAt": at,
 		}}},
@@ -301,6 +332,7 @@ func (r *InMemoryUserRepository) TouchLogin(ctx context.Context, id primitive.Ob
 	}
 	rec.LoginAt = at
 	rec.LastSeenAt = at
+	rec.SessionCount++
 	r.users[strings.ToLower(rec.Email)] = rec
 	r.usersByID[id] = rec
 	return nil
@@ -312,9 +344,13 @@ func (r *InMemoryUserRepository) TouchLastSeen(ctx context.Context, id primitive
 		return errUserNotFound
 	}
 	// Mirrors the Mongo pipeline: idle for long enough (or never seen before)
-	// starts a new session.
+	// starts a new session; a continuing one accrues the gap since the last
+	// recorded activity.
 	if rec.LastSeenAt.Before(idleCutoff) || rec.LoginAt.IsZero() {
 		rec.LoginAt = at
+		rec.SessionCount++
+	} else {
+		rec.TotalActiveSeconds += int64(at.Sub(rec.LastSeenAt).Seconds())
 	}
 	rec.LastSeenAt = at
 	r.users[strings.ToLower(rec.Email)] = rec

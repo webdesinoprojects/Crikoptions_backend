@@ -43,8 +43,17 @@ type Overview struct {
 	// request produces a zero-length session. It measures time between
 	// first and last activity, which is the usual web-analytics
 	// definition — not true time-on-page.
-	AvgSessionMinutes float64   `json:"avgSessionMinutes"`
-	GeneratedAt       time.Time `json:"generatedAt"`
+	AvgSessionMinutes float64 `json:"avgSessionMinutes"`
+	// SignupTrend is one entry per day for the trailing 30 days, including
+	// days with no signups, so the chart has no gaps.
+	SignupTrend []DayCount `json:"signupTrend"`
+	GeneratedAt time.Time   `json:"generatedAt"`
+}
+
+// DayCount is a single point on the signup trend chart.
+type DayCount struct {
+	Date  string `json:"date"` // YYYY-MM-DD, UTC
+	Count int64  `json:"count"`
 }
 
 func (s *Service) Overview(ctx context.Context) (Overview, error) {
@@ -81,14 +90,65 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 		return Overview{}, err
 	}
 
+	trend, err := s.signupTrend(ctx, startOfToday, 30)
+	if err != nil {
+		return Overview{}, err
+	}
+
 	return Overview{
 		TotalUsers:        total,
 		NewUsersToday:     newToday,
 		NewUsersThisWeek:  newThisWeek,
 		DailyActiveUsers:  dau,
 		AvgSessionMinutes: avgMinutes,
+		SignupTrend:       trend,
 		GeneratedAt:       now,
 	}, nil
+}
+
+// signupTrend returns daily signup counts for the `days` days ending on
+// startOfToday, zero-filling days with no registrations so the chart keeps an
+// even time axis.
+func (s *Service) signupTrend(ctx context.Context, startOfToday time.Time, days int) ([]DayCount, error) {
+	from := startOfToday.AddDate(0, 0, -(days - 1))
+
+	cur, err := s.users.Aggregate(ctx, mongo.Pipeline{
+		bson.D{{Key: "$match", Value: bson.M{"createdAt": bson.M{"$gte": from}}}},
+		bson.D{{Key: "$group", Value: bson.M{
+			"_id": bson.M{"$dateToString": bson.M{
+				"format":   "%Y-%m-%d",
+				"date":     "$createdAt",
+				"timezone": "UTC",
+			}},
+			"n": bson.M{"$sum": 1},
+		}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+
+	counts := make(map[string]int64)
+	for cur.Next(ctx) {
+		var row struct {
+			Date string `bson:"_id"`
+			N    int64  `bson:"n"`
+		}
+		if err := cur.Decode(&row); err != nil {
+			return nil, err
+		}
+		counts[row.Date] = row.N
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+
+	trend := make([]DayCount, 0, days)
+	for i := 0; i < days; i++ {
+		day := from.AddDate(0, 0, i).Format("2006-01-02")
+		trend = append(trend, DayCount{Date: day, Count: counts[day]})
+	}
+	return trend, nil
 }
 
 // avgSessionMinutes averages (lastSeenAt - loginAt) in minutes over users

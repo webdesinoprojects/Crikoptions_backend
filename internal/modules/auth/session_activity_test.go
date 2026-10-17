@@ -32,7 +32,7 @@ func TestTouchLastSeenKeepsSessionStartWhileActive(t *testing.T) {
 	}
 
 	later := start.Add(10 * time.Minute)
-	if err := repo.TouchLastSeen(context.Background(), id, later, later.Add(-sessionIdleGap)); err != nil {
+	if err := repo.TouchLastSeen(context.Background(), id, later, later.Add(-SessionIdleGap)); err != nil {
 		t.Fatalf("TouchLastSeen: %v", err)
 	}
 
@@ -61,7 +61,7 @@ func TestTouchLastSeenStartsNewSessionAfterIdleGap(t *testing.T) {
 	}
 
 	returned := start.Add(8 * time.Hour)
-	if err := repo.TouchLastSeen(context.Background(), id, returned, returned.Add(-sessionIdleGap)); err != nil {
+	if err := repo.TouchLastSeen(context.Background(), id, returned, returned.Add(-SessionIdleGap)); err != nil {
 		t.Fatalf("TouchLastSeen: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestTouchLastSeenBackfillsLegacyAccount(t *testing.T) {
 	id := seedUser(t, repo, "legacy@example.com")
 
 	now := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
-	if err := repo.TouchLastSeen(context.Background(), id, now, now.Add(-sessionIdleGap)); err != nil {
+	if err := repo.TouchLastSeen(context.Background(), id, now, now.Add(-SessionIdleGap)); err != nil {
 		t.Fatalf("TouchLastSeen: %v", err)
 	}
 

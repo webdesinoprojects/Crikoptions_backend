@@ -26,6 +26,14 @@ type User struct {
 	// average-session-duration admin metrics. It is an approximation of
 	// activity, not a precise session end time.
 	LastSeenAt time.Time `json:"lastSeenAt,omitempty" bson:"lastSeenAt,omitempty"`
+	// SessionCount is the number of distinct visits: incremented on sign-in
+	// and whenever activity resumes after SessionIdleGap of silence.
+	SessionCount int64 `json:"sessionCount" bson:"sessionCount,omitempty"`
+	// TotalActiveSeconds is cumulative time on the platform across all
+	// sessions — the "screen time" figure. Each activity write adds the gap
+	// since the previous one, capped at SessionIdleGap so time spent away
+	// with a tab open is never counted.
+	TotalActiveSeconds int64 `json:"totalActiveSeconds" bson:"totalActiveSeconds,omitempty"`
 }
 
 // IsAdmin reports whether the user has the admin role.

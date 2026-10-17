@@ -18,11 +18,11 @@ const (
 	// the daily-active-users and session-duration admin metrics.
 	lastSeenThrottle = 60 * time.Second
 
-	// sessionIdleGap is how long a user must be inactive before their next
+	// SessionIdleGap is how long a user must be inactive before their next
 	// request counts as a new session rather than a continuation. 30 minutes
 	// is the usual analytics convention. This is what stops "session length"
 	// from simply tracking how long the JWT has been valid.
-	sessionIdleGap = 30 * time.Minute
+	SessionIdleGap = 30 * time.Minute
 
 	// lastTouchSweepSize bounds the throttle map: once it holds this many
 	// users, entries older than the throttle window (which can no longer
@@ -322,7 +322,7 @@ func (s *Service) TouchLastSeen(userID primitive.ObjectID) {
 	}
 
 	go func(id primitive.ObjectID, at time.Time) {
-		_ = s.repo.TouchLastSeen(context.Background(), id, at, at.Add(-sessionIdleGap))
+		_ = s.repo.TouchLastSeen(context.Background(), id, at, at.Add(-SessionIdleGap))
 	}(userID, now)
 }
 
