@@ -4,9 +4,30 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+const (
+	// lastSeenThrottle is the minimum gap between lastSeenAt writes for the
+	// same user. Authenticated requests can arrive many times a minute
+	// (polling, websockets reconnecting); without this, every request would
+	// turn into a Mongo write. One write per window is enough resolution for
+	// the daily-active-users and session-duration admin metrics.
+	lastSeenThrottle = 60 * time.Second
+
+	// sessionIdleGap is how long a user must be inactive before their next
+	// request counts as a new session rather than a continuation. 30 minutes
+	// is the usual analytics convention. This is what stops "session length"
+	// from simply tracking how long the JWT has been valid.
+	sessionIdleGap = 30 * time.Minute
+
+	// lastTouchSweepSize bounds the throttle map: once it holds this many
+	// users, entries older than the throttle window (which can no longer
+	// suppress anything) are dropped on the next write.
+	lastTouchSweepSize = 4096
 )
 
 type Service struct {
@@ -14,6 +35,9 @@ type Service struct {
 	jwt         *jwt
 	adminEmails map[string]struct{}
 	google      *googleVerifier
+
+	lastTouchMu sync.Mutex
+	lastTouch   map[primitive.ObjectID]time.Time
 }
 
 // EnableGoogleAuth turns on Google sign-in by configuring the OAuth client ID
@@ -41,7 +65,7 @@ func NewService(repo UserRepository, jwtSecret string, tokenTTL time.Duration, a
 			adminSet[e] = struct{}{}
 		}
 	}
-	return &Service{repo: repo, jwt: j, adminEmails: adminSet}, nil
+	return &Service{repo: repo, jwt: j, adminEmails: adminSet, lastTouch: make(map[primitive.ObjectID]time.Time)}, nil
 }
 
 // isAdminEmail reports whether email (case-insensitive) is configured as an
@@ -124,7 +148,22 @@ func (s *Service) Login(ctx context.Context, req loginRequest) (User, string, er
 		return User{}, "", errUnauthorized
 	}
 
+	s.touchLoginAsync(user.ID)
 	return user, token, nil
+}
+
+// touchLoginAsync stamps loginAt/lastSeenAt in the background so a slow
+// write never delays the login response. Mirrors the welcome-credit
+// fire-and-forget pattern in the handler layer.
+func (s *Service) touchLoginAsync(userID primitive.ObjectID) {
+	now := time.Now().UTC()
+	s.lastTouchMu.Lock()
+	s.lastTouch[userID] = now
+	s.lastTouchMu.Unlock()
+
+	go func(id primitive.ObjectID, at time.Time) {
+		_ = s.repo.TouchLogin(context.Background(), id, at)
+	}(userID, now)
 }
 
 // LoginWithGoogle verifies a Google ID token ("credential"), finds or creates
@@ -168,6 +207,7 @@ func (s *Service) LoginWithGoogle(ctx context.Context, credential string) (User,
 	if err != nil {
 		return User{}, "", false, errUnauthorized
 	}
+	s.touchLoginAsync(user.ID)
 	return user, token, created, nil
 }
 
@@ -267,6 +307,43 @@ func (s *Service) UpdateMe(ctx context.Context, userID primitive.ObjectID, req u
 		return User{}, err
 	}
 	return s.withEffectiveRole(user), nil
+}
+
+// TouchLastSeen records that userID made an authenticated request just now,
+// for the daily-active-users and session-duration admin metrics. Safe to call
+// on the request path: the throttle check is an in-memory map lookup, and only
+// a write that actually needs to happen is handed to a goroutine. Failures are
+// swallowed — a missed activity stamp must never break the request it rode in
+// on.
+func (s *Service) TouchLastSeen(userID primitive.ObjectID) {
+	now := time.Now().UTC()
+	if !s.shouldTouch(userID, now) {
+		return
+	}
+
+	go func(id primitive.ObjectID, at time.Time) {
+		_ = s.repo.TouchLastSeen(context.Background(), id, at, at.Add(-sessionIdleGap))
+	}(userID, now)
+}
+
+// shouldTouch reports whether userID is due a lastSeenAt write, recording the
+// attempt when it is.
+func (s *Service) shouldTouch(userID primitive.ObjectID, now time.Time) bool {
+	s.lastTouchMu.Lock()
+	defer s.lastTouchMu.Unlock()
+
+	if last, seen := s.lastTouch[userID]; seen && now.Sub(last) < lastSeenThrottle {
+		return false
+	}
+	if len(s.lastTouch) >= lastTouchSweepSize {
+		for id, at := range s.lastTouch {
+			if now.Sub(at) >= lastSeenThrottle {
+				delete(s.lastTouch, id)
+			}
+		}
+	}
+	s.lastTouch[userID] = now
+	return true
 }
 
 func (s *Service) withEffectiveRole(user User) User {

@@ -55,7 +55,7 @@ func newServer(t *testing.T, book []positions.Position) (http.Handler, *stubWall
 	}
 	w := &stubWallet{}
 	handler := challenges.NewHandler(challenges.NewService(stubPositions{book: book}, w))
-	router := routes.NewRouter(nil, nil, auth.NewHandler(authSvc), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, handler)
+	router := routes.NewRouter(nil, nil, auth.NewHandler(authSvc), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, handler, nil)
 	return router, w, registerAndLogin(t, router)
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/config"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/middleware"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/analytics"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/challenges"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/chat"
@@ -108,6 +109,10 @@ func main() {
 	// Enable Google sign-in when a client ID is configured (no-op otherwise).
 	authService.EnableGoogleAuth(cfg.GoogleClientID)
 	authHandler := auth.NewHandler(authService)
+
+	// Admin analytics (total/new/active users, avg session length). Reads
+	// the same users collection auth.Service writes loginAt/lastSeenAt to.
+	analyticsHandler := analytics.NewHandler(analytics.NewService(mongo.DB))
 
 	// Matches.
 	matchesRepo := matches.NewMongoRepository(mongo.DB)
@@ -347,7 +352,7 @@ func main() {
 		simService.AutoStartOnBoot(context.Background())
 	}
 
-	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, challengesHandler, cricliveAdminHandler)
+	router := routes.NewRouter(healthHandler, matchesHandler, authHandler, marketsHandler, watchlistHandler, ordersHandler, positionsHandler, portfolioHandler, walletHandler, executionsHandler, realtimeHandler, simHandler, chatHandler, challengesHandler, analyticsHandler, cricliveAdminHandler)
 	handler := middleware.Chain(router, middleware.Recover, middleware.Logger, middleware.CORS(cfg.AllowedOrigins))
 
 	srv := &http.Server{

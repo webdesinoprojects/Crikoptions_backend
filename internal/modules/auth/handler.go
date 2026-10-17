@@ -56,6 +56,12 @@ func (h *Handler) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 		r.Header.Set("X-Crik-User-Hash", shortHash(userID.Hex()))
 		ctx := context.WithValue(r.Context(), CtxUserID, userID)
 		ctx = context.WithValue(ctx, CtxRole, role)
+
+		// Activity stamp for the admin analytics (DAU, session length).
+		// Throttled in memory; any Mongo write it decides to make happens
+		// on its own goroutine, so this never delays the request.
+		h.service.TouchLastSeen(userID)
+
 		next(w, r.WithContext(ctx))
 	}
 }

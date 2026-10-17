@@ -3,6 +3,7 @@ package routes
 import (
 	"net/http"
 
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/analytics"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/auth"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/challenges"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/chat"
@@ -35,6 +36,7 @@ func NewRouter(
 	simulatorHandler *simulator.Handler,
 	chatHandler *chat.Handler,
 	challengesHandler *challenges.Handler,
+	analyticsHandler *analytics.Handler,
 	cricliveHandlers ...*cricliveadmin.Handler,
 ) http.Handler {
 	mux := http.NewServeMux()
@@ -94,6 +96,11 @@ func NewRouter(
 	if challengesHandler != nil && authHandler != nil {
 		challenges.RegisterRoutes(mux, challengesHandler, authHandler)
 	}
+
+	if analyticsHandler != nil && authHandler != nil {
+		analytics.RegisterRoutes(mux, analyticsHandler, authHandler)
+	}
+
 	if len(cricliveHandlers) > 0 {
 		cricliveadmin.RegisterRoutes(mux, cricliveHandlers[0], authHandler)
 	}

@@ -17,6 +17,15 @@ type User struct {
 	Settings  UserSettings       `json:"settings" bson:"settings"`
 	CreatedAt time.Time          `json:"createdAt" bson:"createdAt"`
 	UpdatedAt time.Time          `json:"updatedAt" bson:"updatedAt"`
+	// LoginAt is the start time of the user's current/most recent session
+	// (set each time Login or LoginWithGoogle succeeds). Omitted from
+	// documents created before this field existed.
+	LoginAt time.Time `json:"loginAt,omitempty" bson:"loginAt,omitempty"`
+	// LastSeenAt is refreshed on every authenticated request (see
+	// Service.TouchLastSeen) and drives the "daily active users" and
+	// average-session-duration admin metrics. It is an approximation of
+	// activity, not a precise session end time.
+	LastSeenAt time.Time `json:"lastSeenAt,omitempty" bson:"lastSeenAt,omitempty"`
 }
 
 // IsAdmin reports whether the user has the admin role.
