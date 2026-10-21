@@ -78,6 +78,9 @@ const (
 	ParkReasonRequestBudget  = "request_budget_exceeded"
 	ParkReasonAbsentFromLive = "absent_from_live_feed"
 	ParkReasonAbandoned      = "match_abandoned"
+	// ParkReasonTerminalPhase marks a fixture parked because the provider kept
+	// reporting a terminal phase our status never picked up.
+	ParkReasonTerminalPhase = "terminal_provider_phase"
 )
 
 // MaxLiveWindow is the longest a fixture of the given format may be polled at

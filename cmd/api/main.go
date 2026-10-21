@@ -13,6 +13,13 @@ import (
 	"time"
 
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/config"
+	cricliveadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/admin"
+	cricliveclient "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
+	criclivefeed "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/feed"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/settlement"
+	criclivestore "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
+	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/watchdog"
+	cricliveworker "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/worker"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/database"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/middleware"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/analytics"
@@ -31,13 +38,6 @@ import (
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/modules/watchlist"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/realtime"
 	"github.com/webdesinoprojects/Crikoptions/backend/internal/routes"
-	cricliveadmin "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/admin"
-	cricliveclient "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/client"
-	criclivefeed "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/feed"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/settlement"
-	criclivestore "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/store"
-	"github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/watchdog"
-	cricliveworker "github.com/webdesinoprojects/Crikoptions/backend/internal/criclive/worker"
 )
 
 // deadFeedAbandonAfter is how long a live provider match may go with no
@@ -47,6 +47,20 @@ import (
 //
 // Override with CRICLIVE_DEAD_FEED_ABANDON_AFTER (e.g. "90m").
 var deadFeedAbandonAfter = envDuration("CRICLIVE_DEAD_FEED_ABANDON_AFTER", 2*time.Hour)
+
+// stuckPhaseCloseAfter is how long the provider's phase must stay unchanged on
+// an abandonment phrase ("no result", "abandoned", "washed out") before a match
+// that still claims to be in play is voided. Unlike the dead-feed reaper this
+// fires on a perfectly healthy feed, so it is the backstop for a status that
+// never caught up with the phase.
+//
+// It is measured from the phase's own timestamp, not the match start, so an
+// in-play ticker line that merely looks terminal for a poll or two cannot trip
+// it. Keep it well above the adapter's 45-second abandonment confirmation so
+// the normal path still closes the match first.
+//
+// Override with CRICLIVE_STUCK_PHASE_CLOSE_AFTER (e.g. "10m").
+var stuckPhaseCloseAfter = envDuration("CRICLIVE_STUCK_PHASE_CLOSE_AFTER", 30*time.Minute)
 
 func envDuration(key string, fallback time.Duration) time.Duration {
 	raw := strings.TrimSpace(os.Getenv(key))
@@ -198,8 +212,13 @@ func main() {
 		} else if n > 0 {
 			log.Printf("criclive abandoned %d dead live matches on startup", n)
 		}
+		if n, err := feedStore.ClosePhaseTerminalMatches(context.Background(), time.Now().UTC(), stuckPhaseCloseAfter); err != nil {
+			log.Printf("criclive close stuck terminal phases: %v", err)
+		} else if n > 0 {
+			log.Printf("criclive closed %d matches whose phase was already terminal on startup", n)
+		}
 		go watchdog.Run(providerCtx, feedStore, 5*time.Second)
-		go watchdog.RunReaper(providerCtx, feedStore, 5*time.Minute, deadFeedAbandonAfter, matches.DeadLiveMatchAfter)
+		go watchdog.RunReaper(providerCtx, feedStore, 5*time.Minute, deadFeedAbandonAfter, matches.DeadLiveMatchAfter, stuckPhaseCloseAfter)
 		provider, ownIDs, providerErr := criclivefeed.NewProvider(providerConfig, &http.Client{Timeout: providerConfig.HTTPTimeout})
 		if providerErr != nil {
 			log.Fatalf("%s feed client: %v", providerConfig.Feed, providerErr)

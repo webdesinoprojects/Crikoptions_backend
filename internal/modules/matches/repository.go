@@ -405,6 +405,11 @@ func (r *MongoRepository) EnsureIndexes(ctx context.Context) error {
 			Keys: bson.D{{Key: "status", Value: 1}},
 		},
 		{
+			// Serves the stuck-phase reaper, which scans matches still
+			// presented as in play whose provider phase has not moved.
+			Keys: bson.D{{Key: "status", Value: 1}, {Key: "providerPhaseSince", Value: 1}},
+		},
+		{
 			Keys: bson.D{{Key: "provider", Value: 1}, {Key: "providerFixtureId", Value: 1}},
 			Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.M{
 				"provider":          bson.M{"$type": "string"},

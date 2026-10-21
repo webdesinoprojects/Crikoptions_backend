@@ -38,7 +38,7 @@ func applyProjectionOverlay(match *matches.Match, projection reconcile.Projectio
 	if projection.BattingTeamID > 0 {
 		match.ProviderBattingTeamID = projection.BattingTeamID
 	}
-	match.ProviderPhase = projection.ProviderStatus
+	setProviderPhase(match, projection.ProviderStatus, receivedAt)
 	if applyTerminalMatchState(match, projection.ProviderStatus) {
 		return
 	}

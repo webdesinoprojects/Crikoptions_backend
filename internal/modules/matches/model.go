@@ -42,26 +42,32 @@ type Match struct {
 	MatchPulse        *MatchPulse       `json:"matchPulse,omitempty" bson:"matchPulse,omitempty"`
 	ThisOver          []OverBall        `json:"thisOver,omitempty" bson:"thisOver,omitempty"`
 
-	ProviderPhase         string           `json:"providerPhase,omitempty" bson:"providerPhase,omitempty"`
-	ScheduledBalls        int              `json:"scheduledBalls,omitempty" bson:"scheduledBalls,omitempty"`
+	ProviderPhase string `json:"providerPhase,omitempty" bson:"providerPhase,omitempty"`
+	// ProviderPhaseSince is when ProviderPhase last took a new value. The
+	// stuck-phase reaper closes a match on its phase text, so it must know how
+	// long that text has stood: a live ticker shows terminal-looking phrases
+	// ("Review Cancelled") for seconds at a time, and closing on one of those
+	// would end a match mid-play.
+	ProviderPhaseSince *time.Time `json:"-" bson:"providerPhaseSince,omitempty"`
+	ScheduledBalls     int        `json:"scheduledBalls,omitempty" bson:"scheduledBalls,omitempty"`
 	// ScheduledOvers is the per-innings over limit actually in force, and
 	// ReducedOvers marks it as shortened from the format standard (rain delay,
 	// reduced-overs restart). Both are surfaced so clients can explain why a
 	// live match is not tradable instead of showing a bare "unsupported".
-	ScheduledOvers        int              `json:"scheduledOvers,omitempty" bson:"scheduledOvers,omitempty"`
-	ReducedOvers          bool             `json:"reducedOvers,omitempty" bson:"reducedOvers,omitempty"`
-	ProviderBattingTeamID int64            `json:"providerBattingTeamId,omitempty" bson:"providerBattingTeamId,omitempty"`
+	ScheduledOvers         int              `json:"scheduledOvers,omitempty" bson:"scheduledOvers,omitempty"`
+	ReducedOvers           bool             `json:"reducedOvers,omitempty" bson:"reducedOvers,omitempty"`
+	ProviderBattingTeamID  int64            `json:"providerBattingTeamId,omitempty" bson:"providerBattingTeamId,omitempty"`
 	ProviderReconcilePolls int              `json:"-" bson:"providerReconcilePolls,omitempty"`
-	InningsSummaries      []InningsSummary `json:"inningsSummaries,omitempty" bson:"inningsSummaries,omitempty"`
+	InningsSummaries       []InningsSummary `json:"inningsSummaries,omitempty" bson:"inningsSummaries,omitempty"`
 
 	// StateVersion versions authoritative score/event state. TradingVersion is
 	// advanced whenever tradability changes, allowing order creation to fence
 	// against a concurrent feed suspension.
-	StateVersion         int64      `json:"stateVersion" bson:"stateVersion"`
-	TradingVersion       int64      `json:"tradingVersion" bson:"tradingVersion"`
-	FeedState            string     `json:"feedState,omitempty" bson:"feedState,omitempty"`
-	TradingState         string     `json:"tradingState,omitempty" bson:"tradingState,omitempty"`
-	TradingBlockers      []string   `json:"tradingBlockers,omitempty" bson:"tradingBlockers,omitempty"`
+	StateVersion    int64    `json:"stateVersion" bson:"stateVersion"`
+	TradingVersion  int64    `json:"tradingVersion" bson:"tradingVersion"`
+	FeedState       string   `json:"feedState,omitempty" bson:"feedState,omitempty"`
+	TradingState    string   `json:"tradingState,omitempty" bson:"tradingState,omitempty"`
+	TradingBlockers []string `json:"tradingBlockers,omitempty" bson:"tradingBlockers,omitempty"`
 	// Tradable is computed for API/WS clients: true while buy/sell should work,
 	// including soft SYNC (reconciling/warming). Not persisted.
 	Tradable             bool       `json:"tradable" bson:"-"`
@@ -81,9 +87,9 @@ type Match struct {
 }
 
 const (
-	DataSourceManual     = "manual"
-	DataSourceSimulator  = "simulator"
-	DataSourceCricLive = "criclive"
+	DataSourceManual    = "manual"
+	DataSourceSimulator = "simulator"
+	DataSourceCricLive  = "criclive"
 
 	FeedStateWarming      = "warming"
 	FeedStateHealthy      = "healthy"

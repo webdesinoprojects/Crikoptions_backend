@@ -162,3 +162,28 @@ func mustTime(value string) (t time.Time) {
 	t, _ = time.Parse(time.RFC3339, value)
 	return t
 }
+
+// The stuck-phase reaper decides on how long a phase has stood, so a phase the
+// feed repeats on every poll must not keep resetting that clock.
+func TestSetProviderPhaseStampsOnlyRealChanges(t *testing.T) {
+	first := mustTime("2026-07-17T10:00:00Z")
+	match := matches.Match{}
+	setProviderPhase(&match, "Rain", first)
+	if match.ProviderPhaseSince == nil || !match.ProviderPhaseSince.Equal(first) {
+		t.Fatalf("providerPhaseSince = %v, want %v", match.ProviderPhaseSince, first)
+	}
+
+	setProviderPhase(&match, "  Rain  ", first.Add(time.Minute))
+	if !match.ProviderPhaseSince.Equal(first) {
+		t.Fatalf("a repeated phase moved the clock to %v", match.ProviderPhaseSince)
+	}
+
+	changed := first.Add(2 * time.Minute)
+	setProviderPhase(&match, "No Result/due to rain", changed)
+	if !match.ProviderPhaseSince.Equal(changed) {
+		t.Fatalf("providerPhaseSince = %v, want the change at %v", match.ProviderPhaseSince, changed)
+	}
+	if match.ProviderPhase != "No Result/due to rain" {
+		t.Fatalf("providerPhase = %q", match.ProviderPhase)
+	}
+}

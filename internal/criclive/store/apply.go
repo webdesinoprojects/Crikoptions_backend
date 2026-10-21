@@ -831,6 +831,25 @@ func initialMatch(projection reconcile.Projection, now time.Time) matches.Match 
 	}
 }
 
+// setProviderPhase records the provider's phase text and, when that text is
+// new, the instant it took effect. ProviderPhaseSince is what lets the
+// stuck-phase reaper tell a match the provider has called off from a live one
+// whose ticker happens to read "Review Cancelled" for a few seconds.
+//
+// A match whose phase was never stamped (written before this field existed)
+// gets stamped on its next poll rather than backfilled, so it simply becomes
+// eligible one stuckAfter later.
+func setProviderPhase(match *matches.Match, phase string, at time.Time) {
+	if match == nil {
+		return
+	}
+	phase = strings.TrimSpace(phase)
+	if match.ProviderPhase != phase || match.ProviderPhaseSince == nil {
+		match.ProviderPhaseSince = timePointer(at.UTC())
+	}
+	match.ProviderPhase = phase
+}
+
 func projectMatch(current matches.Match, projection reconcile.Projection, receivedAt time.Time, inningsHold, finalHold, feedValidity time.Duration, nextVersion int64) matches.Match {
 	next := current
 	next.DataSource = ProviderName
@@ -848,7 +867,7 @@ func projectMatch(current matches.Match, projection reconcile.Projection, receiv
 	}
 	next.Format = projection.Format
 	next.StartTime = projection.StartTime
-	next.ProviderPhase = projection.ProviderStatus
+	setProviderPhase(&next, projection.ProviderStatus, receivedAt)
 	next.ScheduledBalls = projection.ScheduledBalls
 	next.ScheduledOvers = projection.ScheduledOvers
 	next.ReducedOvers = projection.ReducedOvers
