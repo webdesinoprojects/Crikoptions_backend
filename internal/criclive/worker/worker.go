@@ -712,13 +712,35 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 		return
 	}
 	scheduledInterval := intervalForProjection(projection, store.ApplyResult{}, activeInterval, w.cfg)
+	unchangedSince := snapshotUnchangedSince(target, projection.SnapshotHash, receivedAt)
+	next := w.nextPollAt(target, projection, scheduledInterval, receivedAt, unchangedSince)
+	validityInterval := next.Sub(receivedAt)
+	finalizingNext := next
+	// Apply decides whether a completed innings still needs its hold. Plan
+	// that alternative too, before persisting the successful poll's deadline.
+	canFinalize := projection.Status == matches.StatusAbandoned
+	for _, innings := range projection.Innings {
+		if projection.Status == matches.StatusLive && innings.Number == projection.CurrentInnings && innings.Complete {
+			canFinalize = true
+		}
+	}
+	if canFinalize {
+		finalizingNext = w.nextPollAt(target, projection, w.cfg.FinalizingInterval, receivedAt, unchangedSince)
+		if projection.Status == matches.StatusAbandoned {
+			// The other outcome is terminal: its year-long parking interval
+			// must never become a non-terminal feed's freshness allowance.
+			validityInterval = finalizingNext.Sub(receivedAt)
+		} else {
+			validityInterval = maxDuration(validityInterval, finalizingNext.Sub(receivedAt))
+		}
+	}
 	result, err := w.store.ApplyProjection(ctx, projection, raw, receivedAt, store.ApplyOptions{
 		Mode: string(w.cfg.Mode), LeaseOwner: w.owner, LeaseToken: token,
 		AllowCorrections:        w.cfg.AllowLiveCorrections,
 		AllowMidMatchAdmission:  w.cfg.AllowMidMatchLiveAdmission,
 		InningsFinalizationHold: w.cfg.InningsFinalizationHold,
 		MatchFinalizationHold:   w.cfg.MatchFinalizationHold, RawPayloadTTL: w.cfg.RawPayloadTTL,
-		FeedValidity: feedValidityForInterval(w.cfg, scheduledInterval),
+		FeedValidity: feedValidityForInterval(w.cfg, validityInterval),
 	})
 	if err != nil {
 		w.handlePollFailure(ctx, target, token, scheduledInterval, err)
@@ -734,15 +756,26 @@ func (w *Worker) pollTarget(ctx context.Context, target store.FixtureTarget, tok
 	// for 90s) are normal in cricket; treating them as feed_stale blocked trading
 	// while polls were healthy. Real outages are handled by ExpireStaleFeeds /
 	// handlePollFailure when LastSuccessfulPollAt goes stale.
-	unchangedSince := snapshotUnchangedSince(target, projection.SnapshotHash, receivedAt)
 	nextInterval := intervalForProjection(projection, result, activeInterval, w.cfg)
-	nextInterval = quietFeedInterval(nextInterval, projection.Status, receivedAt.Sub(unchangedSince), w.cfg)
-	next := receivedAt.Add(w.jitter(nextInterval))
-	next = clampPreMatchPoll(projection, receivedAt, next)
-	next = clampAbsentProbe(target, receivedAt, next)
+	if result.FeedState == matches.FeedStateFinalizing {
+		next = finalizingNext
+	} else if nextInterval != scheduledInterval {
+		// Terminal parking is chosen only after apply finishes the hold.
+		next = w.nextPollAt(target, projection, nextInterval, receivedAt, unchangedSince)
+	}
 	if err := w.store.CompleteTargetPoll(ctx, target.ID, w.owner, token, string(w.cfg.Mode), projection.SnapshotHash, projection.ProviderState, receivedAt, next, unchangedSince); err != nil {
 		w.logger.Printf("criclive fixture %d complete poll: %v", target.ID, err)
 	}
+}
+
+// nextPollAt applies every scheduling adjustment in one place. The worker uses
+// the same planned time for both feed validity and the next successful poll,
+// so an intentional absence probe cannot expire its own finalization hold.
+func (w *Worker) nextPollAt(target store.FixtureTarget, projection reconcile.Projection, interval time.Duration, now, unchangedSince time.Time) time.Time {
+	interval = quietFeedInterval(interval, projection.Status, now.Sub(unchangedSince), w.cfg)
+	next := now.Add(w.jitter(interval))
+	next = clampPreMatchPoll(projection, now, next)
+	return clampAbsentProbe(target, now, next)
 }
 
 // formatPollInterval is the live cadence a fixture of this format may run at.
