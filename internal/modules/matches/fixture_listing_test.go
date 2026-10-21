@@ -82,7 +82,9 @@ func TestLiveAliasReplacesUpcomingRegardlessOfWhichKeyGoesLive(t *testing.T) {
 
 func TestUpcomingAliasIdentityDoesNotMergeDistinctFixtures(t *testing.T) {
 	for name, change := range map[string]func(*Match){
-		"different kickoff":                  func(m *Match) { m.StartTime = m.StartTime.Add(time.Minute) },
+		// Beyond the tolerance these are treated as two fixtures, not one
+		// drifted kickoff.
+		"kickoff beyond tolerance":           func(m *Match) { m.StartTime = m.StartTime.Add(4 * time.Hour) },
 		"different league":                   func(m *Match) { m.ProviderLeagueID++ },
 		"different season":                   func(m *Match) { m.ProviderSeasonID++ },
 		"different team IDs with same names": func(m *Match) { m.ProviderTeamAID++ },
@@ -166,5 +168,44 @@ func TestUpcomingAliasDedupLeavesLiveRecordsAndDemoFallbackAlone(t *testing.T) {
 	}
 	if got := svc.GetUpcomingMatches(context.Background()); len(got) != 1 || got[0].ID != old.ID {
 		t.Fatal("demo match suppressed real upcoming fixture")
+	}
+}
+
+// The provider can revise a scheduled start and reissue the fixture under a
+// fresh id, leaving two records whose kickoffs no longer agree. Zambia v
+// Nigeria shipped as 13:00 and 12:50 on the same day and showed twice.
+func TestUpcomingAliasMergesDriftedKickoff(t *testing.T) {
+	for name, drift := range map[string]time.Duration{
+		"ten minutes later":   10 * time.Minute,
+		"ten minutes earlier": -10 * time.Minute,
+		"at the tolerance":    listingStartTolerance,
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now().UTC()
+			old, current := duplicateListingFixtures(now)
+			current.StartTime = current.StartTime.Add(drift)
+			got := deduplicateUpcomingFixtures([]Match{old, current}, now)
+			if len(got) != 1 {
+				t.Fatalf("drifted kickoff was not merged: %+v", got)
+			}
+		})
+	}
+}
+
+// A cluster is measured from its first kickoff, so many small gaps cannot chain
+// two genuinely distinct fixtures into one card.
+func TestUpcomingAliasClustersDoNotChainAcrossTolerance(t *testing.T) {
+	now := time.Now().UTC()
+	first, second := duplicateListingFixtures(now)
+	third := second
+	third.ID = primitive.NewObjectID()
+	third.ProviderFixtureID = second.ProviderFixtureID + 1
+
+	second.StartTime = first.StartTime.Add(listingStartTolerance)
+	third.StartTime = first.StartTime.Add(2 * listingStartTolerance)
+
+	got := deduplicateUpcomingFixtures([]Match{first, second, third}, now)
+	if len(got) != 2 {
+		t.Fatalf("want two clusters (one merged pair, one separate), got %d: %+v", len(got), got)
 	}
 }
