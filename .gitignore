@@ -1,6 +1,4 @@
 # Environment & secrets
-.env
-.env.local
 .env.*.local
 
 # Go build outputs
@@ -24,7 +22,6 @@ go.work.sum
 
 # IDE & editors
 .idea/
-.vscode/
 *.swp
 *.swo
 *~
@@ -41,3 +38,5 @@ temp/
 
 # Docker / local overrides (keep Dockerfile tracked)
 docker-compose.override.yml
+config.bat
+node_modules
