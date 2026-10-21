@@ -104,6 +104,7 @@ func (s *Service) GetHomeMatches(ctx context.Context) []Match {
 	// act as a fallback that keeps the terminal populated between live fixtures.
 	fallback := make([]Match, 0)
 	now := time.Now().UTC()
+	all = deduplicateUpcomingFixtures(all, now)
 	for i := range all {
 		if all[i].Hidden {
 			continue
@@ -228,6 +229,7 @@ func (s *Service) GetUpcomingMatches(ctx context.Context) []Match {
 	}
 	upcoming := make([]Match, 0, len(all))
 	now := time.Now().UTC()
+	all = deduplicateUpcomingFixtures(all, now)
 	for i := range all {
 		if all[i].Hidden {
 			continue
